@@ -114,37 +114,30 @@ def _lookup_credo_log_prompt(bot_data: dict, *, chat_id: int, message_id: int) -
     return _credo_log_prompts(bot_data).get((chat_id, message_id))
 
 
-def _format_usage_by_users(database_path: str, card_name: str) -> str:
-    usages = list_credo_card_usage(database_path, card_name, limit=200)
-    if not usages:
-        return f"Used: {format_amount(0)}"
+def _count_credo_users(database_path: str, card_name: str) -> int:
+    usages = list_credo_card_usage(database_path, card_name, limit=500)
+    return len({entry.telegram_user_id for entry in usages})
 
-    totals: dict[int, tuple[float, str | None, str | None]] = {}
-    for entry in usages:
-        prev = totals.get(entry.telegram_user_id, (0.0, entry.telegram_username, entry.display_name))
-        totals[entry.telegram_user_id] = (
-            prev[0] + entry.amount,
-            entry.telegram_username or prev[1],
-            entry.display_name or prev[2],
-        )
 
-    parts: list[str] = []
-    for user_id, (amount, username, display_name) in sorted(
-        totals.items(), key=lambda item: item[1][0], reverse=True
-    ):
-        if username:
-            label = f"@{username}"
-        elif display_name:
-            label = display_name
-        else:
-            label = str(user_id)
-        parts.append(f"{format_amount(amount)} by {label}")
-    return "Used: " + ", ".join(parts)
+def _format_usage_people_count(database_path: str, card_name: str) -> str:
+    count = _count_credo_users(database_path, card_name)
+    if count == 1:
+        return "Used by 1 person"
+    return f"Used by {count} people"
+
+
+def _format_reply_required_notice() -> str:
+    return (
+        "🚨 **YOU MUST REPLY TO THIS MESSAGE** with how much you've sent "
+        "(e.g. `500` or `£500`).\n\n"
+        "**Do not skip this.** If you don't reply, the limit won't update and "
+        "everyone else will have the wrong balance — that causes problems for the whole team."
+    )
 
 
 def _format_card_limit_block(settings: Settings, card_name: str) -> str:
     used, capacity, remaining = _card_balance(settings, card_name)
-    usage_line = _format_usage_by_users(settings.database_path, card_name)
+    usage_line = _format_usage_people_count(settings.database_path, card_name)
     if capacity <= 0:
         return f"{usage_line}\n(No limit set on this account.)"
     return (
@@ -154,10 +147,10 @@ def _format_card_limit_block(settings: Settings, card_name: str) -> str:
 
 
 def _format_card_capacity(settings: Settings, card_name: str) -> str:
-    used, capacity, remaining = _card_balance(settings, card_name)
+    _, capacity, remaining = _card_balance(settings, card_name)
     if capacity <= 0:
         return f"{card_name} — no limit set"
-    usage_line = _format_usage_by_users(settings.database_path, card_name)
+    usage_line = _format_usage_people_count(settings.database_path, card_name)
     return (
         f"{card_name} — don't send more than {format_amount(remaining)}. "
         f"{usage_line.lower()}"
@@ -202,7 +195,7 @@ async def _prompt_choose_card(
     await message.reply_text(
         f"💳 **Credo cards**\n\n{_format_cards_list(settings, cards)}\n\n"
         "Pick one — the **photo** goes **only to your DMs**.\n"
-        "After that, **reply to the bot's message** with how much you've sent.\n\n"
+        "After that you **must reply to the bot's message** with how much you've sent.\n\n"
         "Tap a button or reply with a **number** (e.g. `1`).",
         parse_mode="Markdown",
         reply_markup=_card_keyboard(cards),
@@ -276,7 +269,7 @@ async def _deliver_credo_card(
     prompt_text = (
         f"✅ Sent **{card.name}** to your DMs.\n\n"
         f"{limit_block}\n\n"
-        "**Reply to this message** with how much you've sent (e.g. `500` or `£500`)."
+        f"{_format_reply_required_notice()}"
     )
 
     if sent_to_dm:
@@ -311,8 +304,8 @@ async def _deliver_credo_card(
         prompt = await reply_target.reply_text(
             f"Could not DM **{card.name}** — the card is **not** posted in this chat.\n\n"
             f"{limit_block}\n\n"
-            "Tap the button below, press **Start**, then send /credos again.\n"
-            "**Reply to this message** after you get the card with how much you've sent.",
+            "Tap the button below, press **Start**, then send /credos again.\n\n"
+            f"{_format_reply_required_notice()}",
             parse_mode="Markdown",
             reply_markup=keyboard,
         )
@@ -596,7 +589,8 @@ async def credo_reply_log_amount(update: Update, context: ContextTypes.DEFAULT_T
     amount = _parse_usage_amount(message.text)
     if amount is None:
         await message.reply_text(
-            "Reply with an amount like `500`, `£500`, or `5k`.",
+            "🚨 **Reply to the bot's message above** with the amount you sent "
+            "(e.g. `500` or `£500`). You must do this — don't skip it.",
             parse_mode="Markdown",
         )
         raise ApplicationHandlerStop
