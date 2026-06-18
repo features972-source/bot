@@ -28,6 +28,7 @@ from database import (
     get_payment_totals,
     list_links,
     list_payments_since,
+    list_all_payments,
     list_recent_payments,
     payment_message_exists,
     record_payment_out,
@@ -938,6 +939,11 @@ def _build_payments_summary_message(
         settings.database_path, since=since, cleared=False
     )
 
+    if since is not None:
+        lookup_records = list_payments_since(settings.database_path, since=since)
+    else:
+        lookup_records = list_all_payments(settings.database_path)
+
     totals_row = payment_totals_table_row(
         total_amount=total_amount,
         total_count=total_count,
@@ -959,6 +965,8 @@ def _build_payments_summary_message(
         table = format_payments_table(
             shown_records,
             totals_row=totals_row,
+            database_path=settings.database_path,
+            lookup_records=lookup_records,
             hidden_count=hidden,
         )
         summary = (

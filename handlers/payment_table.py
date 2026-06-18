@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 from datetime import datetime, timezone
 
-from database import PaymentRecord
+from database import PaymentRecord, list_links
 from handlers.stats_period import stats_timezone
 from money_format import format_amount
 
@@ -21,13 +21,34 @@ TABLE_WIDTHS = (12, 12, 18, 18, 6, 9)
 _COLUMN_SEP = " │ "
 
 
+def build_username_lookup(
+    database_path: str,
+    records: list[PaymentRecord],
+) -> dict[int, str]:
+    """Map telegram user id → username from links and payment rows."""
+    lookup: dict[int, str] = {}
+    for link in list_links(database_path):
+        if link.telegram_username:
+            lookup[link.telegram_user_id] = link.telegram_username.lstrip("@")
+    for record in records:
+        if record.finisher_username:
+            lookup[record.finisher_user_id] = record.finisher_username.lstrip("@")
+        if record.starter_user_id is not None and record.starter_username:
+            lookup[record.starter_user_id] = record.starter_username.lstrip("@")
+    return lookup
+
+
 def user_at_label(
     username: str | None,
     display_name: str | None,
     user_id: int,
+    *,
+    username_lookup: dict[int, str] | None = None,
 ) -> str:
     if username:
         return f"@{username.lstrip('@')}"
+    if username_lookup and user_id in username_lookup:
+        return f"@{username_lookup[user_id]}"
     if display_name:
         return display_name
     return str(user_id)
@@ -74,13 +95,18 @@ def format_table_divider() -> str:
     return "─┼─".join(segments)
 
 
-def payment_table_row(record: PaymentRecord) -> list[str]:
+def payment_table_row(
+    record: PaymentRecord,
+    *,
+    username_lookup: dict[int, str],
+) -> list[str]:
     starter = ""
     if record.starter_user_id is not None:
         starter = user_at_label(
             record.starter_username,
             record.starter_display_name,
             record.starter_user_id,
+            username_lookup=username_lookup,
         )
     return [
         format_amount(record.amount),
@@ -90,6 +116,7 @@ def payment_table_row(record: PaymentRecord) -> list[str]:
             record.finisher_username,
             record.finisher_display_name,
             record.finisher_user_id,
+            username_lookup=username_lookup,
         ),
         record.card_last4 or "",
         cleared_table_cell(record.cleared),
@@ -116,14 +143,23 @@ def format_payments_table(
     records: list[PaymentRecord],
     *,
     totals_row: list[str],
+    database_path: str,
+    lookup_records: list[PaymentRecord] | None = None,
     hidden_count: int = 0,
     hidden_suffix: str = "live list has full detail",
 ) -> str:
+    username_lookup = build_username_lookup(
+        database_path,
+        lookup_records if lookup_records is not None else records,
+    )
     lines = [
         format_table_row(list(TABLE_HEADERS)),
         format_table_divider(),
     ]
-    lines.extend(format_table_row(payment_table_row(record)) for record in records)
+    lines.extend(
+        format_table_row(payment_table_row(record, username_lookup=username_lookup))
+        for record in records
+    )
     lines.append(format_table_divider())
     lines.append(format_table_row(totals_row))
     if hidden_count > 0:

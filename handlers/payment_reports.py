@@ -84,6 +84,8 @@ def build_payment_report_text(settings: Settings) -> str:
         table = format_payments_table(
             shown,
             totals_row=totals_row,
+            database_path=settings.database_path,
+            lookup_records=all_records,
             hidden_count=hidden,
             hidden_suffix="see /payments",
         )
@@ -100,6 +102,8 @@ def build_payment_report_text(settings: Settings) -> str:
     table = format_payments_table(
         shown,
         totals_row=totals_row,
+        database_path=settings.database_path,
+        lookup_records=all_records,
         hidden_count=hidden,
         hidden_suffix="see /payments",
     )
