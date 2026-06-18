@@ -52,7 +52,8 @@ from database import (
 from handlers.admin_access import is_bot_admin, iter_bot_admin_user_ids, require_admin
 from handlers.payment_table import (
     format_image_subtitle,
-    render_payments_table_text,
+    render_payments_mobile_html,
+    render_payments_status_html,
     status_summary_totals,
     PAYMENTS_PAGE_SIZE,
 )
@@ -1117,23 +1118,18 @@ def _payments_summary_caption(
 ) -> str | None:
     caption_parts = []
     if since is not None:
-        caption_parts.append(
-            "This week’s payments · new week every Sunday\n"
-            "/alltimepayments — full history"
-        )
+        caption_parts.append("This week’s payments")
+        caption_parts.append("New week every Sunday · /alltimepayments for history")
     else:
-        caption_parts.append("All payments on record")
+        caption_parts.append("All payments")
     if page_info:
         caption_parts.append(page_info)
     elif total_pages > 1:
         caption_parts.append(
-            f"Page {page_index + 1} of {total_pages} · "
-            f"{PAYMENTS_PAGE_SIZE} per page — use buttons below"
+            f"Page {page_index + 1} of {total_pages} · tap buttons below"
         )
     if include_admin:
-        caption_parts.append(
-            "Admin: use # from table — /setcleared 12 · /setpayment 12 amount"
-        )
+        caption_parts.append("Admin: /setcleared # · /setpayment # amount")
     return "\n".join(caption_parts)
 
 
@@ -1288,13 +1284,20 @@ async def _deliver_payment_table_image(
     raise RuntimeError("Payment table upload failed with no error detail")
 
 
-def _payments_text_html(caption: str, table: str) -> str:
-    text = f"<b>{html.escape(caption)}</b>\n\n<pre>{html.escape(table)}</pre>"
+def _payments_message_html(caption: str, body_html: str) -> str:
+    text = f"<b>{html.escape(caption)}</b>\n\n{body_html}"
     if len(text) <= 4096:
         return text
     budget = max(500, 4096 - len(caption) - 30)
-    clipped = table[:budget].rstrip() + "\n…"
-    return f"<b>{html.escape(caption)}</b>\n\n<pre>{html.escape(clipped)}</pre>"
+    clipped_lines: list[str] = []
+    used = 0
+    for line in body_html.split("\n"):
+        if used + len(line) + 1 > budget - 5:
+            break
+        clipped_lines.append(line)
+        used += len(line) + 1
+    clipped_lines.append("…")
+    return f"<b>{html.escape(caption)}</b>\n\n" + "\n".join(clipped_lines)
 
 
 async def _deliver_payments_text_table(
@@ -1336,19 +1339,35 @@ async def _send_payments_text_fallback(
     page_records: list[PaymentRecord],
 ) -> None:
     total_count, total_amount = get_payment_totals(settings.database_path, since=since)
+    pending_count, pending_amount = get_payment_totals(
+        settings.database_path, since=since, pending=True
+    )
+    cleared_count, cleared_amount = get_payment_totals(
+        settings.database_path, since=since, cleared=True
+    )
+    not_cleared_count, not_cleared_amount = get_payment_totals(
+        settings.database_path, since=since, cleared=False
+    )
     if since is not None:
         lookup_records = list_payments_since(settings.database_path, since=since)
     else:
         lookup_records = list_all_payments(settings.database_path)
 
-    table = render_payments_table_text(
+    status_html = render_payments_status_html(
+        pending_amount=pending_amount,
+        pending_count=pending_count,
+        cleared_amount=cleared_amount,
+        cleared_count=cleared_count,
+        not_cleared_amount=not_cleared_amount,
+        not_cleared_count=not_cleared_count,
+    )
+    body = render_payments_mobile_html(
         page_records,
         database_path=settings.database_path,
         total_amount=total_amount,
         total_count=total_count,
         lookup_records=lookup_records,
-        totals_records=records,
-        full_excel=False,
+        status_html=status_html,
     )
     caption = _payments_summary_caption(
         since=since,
@@ -1357,7 +1376,7 @@ async def _send_payments_text_fallback(
         page_index=page_index,
         page_info=page_info,
     )
-    text = _payments_text_html(caption, table)
+    text = _payments_message_html(caption, body)
     await _deliver_payments_text_table(
         bot=message.get_bot(),
         message=message,
@@ -1466,21 +1485,37 @@ async def _send_payments_summary(
     )
 
     total_count, total_amount = get_payment_totals(settings.database_path, since=since)
+    pending_count, pending_amount = get_payment_totals(
+        settings.database_path, since=since, pending=True
+    )
+    cleared_count, cleared_amount = get_payment_totals(
+        settings.database_path, since=since, cleared=True
+    )
+    not_cleared_count, not_cleared_amount = get_payment_totals(
+        settings.database_path, since=since, cleared=False
+    )
     if since is not None:
         lookup_records = list_payments_since(settings.database_path, since=since)
     else:
         lookup_records = list_all_payments(settings.database_path)
 
-    table = render_payments_table_text(
+    status_html = render_payments_status_html(
+        pending_amount=pending_amount,
+        pending_count=pending_count,
+        cleared_amount=cleared_amount,
+        cleared_count=cleared_count,
+        not_cleared_amount=not_cleared_amount,
+        not_cleared_count=not_cleared_count,
+    )
+    body = render_payments_mobile_html(
         page_records,
         database_path=settings.database_path,
         total_amount=total_amount,
         total_count=total_count,
         lookup_records=lookup_records,
-        totals_records=records,
-        full_excel=False,
+        status_html=status_html,
     )
-    text = _payments_text_html(caption, table)
+    text = _payments_message_html(caption, body)
 
     try:
         await _deliver_payments_text_table(

@@ -34,7 +34,7 @@ TABLE_HEADERS_FULL = (
 
 TABLE_HEADERS = TABLE_HEADERS_FULL
 
-PAYMENTS_PAGE_SIZE = 20
+PAYMENTS_PAGE_SIZE = 10
 LIVE_REPORT_ROW_LIMIT = 12
 
 
@@ -367,3 +367,128 @@ def render_payments_table_text(
         max_widths=max_widths,
         right_align=right_align,
     )
+
+
+def format_payment_date_readable(iso_timestamp: str) -> str:
+    """Short friendly date for phone screens, e.g. 18 Jun 26."""
+    try:
+        text = iso_timestamp.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return iso_timestamp
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local = dt.astimezone(stats_timezone())
+    return local.strftime("%d %b %y")
+
+
+def format_status_summary_mobile(
+    *,
+    pending_amount: float,
+    pending_count: int,
+    cleared_amount: float,
+    cleared_count: int,
+    not_cleared_amount: float,
+    not_cleared_count: int,
+) -> str:
+    """Plain-text status lines (legacy); prefer render_payments_status_html."""
+    lines = [
+        f"🟧 Waiting — {format_amount(pending_amount)} ({pending_count})",
+        f"🟩 Cleared — {format_amount(cleared_amount)} ({cleared_count})",
+        f"🟥 Not cleared — {format_amount(not_cleared_amount)} ({not_cleared_count})",
+    ]
+    return "\n".join(lines)
+
+
+def render_payments_status_html(
+    *,
+    pending_amount: float,
+    pending_count: int,
+    cleared_amount: float,
+    cleared_count: int,
+    not_cleared_amount: float,
+    not_cleared_count: int,
+) -> str:
+    """Status breakdown with labels for the payments footer."""
+    rows = [
+        ("🟧 Waiting", format_amount(pending_amount), pending_count),
+        ("🟩 Cleared", format_amount(cleared_amount), cleared_count),
+        ("🟥 Not cleared", format_amount(not_cleared_amount), not_cleared_count),
+    ]
+    lines = ["<b>By status</b>"]
+    for label, amount, count in rows:
+        lines.append(
+            f"{label} — <b>{html.escape(amount)}</b> "
+            f"({html.escape(str(count))})"
+        )
+    return "\n".join(lines)
+
+
+def _mobile_labeled_line(label: str, value: str) -> str:
+    return f"<i>{html.escape(label)}</i>  {html.escape(value)}"
+
+
+def render_payments_mobile_html(
+    records: list[PaymentRecord],
+    *,
+    database_path: str,
+    total_amount: float,
+    total_count: int,
+    lookup_records: list[PaymentRecord] | None = None,
+    status_html: str | None = None,
+    total_label: str = "Total",
+) -> str:
+    """Card-style payment list for Telegram on narrow screens (no <pre>)."""
+    username_lookup = build_username_lookup(
+        database_path,
+        lookup_records if lookup_records is not None else records,
+    )
+    blocks: list[str] = []
+    for index, record in enumerate(records):
+        if index > 0:
+            blocks.append("")
+            blocks.append("────────────")
+            blocks.append("")
+
+        if record.starter_user_id is not None:
+            starter = sheet_user_label(
+                record.starter_username,
+                record.starter_display_name,
+                record.starter_user_id,
+                username_lookup=username_lookup,
+                compact=True,
+            )
+        else:
+            starter = "—"
+        finisher = sheet_user_label(
+            record.finisher_username,
+            record.finisher_display_name,
+            record.finisher_user_id,
+            username_lookup=username_lookup,
+            compact=True,
+        )
+        card = f"····{record.card_last4}" if record.card_last4 else "—"
+        amount = format_amount(record.amount)
+        date = format_payment_date_readable(record.created_at)
+        status = cleared_table_cell(record.cleared)
+
+        blocks.append(f"<b>{html.escape(amount)}</b>")
+        blocks.append(
+            f"<i>#{record.id}</i>  ·  <i>{html.escape(date)}</i>"
+        )
+        blocks.append(_mobile_labeled_line("Starter", starter))
+        blocks.append(_mobile_labeled_line("Finisher", finisher))
+        blocks.append(_mobile_labeled_line("Card", card))
+        blocks.append(f"<i>Status</i>  {status}")
+
+    count_label = f"{total_count} payment" + ("" if total_count == 1 else "s")
+    blocks.append("")
+    blocks.append("━━━━━━━━━━━━")
+    blocks.append(
+        f"<b>{html.escape(total_label)}: {html.escape(format_amount(total_amount))}</b>"
+    )
+    blocks.append(f"<i>{html.escape(count_label)}</i>")
+    if status_html:
+        blocks.append("")
+        blocks.append(status_html)
+    return "\n".join(blocks)
