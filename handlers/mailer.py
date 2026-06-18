@@ -202,16 +202,13 @@ def _credo_conversation_active(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 
 async def private_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Route private DM text: credo amount, mailer session, then credo picker."""
-    from handlers.credo import get_active_credo_session, try_log_active_credo_amount
+    """Route private DM text: mailer session, then credo hints."""
+    from handlers.credo import get_active_credo_session
 
     settings: Settings = context.bot_data["settings"]
     user = update.effective_user
     message = update.effective_message
     if not user or not message or not message.text:
-        return
-
-    if message.chat.type == "private" and await try_log_active_credo_amount(update, context):
         return
 
     if _credo_conversation_active(context):
