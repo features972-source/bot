@@ -21,7 +21,7 @@ from database import (
     set_payment_notify_message_id,
 )
 from handlers.admin_access import require_admin
-from handlers.payment_table_image import render_payments_table_png
+from handlers.payment_table_image import live_report_title, render_payments_table_png
 from handlers.stats_period import current_payment_week_start
 from instance_registry import get_instance, list_instances
 from money_format import format_amount
@@ -89,7 +89,7 @@ def build_payment_report_image(settings: Settings) -> bytes | None:
         total_amount=total_amount,
         total_count=total_count,
         lookup_records=all_records,
-        title=f"📊 {settings.bot_display_name}",
+        title=live_report_title(settings.bot_display_name),
         subtitle=period_label,
         status_summary=_status_summary(settings, since),
         hidden_count=hidden,

@@ -17,28 +17,48 @@ from payments_excel_export import format_payment_sheet_updated_note
 
 logger = logging.getLogger(__name__)
 
-# Telegram dark chat / code-block tones
-_BG = "#182533"
-_HEADER_BG = "#1f2c38"
-_HEADER_TEXT = "#6ab2f2"
-_BODY_TEXT = "#e4ecf2"
-_GRID = "#2a3944"
-_TOTAL_BG = "#1f2c38"
-_FOOTER_TEXT = "#8b9bab"
+# Render at 2× for sharp text on phone screens (Telegram compresses photos).
+_SCALE = 2
 
-_ROW_CLEARED = "#1a3d2a"
-_ROW_PENDING = "#3d3420"
-_ROW_NOT_CLEARED = "#3d2222"
-_TEXT_CLEARED = "#86efac"
-_TEXT_PENDING = "#fcd34d"
+# Telegram dark theme
+_BG = "#17212b"
+_HEADER_BG = "#232e3c"
+_HEADER_TEXT = "#ffffff"
+_BODY_TEXT = "#f0f4f8"
+_GRID = "#3d4f5f"
+_TOTAL_BG = "#232e3c"
+_FOOTER_TEXT = "#9db0c0"
+_TITLE_COLOR = "#ffffff"
+
+_ROW_CLEARED = "#1b4332"
+_ROW_PENDING = "#4a3f1a"
+_ROW_NOT_CLEARED = "#4a1f1f"
+_TEXT_CLEARED = "#6ee7a0"
+_TEXT_PENDING = "#fde047"
 _TEXT_NOT_CLEARED = "#fca5a5"
 
-_COL_WIDTHS = (92, 96, 148, 148, 52, 78)
-_ROW_H = 30
-_PAD = 14
-_TITLE_H = 36
-_FOOTER_H = 28
+_COL_WIDTHS = (108, 112, 168, 168, 58, 88)
+_ROW_H = 36
+_PAD = 18
+_TITLE_SIZE = 26
+_BODY_SIZE = 15
+_SMALL_SIZE = 13
 _MAX_ROWS = 40
+
+
+def live_report_title(bot_display_name: str) -> str:
+    """Top-left label for /setnotifypayments live image."""
+    label = (bot_display_name or "").lower()
+    if "q2" in label:
+        return "Q2 Payments"
+    if "q1" in label:
+        return "Q1 Payments"
+    name = (bot_display_name or "Payments").strip()
+    return name if name.lower().endswith("payments") else f"{name} Payments"
+
+
+def _s(value: int) -> int:
+    return value * _SCALE
 
 
 def _row_style(cleared: bool | None) -> tuple[str, str, str]:
@@ -49,19 +69,26 @@ def _row_style(cleared: bool | None) -> tuple[str, str, str]:
     return _ROW_NOT_CLEARED, _BODY_TEXT, _TEXT_NOT_CLEARED
 
 
-def _load_font(size: int):
+def _load_font(size: int, *, bold: bool = False):
     from PIL import ImageFont
 
-    candidates = [
+    regular = [
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
         Path("C:/Windows/Fonts/consola.ttf"),
         Path("C:/Windows/Fonts/segoeui.ttf"),
     ]
-    for path in candidates:
+    bold_paths = [
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        Path("C:/Windows/Fonts/segoeuib.ttf"),
+        Path("C:/Windows/Fonts/consolab.ttf"),
+    ]
+    paths = bold_paths + regular if bold else regular
+    scaled = _s(size)
+    for path in paths:
         if path.is_file():
             try:
-                return ImageFont.truetype(str(path), size)
+                return ImageFont.truetype(str(path), scaled)
             except OSError:
                 continue
     return ImageFont.load_default()
@@ -108,32 +135,40 @@ def render_payments_table_png(
         total_count=total_count,
     )
 
-    table_w = sum(_COL_WIDTHS) + _PAD * 2
-    n_rows = len(shown) + 2  # header + total
-    table_h = _TITLE_H + (n_rows * _ROW_H) + _FOOTER_H + _PAD * 2
-    if hidden_count > 0:
-        table_h += 22
-    if status_summary:
-        table_h += 22
+    col_w = [_s(w) for w in _COL_WIDTHS]
+    row_h = _s(_ROW_H)
+    pad = _s(_PAD)
+    table_w = sum(col_w) + pad * 2
+
+    title_block = _s(34)
+    subtitle_block = _s(22) if subtitle else 0
+    footer_lines = 1 + (1 if status_summary else 0) + (1 if hidden_count > 0 else 0)
+    footer_block = _s(24) * footer_lines + _s(8)
+
+    n_rows = len(shown) + 2
+    table_h = pad + title_block + subtitle_block + (n_rows * row_h) + footer_block + pad
 
     img = Image.new("RGB", (table_w, table_h), _BG)
     draw = ImageDraw.Draw(img)
-    font = _load_font(13)
-    font_bold = _load_font(13)
-    font_sm = _load_font(11)
 
-    y = _PAD
-    draw.text((_PAD, y), title, fill=_HEADER_TEXT, font=font_bold)
-    y += 18
+    font_title = _load_font(_TITLE_SIZE, bold=True)
+    font_body = _load_font(_BODY_SIZE)
+    font_header = _load_font(_BODY_SIZE, bold=True)
+    font_sm = _load_font(_SMALL_SIZE)
+
+    y = pad
+    draw.text((pad, y), title, fill=_TITLE_COLOR, font=font_title)
+    y += title_block
     if subtitle:
-        draw.text((_PAD, y), subtitle, fill=_FOOTER_TEXT, font=font_sm)
-        y += 16
-    y += 6
+        draw.text((pad, y), subtitle, fill=_FOOTER_TEXT, font=font_sm)
+        y += subtitle_block
 
-    x0 = _PAD
+    x0 = pad
     col_x = [x0]
-    for w in _COL_WIDTHS[:-1]:
+    for w in col_w[:-1]:
         col_x.append(col_x[-1] + w)
+
+    grid_w = max(_s(1), _SCALE)
 
     def draw_row(
         cells: list[str],
@@ -141,33 +176,30 @@ def render_payments_table_png(
         bg: str,
         text_color: str,
         cleared_col_color: str | None = None,
-        bold: bool = False,
+        header: bool = False,
     ) -> None:
         nonlocal y
-        f = font_bold if bold else font
-        draw.rectangle(
-            (x0, y, x0 + sum(_COL_WIDTHS), y + _ROW_H),
-            fill=bg,
-        )
-        for i, (cell, w) in enumerate(zip(cells, _COL_WIDTHS)):
-            cx = col_x[i] + 6
-            cy = y + 7
+        f = font_header if header else font_body
+        draw.rectangle((x0, y, x0 + sum(col_w), y + row_h), fill=bg)
+        for i, (cell, w) in enumerate(zip(cells, col_w)):
+            cx = col_x[i] + _s(10)
+            cy = y + _s(9)
             color = text_color
             if i == 5 and cleared_col_color:
                 color = cleared_col_color
-            label = _truncate(cell, f, w - 10, draw)
+            label = _truncate(cell, f, w - _s(14), draw)
             draw.text((cx, cy), label, fill=color, font=f)
-            if i < len(_COL_WIDTHS) - 1:
+            if i < len(col_w) - 1:
                 gx = col_x[i] + w
-                draw.line((gx, y, gx, y + _ROW_H), fill=_GRID, width=1)
+                draw.line((gx, y, gx, y + row_h), fill=_GRID, width=grid_w)
         draw.line(
-            (x0, y + _ROW_H, x0 + sum(_COL_WIDTHS), y + _ROW_H),
+            (x0, y + row_h, x0 + sum(col_w), y + row_h),
             fill=_GRID,
-            width=1,
+            width=grid_w,
         )
-        y += _ROW_H
+        y += row_h
 
-    draw_row(list(TABLE_HEADERS), bg=_HEADER_BG, text_color=_HEADER_TEXT, bold=True)
+    draw_row(list(TABLE_HEADERS), bg=_HEADER_BG, text_color=_HEADER_TEXT, header=True)
 
     for record in shown:
         cells = payment_table_row(record, username_lookup=username_lookup)
@@ -175,20 +207,20 @@ def render_payments_table_png(
         bg, txt, clr_txt = _row_style(record.cleared)
         draw_row(cells, bg=bg, text_color=txt, cleared_col_color=clr_txt)
 
-    draw_row(totals, bg=_TOTAL_BG, text_color=_BODY_TEXT, bold=True)
+    draw_row(totals, bg=_TOTAL_BG, text_color=_BODY_TEXT, header=True)
 
     if status_summary:
-        draw.text((_PAD, y + 4), status_summary, fill=_FOOTER_TEXT, font=font_sm)
-        y += 22
+        draw.text((pad, y + _s(6)), status_summary, fill=_FOOTER_TEXT, font=font_sm)
+        y += _s(24)
 
     if hidden_count > 0:
         note = f"+{hidden_count} more not shown"
-        draw.text((_PAD, y + 4), note, fill=_FOOTER_TEXT, font=font_sm)
-        y += 22
+        draw.text((pad, y + _s(6)), note, fill=_FOOTER_TEXT, font=font_sm)
+        y += _s(24)
 
-    footer = format_payment_sheet_updated_note()
-    draw.text((_PAD, y + 4), footer, fill=_FOOTER_TEXT, font=font_sm)
+    footer = f"{format_payment_sheet_updated_note()} · live"
+    draw.text((pad, y + _s(6)), footer, fill=_FOOTER_TEXT, font=font_sm)
 
     buf = BytesIO()
-    img.save(buf, format="PNG", optimize=True)
+    img.save(buf, format="PNG", compress_level=3)
     return buf.getvalue()
