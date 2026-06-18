@@ -1,5 +1,6 @@
 # Second bot instance: separate token, database, notify group, webhook port.
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "assert-cloud-only.ps1")
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $EnvFile = Join-Path $Root ".env.bot2"

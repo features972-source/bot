@@ -149,6 +149,10 @@ def ensure_stopped(key: str, timeout_s: float = 8.0) -> None:
 
 
 def start_instance(key: str) -> None:
+    from local_run import LOCAL_RUN_MESSAGE, local_run_blocked
+
+    if local_run_blocked():
+        raise RuntimeError(LOCAL_RUN_MESSAGE.replace("\n\n", " "))
     if key not in INSTANCES:
         raise ValueError(f"Unknown bot instance: {key}")
     inst = INSTANCES[key]

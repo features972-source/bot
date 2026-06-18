@@ -125,6 +125,9 @@ def main() -> None:
             asyncio.set_event_loop(asyncio.new_event_loop())
 
     global _instance_lock
+    from local_run import assert_cloud_run_or_exit
+
+    assert_cloud_run_or_exit()
     settings = load_settings()
     from money_format import init_currency
 

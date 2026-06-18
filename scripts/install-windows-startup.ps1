@@ -1,5 +1,6 @@
 # Register 3CX Telegram bot to start at Windows login (current user).
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "assert-cloud-only.ps1")
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $StartScript = Join-Path $Root "scripts\start-at-login.ps1"

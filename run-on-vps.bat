@@ -2,13 +2,6 @@
 setlocal
 cd /d "%~dp0"
 
-if not exist ".venv\Scripts\python.exe" (
-    echo Creating virtual environment...
-    py -3 -m venv .venv
-    .venv\Scripts\python.exe -m pip install -r requirements.txt -q
-)
-
-echo Starting 3CX Telegram bot (Call Control + optional webhook on port 8080)...
-echo Keep this window open. See 3CX-AI-SETUP.txt for configuration.
-echo.
-.venv\Scripts\python.exe bot.py
+echo Local bot runs are DISABLED. This bot runs on Render only.
+echo See scripts\disable-local-bot.ps1 or use the Render dashboard.
+exit /b 1

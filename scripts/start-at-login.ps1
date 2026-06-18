@@ -1,5 +1,6 @@
 # Starts 3CX Telegram bot (+ optional Cloudflare tunnel) at Windows login.
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "assert-cloud-only.ps1")
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 

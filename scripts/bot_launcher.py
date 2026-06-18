@@ -261,6 +261,13 @@ class LauncherApp:
 
 
 def main() -> None:
+    from local_run import LOCAL_RUN_MESSAGE, local_run_blocked
+
+    if local_run_blocked():
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("Cloud only", LOCAL_RUN_MESSAGE)
+        sys.exit(1)
     if not ROOT.is_dir():
         messagebox.showerror("Launcher", f"Bot folder not found: {ROOT}")
         sys.exit(1)

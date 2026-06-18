@@ -1,4 +1,6 @@
 # Shortcut on desktop to run the Python launcher (no EXE build needed).
+$ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "assert-cloud-only.ps1")
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Python = Join-Path $Root ".venv\Scripts\pythonw.exe"
 $Launcher = Join-Path $Root "scripts\bot_launcher.py"
