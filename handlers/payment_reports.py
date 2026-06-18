@@ -53,9 +53,43 @@ def build_payment_report_handlers() -> list:
 
 def _photo_file(image_bytes: bytes) -> BytesIO:
     bio = BytesIO(image_bytes)
-    bio.name = "payments.jpg"
+    bio.name = "payments.png"
     bio.seek(0)
     return bio
+
+
+async def _delete_notify_message(bot, chat_id: int, message_id: int) -> None:
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except BadRequest:
+        pass
+    except Exception:
+        logger.warning(
+            "Could not delete payment report message %s in chat %s",
+            message_id,
+            chat_id,
+        )
+
+
+async def _try_edit_photo(
+    bot, chat_id: int, message_id: int, image_bytes: bytes
+) -> bool:
+    try:
+        await bot.edit_message_media(
+            chat_id=chat_id,
+            message_id=message_id,
+            media=InputMediaPhoto(media=_photo_file(image_bytes)),
+        )
+        return True
+    except BadRequest as exc:
+        err = str(exc).lower()
+        if "message is not modified" in err:
+            return True
+        logger.debug("edit_message_media failed for msg %s: %s", message_id, exc)
+        return False
+    except Exception:
+        logger.exception("edit_message_media error for msg %s", message_id)
+        return False
 
 
 def _week_records(settings: Settings) -> tuple:
@@ -163,8 +197,8 @@ async def refresh_payment_report(bot, settings: Settings) -> None:
 
         if image_bytes is None:
             text = build_payment_report_empty_text(settings)
-            try:
-                if message_id is not None:
+            if message_id is not None:
+                try:
                     await bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=message_id,
@@ -172,13 +206,18 @@ async def refresh_payment_report(bot, settings: Settings) -> None:
                         parse_mode="HTML",
                     )
                     return
-            except BadRequest as exc:
-                err = str(exc).lower()
-                if "message is not modified" in err:
-                    return
-                logger.warning("Could not edit empty payment report: %s", exc)
-            except Exception:
-                logger.exception("Failed to edit empty payment report")
+                except BadRequest as exc:
+                    if "message is not modified" in str(exc).lower():
+                        return
+                    logger.debug(
+                        "Could not edit empty payment report msg %s: %s",
+                        message_id,
+                        exc,
+                    )
+                except Exception:
+                    logger.exception("Failed to edit empty payment report")
+                await _delete_notify_message(bot, chat_id, message_id)
+                message_id = None
             try:
                 sent = await bot.send_message(
                     chat_id=chat_id, text=text, parse_mode="HTML"
@@ -188,26 +227,10 @@ async def refresh_payment_report(bot, settings: Settings) -> None:
                 logger.exception("Failed to post empty payment report")
             return
 
-        media = InputMediaPhoto(media=_photo_file(image_bytes))
-        try:
-            if message_id is not None:
-                await bot.edit_message_media(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    media=media,
-                )
+        if message_id is not None:
+            if await _try_edit_photo(bot, chat_id, message_id, image_bytes):
                 return
-        except BadRequest as exc:
-            err = str(exc).lower()
-            if "message is not modified" in err:
-                return
-            logger.warning(
-                "Could not edit payment report image msg %s: %s — posting new",
-                message_id,
-                exc,
-            )
-        except Exception:
-            logger.exception("Failed to edit payment report image")
+            await _delete_notify_message(bot, chat_id, message_id)
 
         try:
             sent = await bot.send_photo(
@@ -302,8 +325,10 @@ async def setnotifypayments_callback(
     target_settings = get_instance(instance_id) or settings_ctx
 
     await query.answer()
+    old_chat_id = get_payment_notify_chat_id(target_settings.database_path)
     set_payment_notify_chat_id(target_settings.database_path, chat.id)
-    clear_payment_notify_message_id(target_settings.database_path)
+    if old_chat_id is None or old_chat_id != chat.id:
+        clear_payment_notify_message_id(target_settings.database_path)
 
     from handlers.admin_access import sync_bot_command_menu
 

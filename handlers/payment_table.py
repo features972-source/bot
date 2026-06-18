@@ -16,7 +16,7 @@ TABLE_HEADERS_COMPACT = (
     "Starter",
     "Finisher",
     "Card",
-    "Status",
+    "Cleared",
 )
 
 TABLE_HEADERS_FULL = (
@@ -205,7 +205,7 @@ def payment_table_row(
         record.card_last4 or "",
     ]
     if not full_excel:
-        return row + [format_status_label(record.cleared)]
+        return row + [format_cleared_label(record.cleared)]
 
     from payments_excel_export import centre_payout, finisher_payout, starter_payout
 

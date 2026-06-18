@@ -48,7 +48,7 @@ from database import (
     set_paidside_epoch,
     update_payment_cleared,
 )
-from handlers.admin_access import is_bot_admin, require_admin
+from handlers.admin_access import is_bot_admin, iter_bot_admin_user_ids, require_admin
 from handlers.payment_table import format_image_subtitle, status_summary_totals, PAYMENTS_PAGE_SIZE
 from handlers.payment_table_image import live_report_title, render_payments_table_png
 from handlers.stats_period import (
@@ -356,6 +356,24 @@ def _today_start_utc() -> datetime:
     return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def format_today_payment_admin_alert(
+    record: PaymentRecord,
+    *,
+    payment_count_today: int,
+    total_amount: float,
+) -> str:
+    user = _stored_user_label(
+        record.finisher_username,
+        record.finisher_display_name,
+        record.finisher_user_id,
+    )
+    return (
+        f"{user} scored a goal. "
+        f"Payment #{payment_count_today}. "
+        f"Total done today is {format_amount(total_amount)}"
+    )
+
+
 def format_today_payments_paragraph(records: list[PaymentRecord]) -> str:
     if not records:
         return "No payments logged today yet."
@@ -380,14 +398,33 @@ def _today_payment_records(settings: Settings) -> list[PaymentRecord]:
     return list_payments_since(settings.database_path, since=_today_start_utc())
 
 
-async def _pm_admin_today_payments(bot, settings: Settings) -> None:
-    if settings.admin_chat_id is None:
+async def _pm_admin_today_payments(
+    bot,
+    settings: Settings,
+    *,
+    latest: PaymentRecord | None = None,
+) -> None:
+    records = _today_payment_records(settings)
+    if not records:
         return
-    text = format_today_payments_paragraph(_today_payment_records(settings))
-    try:
-        await bot.send_message(chat_id=settings.admin_chat_id, text=text)
-    except Exception:
-        logger.exception("Could not PM admin today's payment summary")
+    count = len(records)
+    total_amount = sum(record.amount for record in records)
+    record = latest or records[-1]
+    text = format_today_payment_admin_alert(
+        record,
+        payment_count_today=count,
+        total_amount=total_amount,
+    )
+    admin_ids = iter_bot_admin_user_ids(settings, settings.database_path)
+    if not admin_ids:
+        return
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(chat_id=admin_id, text=text)
+        except Exception:
+            logger.exception(
+                "Could not PM admin %s today's payment summary", admin_id
+            )
 
 
 def _user_label(user) -> str:
@@ -674,7 +711,7 @@ async def _finalize_payment_out(
             "Shadow closer rank failed for user %s",
             pending.finisher_user_id,
         )
-    await _pm_admin_today_payments(context.bot, settings)
+    await _pm_admin_today_payments(context.bot, settings, latest=record)
     try:
         from handlers.payment_reports import schedule_payment_report_refresh
 
@@ -1049,22 +1086,27 @@ def _payments_summary_caption(
     since: datetime | None,
     include_admin: bool,
     total_pages: int = 1,
+    page_index: int = 0,
+    page_info: str = "",
 ) -> str | None:
     caption_parts = []
     if since is not None:
         caption_parts.append(
-            "<i>This week’s payments · new week every Sunday</i>\n"
-            "<i>/alltimepayments — full history</i>"
+            "This week’s payments · new week every Sunday\n"
+            "/alltimepayments — full history"
         )
     else:
-        caption_parts.append("<i>All payments on record</i>")
-    if total_pages > 1:
+        caption_parts.append("All payments on record")
+    if page_info:
+        caption_parts.append(page_info)
+    elif total_pages > 1:
         caption_parts.append(
-            f"<i>{PAYMENTS_PAGE_SIZE} per page — use buttons below to browse</i>"
+            f"Page {page_index + 1} of {total_pages} · "
+            f"{PAYMENTS_PAGE_SIZE} per page — use buttons below"
         )
     if include_admin:
         caption_parts.append(
-            "<i>Admin: use # from table in bot DM — /setcleared 12 · /setpayment 12 amount</i>"
+            "Admin: use # from table — /setcleared 12 · /setpayment 12 amount"
         )
     return "\n".join(caption_parts)
 
@@ -1118,11 +1160,11 @@ def _build_payments_summary_image(
         subtitle="",
         status_totals=status_totals,
         live=False,
-        full_excel=True,
+        full_excel=False,
         total_label=total_label,
         page_info=page_info,
     )
-    return png, page_index, total_pages
+    return png, page_index, total_pages, page_info
 
 
 async def _send_payments_summary(
@@ -1155,7 +1197,7 @@ async def _send_payments_summary(
     )
     scope = "week" if since is not None else "all"
     try:
-        png, page_index, total_pages = await asyncio.to_thread(
+        png, page_index, total_pages, page_info = await asyncio.to_thread(
             _build_payments_summary_image,
             settings,
             since=since,
@@ -1172,26 +1214,29 @@ async def _send_payments_summary(
         return
 
     caption = _payments_summary_caption(
-        since=since, include_admin=include_admin, total_pages=total_pages
+        since=since,
+        include_admin=include_admin,
+        total_pages=total_pages,
+        page_index=page_index,
+        page_info=page_info,
     )
     keyboard = _payments_page_keyboard(
         scope=scope, page=page_index, total_pages=total_pages
     )
 
     bio = BytesIO(png)
-    bio.name = "payments.jpg"
+    bio.name = "payments.png"
     bio.seek(0)
     try:
         if edit_message is not None:
             await edit_message.edit_media(
-                media=InputMediaPhoto(media=bio, caption=caption, parse_mode="HTML"),
+                media=InputMediaPhoto(media=bio, caption=caption),
                 reply_markup=keyboard,
             )
             return
         await message.reply_photo(
             photo=bio,
             caption=caption,
-            parse_mode="HTML",
             reply_markup=keyboard,
         )
     except Exception:
@@ -1506,7 +1551,6 @@ async def _set_payment_cleared_command(
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
-    await _pm_admin_today_payments(context.bot, settings)
     schedule_payments_excel_sync(settings)
     try:
         from handlers.payment_reports import schedule_payment_report_refresh
@@ -1555,7 +1599,6 @@ async def setpayment_command(
                                 parse_mode="HTML",
                                 disable_web_page_preview=True,
                             )
-                            await _pm_admin_today_payments(context.bot, settings)
                             schedule_payments_excel_sync(settings)
                             try:
                                 from handlers.payment_reports import (
@@ -1627,7 +1670,6 @@ async def setpayment_command(
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
-    await _pm_admin_today_payments(context.bot, settings)
     schedule_payments_excel_sync(settings)
     try:
         from handlers.payment_reports import schedule_payment_report_refresh
@@ -1688,7 +1730,6 @@ async def removepayment_command(
         f"(#{payment_id}) from the payment list.",
         parse_mode="HTML",
     )
-    await _pm_admin_today_payments(context.bot, settings)
     schedule_payments_excel_sync(settings)
     try:
         from handlers.payment_reports import schedule_payment_report_refresh
@@ -1894,9 +1935,8 @@ async def todaypayments_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     records = list_payments_since(settings.database_path, since=_today_start_utc())
     text = format_today_payments_paragraph(records)
-    await _pm_admin_today_payments(context.bot, settings)
     await update.effective_message.reply_text(
-        f"Sent today's summary to your DM.\n\n{text}"
+        f"Today's summary:\n\n{text}"
     )
 
 

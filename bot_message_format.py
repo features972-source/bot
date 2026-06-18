@@ -20,7 +20,12 @@ def bold_text(text: str | None, parse_mode: str | None) -> tuple[str | None, str
         stripped = raw.strip()
         if stripped.startswith("**") and stripped.endswith("**"):
             return raw, parse_mode
+        if "`" in raw or "\n*" in raw:
+            return raw, parse_mode
         return f"**{raw}**", parse_mode
+
+    if "<" in raw and ">" in raw:
+        return raw, parse_mode or "HTML"
 
     stripped = raw.strip()
     if stripped.startswith("<b>") and stripped.endswith("</b>"):
