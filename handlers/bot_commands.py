@@ -79,8 +79,8 @@ def _format_help_text(
             "/ready — shift ready check (headset, softphone, credo, mail)\n\n"
             "<b>🚫 Blacklist</b>\n"
             "/blacklist @user reason · /unblacklist @user · /blacklisted\n\n"
-            "<b>💳 Credo</b>\n"
-            "/credo · /addcredouser · /removecredouser · /credousers\n"
+            "<b>💳 Credos</b>\n"
+            "/credos · /addcredouser · /removecredouser · /credousers\n"
             "/addcredocard · /removecredocard · /listcredocards\n"
             f"/mail — {mailer_name} in DM · /maildone to stop\n"
             "/maillogs — recent /mail audit trail (admin)\n\n"
@@ -91,7 +91,7 @@ def _format_help_text(
     if credo:
         return (
             f"💳 <b>Credo & {mailer_name}</b>\n\n"
-            "/credo — pick a card (sent to your DMs)\n"
+            "/credos — view cards & capacity, pick one (DM)\n"
             f"/mail — open {mailer_name} via the bot (DM only)\n"
             "/maildone — end mailer session\n"
             "/cancel — cancel an in-progress flow"
@@ -133,10 +133,10 @@ async def _send_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if context.args and context.args[0] == "credo":
-        from handlers.credo import credo_start_resume
+    if context.args and context.args[0] in {"credos", "credo"}:
+        from handlers.credo import credos_start_resume
 
-        await credo_start_resume(update, context)
+        await credos_start_resume(update, context)
         return
 
     settings: Settings = context.bot_data["settings"]
@@ -157,7 +157,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         from handlers.credo import is_credo_allowed
 
         if is_credo_allowed(settings, settings.database_path, user.id):
-            text = "💳 <b>Credo bot</b>\n\nSend /credo to pick a card, or /help for commands."
+            text = "💳 <b>Credos</b>\n\nSend /credos to view cards and capacity, or /help for commands."
         else:
             text = (
                 f"📱 <b>{bot_name}</b>\n\n"

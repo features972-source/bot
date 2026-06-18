@@ -34,7 +34,9 @@ MENU_BOT_COMMANDS = [
 
 ADMIN_BOT_COMMANDS = MENU_BOT_COMMANDS
 
-CREDO_USER_COMMANDS = MENU_BOT_COMMANDS
+CREDO_USER_COMMANDS = MENU_BOT_COMMANDS + [
+    BotCommand("credos", "View credo cards & capacity"),
+]
 
 NOTIFY_GROUP_COMMANDS = [
     BotCommand("out", "Log payment (reply + /out 5182)"),

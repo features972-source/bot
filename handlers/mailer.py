@@ -189,7 +189,7 @@ async def mailer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def private_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Route private DM text: active mailer session first, then credo picker."""
-    from handlers.credo import credo_choose_text
+    from handlers.credo import credos_choose_text as credo_choose_text
 
     settings: Settings = context.bot_data["settings"]
     user = update.effective_user
