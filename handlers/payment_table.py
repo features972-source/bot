@@ -35,6 +35,7 @@ TABLE_HEADERS_FULL = (
 TABLE_HEADERS = TABLE_HEADERS_FULL
 
 PAYMENTS_PAGE_SIZE = 20
+LIVE_REPORT_ROW_LIMIT = 12
 
 
 def table_headers(*, full_excel: bool = True) -> tuple[str, ...]:
@@ -64,10 +65,15 @@ def sheet_user_label(
     user_id: int,
     *,
     username_lookup: dict[int, str] | None = None,
+    compact: bool = False,
 ) -> str:
     """Match Excel export: display name first, then @username."""
+    if compact and username:
+        return f"@{username.lstrip('@')}"
     name = (display_name or "").strip()
     if name:
+        if compact and " " in name:
+            return name.split()[0]
         return name
     if username:
         return f"@{username.lstrip('@')}"
@@ -160,13 +166,14 @@ def status_summary_totals(
 def format_image_footer(*, live: bool = False) -> str:
     from payments_excel_export import payment_sheet_footer_note
 
-    note = payment_sheet_footer_note()
     if live:
-        return f"{note} · updates automatically when payments change"
-    return note
+        now_local = datetime.now(timezone.utc).astimezone(stats_timezone())
+        stamp = now_local.strftime(f"{now_local.day} %b %H:%M")
+        return f"Updated {stamp} · auto-updates"
+    return payment_sheet_footer_note()
 
 
-def format_payment_date(iso_timestamp: str) -> str:
+def format_payment_date(iso_timestamp: str, *, compact: bool = False) -> str:
     try:
         text = iso_timestamp.replace("Z", "+00:00")
         dt = datetime.fromisoformat(text)
@@ -174,7 +181,10 @@ def format_payment_date(iso_timestamp: str) -> str:
         return iso_timestamp
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(stats_timezone()).strftime("%d/%m/%Y")
+    local = dt.astimezone(stats_timezone())
+    if compact:
+        return local.strftime("%d/%m/%y")
+    return local.strftime("%d/%m/%Y")
 
 
 def payment_table_row(
@@ -182,6 +192,7 @@ def payment_table_row(
     *,
     username_lookup: dict[int, str],
     full_excel: bool = True,
+    compact_names: bool = False,
 ) -> list[str]:
     starter = ""
     if record.starter_user_id is not None:
@@ -190,17 +201,19 @@ def payment_table_row(
             record.starter_display_name,
             record.starter_user_id,
             username_lookup=username_lookup,
+            compact=compact_names,
         )
     row = [
         f"#{record.id}",
         format_amount(record.amount),
-        format_payment_date(record.created_at),
+        format_payment_date(record.created_at, compact=compact_names),
         starter,
         sheet_user_label(
             record.finisher_username,
             record.finisher_display_name,
             record.finisher_user_id,
             username_lookup=username_lookup,
+            compact=compact_names,
         ),
         record.card_last4 or "",
     ]

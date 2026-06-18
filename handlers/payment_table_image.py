@@ -15,9 +15,16 @@ from handlers.payment_table import (
     table_headers,
 )
 
-_SCALE = 2
+_SCALE = 1
+_CHAT_TARGET_WIDTH = 640
 
-# Dark professional palette
+# Tuned for Telegram inline preview (narrow image, readable text at chat width)
+_ROW_H = 30
+_PAD = 10
+_TITLE_SIZE = 18
+_BODY_SIZE = 17
+_STAMP_SIZE = 12
+_CELL_PAD = 8
 _BG = "#0d1117"
 _SHEET_BG = "#161b22"
 _SHEET_BORDER = "#30363d"
@@ -40,18 +47,11 @@ _ROW_CLEARED_TEXT = "#d4f5dc"
 _ROW_PENDING_TEXT = "#f5e6b8"
 _ROW_NOT_CLEARED_TEXT = "#f5d0d4"
 
-_ROW_H = 42
-_PAD = 16
-_TITLE_SIZE = 22
-_BODY_SIZE = 20
-_STAMP_SIZE = 16
-_CELL_PAD = 16
-
 _ID_COL = 0
 _CARD_COL = 5
 _CLEARED_COL = 6
-_MIN_COL_WIDTHS_FULL = (72, 120, 96, 140, 140, 80, 88, 96, 104, 96)
-_MIN_COL_WIDTHS_COMPACT = (72, 120, 96, 140, 140, 80, 88)
+_MIN_COL_WIDTHS_FULL = (52, 88, 72, 88, 88, 52, 60, 72, 80, 72)
+_MIN_COL_WIDTHS_COMPACT = (52, 88, 72, 88, 88, 52, 60)
 
 
 def live_report_title(bot_display_name: str) -> str:
@@ -65,7 +65,10 @@ def live_report_title(bot_display_name: str) -> str:
 
 
 def _s(value: int) -> int:
-    return value * _SCALE
+    return max(1, int(round(value * _SCALE * _RENDER_SCALE)))
+
+
+_RENDER_SCALE = 1.0
 
 
 @lru_cache(maxsize=16)
@@ -202,6 +205,9 @@ def render_payments_table_png(
     _ = status_totals
     _ = page_info  # shown in Telegram caption, not inside the image
 
+    global _RENDER_SCALE
+    compact_names = not full_excel
+
     username_lookup = build_username_lookup(
         database_path,
         lookup_records if lookup_records is not None else records,
@@ -215,26 +221,42 @@ def render_payments_table_png(
         total_label=total_label,
     )
 
-    header_cells = list(table_headers(full_excel=full_excel))
-    body_rows = [
-        payment_table_row(record, username_lookup=username_lookup, full_excel=full_excel)
-        for record in shown
-    ]
-
+    col_w: list[int] = []
+    header_cells: list[str] = []
+    body_rows: list[list[str]] = []
     stamp_text = format_image_footer(live=live)
 
-    measure_rows: list[tuple[list[str], bool, bool, bool]] = [
-        (header_cells, True, False, False),
-        *[(row, False, False, False) for row in body_rows],
-        (totals, False, True, False),
-    ]
+    for pass_num in range(2):
+        _RENDER_SCALE = (
+            1.0
+            if pass_num == 0
+            else min(1.0, _CHAT_TARGET_WIDTH / max(sum(col_w), 1))
+        )
 
-    probe = Image.new("RGB", (4, 4), _BG)
-    probe_draw = ImageDraw.Draw(probe)
-    min_widths = _MIN_COL_WIDTHS_FULL if full_excel else _MIN_COL_WIDTHS_COMPACT
-    col_w = _measure_col_widths(probe_draw, measure_rows, min_widths=min_widths)
-    _fit_id_column(probe_draw, col_w, body_rows)
-    _fit_header_columns(probe_draw, col_w, header_cells)
+        header_cells = list(table_headers(full_excel=full_excel))
+        body_rows = [
+            payment_table_row(
+                record,
+                username_lookup=username_lookup,
+                full_excel=full_excel,
+                compact_names=compact_names,
+            )
+            for record in shown
+        ]
+        measure_rows: list[tuple[list[str], bool, bool, bool]] = [
+            (header_cells, True, False, False),
+            *[(row, False, False, False) for row in body_rows],
+            (totals, False, True, False),
+        ]
+
+        probe = Image.new("RGB", (4, 4), _BG)
+        probe_draw = ImageDraw.Draw(probe)
+        min_widths = _MIN_COL_WIDTHS_FULL if full_excel else _MIN_COL_WIDTHS_COMPACT
+        col_w = _measure_col_widths(probe_draw, measure_rows, min_widths=min_widths)
+        _fit_id_column(probe_draw, col_w, body_rows)
+        _fit_header_columns(probe_draw, col_w, header_cells)
+        if sum(col_w) <= _CHAT_TARGET_WIDTH:
+            break
 
     pad = _s(_PAD)
     table_inner_w = sum(col_w)
