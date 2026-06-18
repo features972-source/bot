@@ -46,6 +46,8 @@ PHOTO_FILTER = filters.PHOTO | filters.Document.IMAGE
 CALLBACK_CARD_PREFIX = "credocard:"
 CREDO_LOG_PROMPT_KEY = "credo_log_prompts"
 CREDO_LOG_ORIGIN_KEY = "credo_log_origins"
+CREDO_PICKER_COMMANDS = ("cc", "creditcard", "credo", "credos")
+CREDO_START_ARGS = frozenset(CREDO_PICKER_COMMANDS)
 
 UNAUTHORIZED = (
     "You are not on the credo whitelist. Ask an admin to add you with /addcredouser."
@@ -53,7 +55,7 @@ UNAUTHORIZED = (
 CANCELLED = "Credo cancelled. Send /credos when you want to try again."
 NO_CARDS = (
     "No credit cards are set up yet.\n\n"
-    "An admin can add one with /addcredocard (step by step: name → limit → photo)."
+    "An admin can add one with /addcredo (step by step: name → limit → photo)."
 )
 
 
@@ -268,7 +270,7 @@ async def _deliver_credo_card(
     card = get_credo_credit_card(settings.database_path, card_name)
     if card is None or not card.photo_file_id:
         await reply_target.reply_text(
-            f"**{card_name}** is not set up. An admin can add it with /addcredocard.",
+            f"**{card_name}** is not set up. An admin can add it with /addcredo.",
             parse_mode="Markdown",
         )
         return ConversationHandler.END
@@ -310,9 +312,7 @@ async def _deliver_credo_card(
         )
         if origin_chat_id is not None:
             await reply_target.reply_text(
-                f"Sent **{card.name}** to your DMs get worksy! 🔥\n\n"
-                "Check your **DMs** — you **must reply there** with how much you've sent. "
-                "Not in this chat.",
+                f"Sent **{card.name}** to your DMs get worksy! 🔥\n\nCheck your **DMs**",
                 parse_mode="Markdown",
             )
             prompt = await bot.send_message(
@@ -442,8 +442,8 @@ def build_credo_handlers() -> list:
     ]
     user_conversation = ConversationHandler(
         entry_points=[
-            CommandHandler("credos", credos_start),
-            CommandHandler("credo", credos_start),
+            CommandHandler(command, credos_start)
+            for command in CREDO_PICKER_COMMANDS
         ],
         states={
             State.CHOOSE: [
@@ -456,7 +456,7 @@ def build_credo_handlers() -> list:
         name="credo_user",
     )
     add_card_conversation = ConversationHandler(
-        entry_points=[CommandHandler("addcredocard", addcredocard_start)],
+        entry_points=[CommandHandler("addcredo", addcredocard_start)],
         states={
             AddCardState.NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, addcredocard_receive_name)
@@ -493,14 +493,14 @@ def build_credo_handlers() -> list:
         CommandHandler("addcredouser", addcredouser_command),
         CommandHandler("removecredouser", removecredouser_command),
         CommandHandler("credousers", credousers_command),
-        CommandHandler("removecredocard", removecredocard_command),
+        CommandHandler("removecredo", removecredocard_command),
         CommandHandler("listcredocards", listcredocards_command),
     ]
 
 
 async def credos_start_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Deliver pending card after user opens bot via t.me/Bot?start=credos."""
-    if not context.args or context.args[0] not in {"credos", "credo"}:
+    if not context.args or context.args[0] not in CREDO_START_ARGS:
         return
 
     settings: Settings = context.bot_data["settings"]
@@ -593,11 +593,10 @@ async def credos_choose_callback(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
     card_name = cards[index]
-    limit_block = _format_card_limit_block(settings, card_name)
-    await query.edit_message_text(
-        f"Selected: **{card_name}**\n\n{limit_block}",
-        parse_mode="Markdown",
-    )
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
     target = query.message
     if not target:
         return ConversationHandler.END
@@ -822,7 +821,7 @@ async def removecredocard_command(update: Update, context: ContextTypes.DEFAULT_
 
     name = " ".join(context.args).strip()
     if not name:
-        await update.effective_message.reply_text("Usage: /removecredocard Visa")
+        await update.effective_message.reply_text("Usage: /removecredo Visa")
         return
 
     if not remove_credo_credit_card(settings.database_path, name):

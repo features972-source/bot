@@ -81,8 +81,9 @@ def _format_help_text(
             "<b>🚫 Blacklist</b>\n"
             "/blacklist @user reason · /unblacklist @user · /blacklisted\n\n"
             "<b>💳 Credos</b>\n"
-            "/credos · /addcredouser · /removecredouser · /credousers\n"
-            "/addcredocard · /removecredocard · /listcredocards\n"
+            "/cc · /creditcard · /credo · /credos\n"
+            "/addcredouser · /removecredouser · /credousers\n"
+            "/addcredo · /removecredo · /listcredocards\n"
             f"/mail — {mailer_name} in DM · /maildone to stop\n"
             "/maillogs — recent /mail audit trail (admin)\n\n"
             "<i>Tip: reply to notes or ON CALL with 5182 out — or /out 5182 "
@@ -92,7 +93,8 @@ def _format_help_text(
     if credo:
         return (
             f"💳 <b>Credo & {mailer_name}</b>\n\n"
-            "/credos — view cards & capacity, pick one (DM)\n"
+            "/cc — view cards & capacity, pick one (DM)\n"
+            "(also /creditcard, /credo, /credos)\n"
             "You must reply in your DMs with how much you've sent\n"
             f"/mail — open {mailer_name} via the bot (DM only)\n"
             "/maildone — end mailer session\n"
@@ -135,11 +137,12 @@ async def _send_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if context.args and context.args[0] in {"credos", "credo"}:
-        from handlers.credo import credos_start_resume
+    if context.args:
+        from handlers.credo import CREDO_START_ARGS, credos_start_resume
 
-        await credos_start_resume(update, context)
-        return
+        if context.args[0] in CREDO_START_ARGS:
+            await credos_start_resume(update, context)
+            return
 
     settings: Settings = context.bot_data["settings"]
     user = update.effective_user
@@ -159,7 +162,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         from handlers.credo import is_credo_allowed
 
         if is_credo_allowed(settings, settings.database_path, user.id):
-            text = "💳 <b>Credos</b>\n\nSend /credos to view cards and capacity, or /help for commands."
+            text = "💳 <b>Credos</b>\n\nSend /cc (or /credos) to view cards and capacity, or /help for commands."
         else:
             text = (
                 f"📱 <b>{bot_name}</b>\n\n"
