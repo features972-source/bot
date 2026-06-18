@@ -1446,6 +1446,20 @@ def sum_credo_card_usage(path: str, card_name: str) -> float:
     return float(row[0] or 0)
 
 
+def count_credo_card_usage_entries(path: str, card_name: str) -> int:
+    cleaned = card_name.strip()
+    with _connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM credo_card_usage
+            WHERE card_name = ? COLLATE NOCASE
+            """,
+            (cleaned,),
+        ).fetchone()
+    return int(row[0] or 0)
+
+
 def record_credo_card_usage(
     path: str,
     *,

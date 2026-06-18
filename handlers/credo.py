@@ -33,6 +33,7 @@ from database import (
     remove_credo_whitelist_user,
     save_credo_profile,
     sum_credo_card_usage,
+    count_credo_card_usage_entries,
     upsert_credo_credit_card,
 )
 from handlers.admin_access import (
@@ -262,6 +263,13 @@ def _count_credo_users(database_path: str, card_name: str) -> int:
     return len({entry.telegram_user_id for entry in usages})
 
 
+def _format_usage_times(database_path: str, card_name: str) -> str:
+    count = count_credo_card_usage_entries(database_path, card_name)
+    if count == 1:
+        return "1 time"
+    return f"{count} times"
+
+
 def _format_usage_people_count(database_path: str, card_name: str) -> str:
     count = _count_credo_users(database_path, card_name)
     if count == 1:
@@ -306,14 +314,19 @@ def _format_cards_list(settings: Settings, cards: list[str]) -> str:
     return "\n".join(_format_card_capacity(settings, name) for name in cards)
 
 
-def _card_keyboard(cards: list[str], database_path: str) -> InlineKeyboardMarkup:
-    labels = _card_display_labels(database_path)
+def _card_keyboard(cards: list[str], settings: Settings) -> InlineKeyboardMarkup:
+    labels = _card_display_labels(settings.database_path)
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for index, name in enumerate(cards):
-        label = labels.get(name, name)
-        if len(label) > 32:
-            label = f"{label[:29]}…"
+        display = labels.get(name, name)
+        _, capacity, remaining = _card_balance(settings, name)
+        if capacity > 0:
+            label = f"{display} · {format_amount(remaining)} left"
+        else:
+            label = display
+        if len(label) > 64:
+            label = f"{label[:61]}…"
         row.append(
             InlineKeyboardButton(label, callback_data=f"{CALLBACK_CARD_PREFIX}{index}")
         )
@@ -338,8 +351,8 @@ async def _prompt_choose_card(
 
     context.user_data["credo_cards"] = cards
     await message.reply_text(
-        "💳",
-        reply_markup=_card_keyboard(cards, settings.database_path),
+        "💳 Pick a card — amount left shown on each button:",
+        reply_markup=_card_keyboard(cards, settings),
     )
     return State.CHOOSE
 
@@ -518,10 +531,10 @@ async def _log_card_usage(
         display_name=_display_name(user),
         amount=amount,
     )
-    user_label = _user_label(user)
     limit_block = _format_card_limit_block(settings, card_name)
+    usage_times = _format_usage_times(settings.database_path, card_name)
     summary = (
-        f"📊 **{display_label}** — {user_label} logged {format_amount(amount)}.\n\n"
+        f"📊 **{display_label}** has been used ({usage_times}).\n\n"
         f"{limit_block}"
     )
     await message.reply_text(
