@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass
 from enum import IntEnum, auto
@@ -154,6 +155,61 @@ def get_credo_credit_cards(settings: Settings) -> list[str]:
     return cards
 
 
+def _base_card_name(name: str) -> str:
+    """Strip a trailing #N suffix so Lloyds #2 groups with Lloyds."""
+    cleaned = name.strip()
+    without_suffix = re.sub(r"\s+#\s*\d+$", "", cleaned, flags=re.IGNORECASE).strip()
+    return without_suffix or cleaned
+
+
+def _card_display_labels(database_path: str) -> dict[str, str]:
+    """Map DB card names to user-facing labels (Lloyds #1 when multiples exist)."""
+    cards = [c for c in list_credo_credit_cards(database_path) if c.photo_file_id]
+    groups: dict[str, list] = {}
+    for card in cards:
+        base = _base_card_name(card.name)
+        groups.setdefault(base.lower(), []).append(card)
+
+    labels: dict[str, str] = {}
+    for group in groups.values():
+        group.sort(key=lambda c: (c.added_at or "", c.name.lower()))
+        base = _base_card_name(group[0].name)
+        if len(group) == 1:
+            labels[group[0].name] = base
+        else:
+            for index, card in enumerate(group, start=1):
+                labels[card.name] = f"{base} #{index}"
+    return labels
+
+
+def _format_card_label(database_path: str, card_name: str) -> str:
+    labels = _card_display_labels(database_path)
+    cleaned = card_name.strip()
+    if cleaned in labels:
+        return labels[cleaned]
+    lowered = cleaned.lower()
+    for db_name, label in labels.items():
+        if db_name.lower() == lowered:
+            return label
+    return cleaned
+
+
+def _allocate_card_name(database_path: str, desired: str) -> str:
+    """Pick a unique DB name; append #2, #3… when the base name already exists."""
+    desired = desired.strip()
+    if not desired:
+        return desired
+    base = _base_card_name(desired)
+    existing = list_credo_credit_cards(database_path)
+    for card in existing:
+        if card.name.lower() == desired.lower():
+            return card.name
+    same_base = [c for c in existing if _base_card_name(c.name).lower() == base.lower()]
+    if not same_base:
+        return desired
+    return f"{base} #{len(same_base) + 1}"
+
+
 def _card_balance(settings: Settings, card_name: str) -> tuple[float, float, float]:
     """Return (used, capacity, remaining) for a card."""
     card = get_credo_credit_card(settings.database_path, card_name)
@@ -235,12 +291,13 @@ def _format_card_limit_block(settings: Settings, card_name: str) -> str:
 
 
 def _format_card_capacity(settings: Settings, card_name: str) -> str:
+    label = _format_card_label(settings.database_path, card_name)
     _, capacity, remaining = _card_balance(settings, card_name)
     if capacity <= 0:
-        return f"{card_name} — no limit set"
+        return f"{label} — no limit set"
     usage_line = _format_usage_people_count(settings.database_path, card_name)
     return (
-        f"{card_name} — don't send more than {format_amount(remaining)}. "
+        f"{label} — don't send more than {format_amount(remaining)}. "
         f"{usage_line.lower()}"
     )
 
@@ -249,11 +306,14 @@ def _format_cards_list(settings: Settings, cards: list[str]) -> str:
     return "\n".join(_format_card_capacity(settings, name) for name in cards)
 
 
-def _card_keyboard(cards: list[str]) -> InlineKeyboardMarkup:
+def _card_keyboard(cards: list[str], database_path: str) -> InlineKeyboardMarkup:
+    labels = _card_display_labels(database_path)
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for index, name in enumerate(cards):
-        label = name if len(name) <= 32 else f"{name[:29]}…"
+        label = labels.get(name, name)
+        if len(label) > 32:
+            label = f"{label[:29]}…"
         row.append(
             InlineKeyboardButton(label, callback_data=f"{CALLBACK_CARD_PREFIX}{index}")
         )
@@ -279,7 +339,7 @@ async def _prompt_choose_card(
     context.user_data["credo_cards"] = cards
     await message.reply_text(
         "💳",
-        reply_markup=_card_keyboard(cards),
+        reply_markup=_card_keyboard(cards, settings.database_path),
     )
     return State.CHOOSE
 
@@ -306,15 +366,17 @@ async def _deliver_credo_card(
 
     card = get_credo_credit_card(settings.database_path, card_name)
     if card is None or not card.photo_file_id:
+        label = _format_card_label(settings.database_path, card_name)
         await reply_target.reply_text(
-            f"**{card_name}** is not set up. An admin can add it with /addcredo.",
+            f"**{label}** is not set up. An admin can add it with /addcredo.",
             parse_mode="Markdown",
         )
         return ConversationHandler.END
 
     used, capacity, remaining = _card_balance(settings, card_name)
     limit_block = _format_card_limit_block(settings, card_name)
-    dm_caption = _format_dm_photo_caption(card.name, limit_block)
+    display_label = _format_card_label(settings.database_path, card.name)
+    dm_caption = _format_dm_photo_caption(display_label, limit_block)
     sent_to_dm = False
 
     try:
@@ -350,7 +412,7 @@ async def _deliver_credo_card(
         )
         if origin_chat_id is not None:
             group_text = (
-                f"Sent **{card.name}** to your DMs get worksy! 🔥\n\nCheck your **DMs**"
+                f"Sent **{display_label}** to your DMs get worksy! 🔥\n\nCheck your **DMs**"
             )
             if edit_in_place:
                 try:
@@ -385,7 +447,7 @@ async def _deliver_credo_card(
         except Exception:
             pass
         fail_text = (
-            f"Could not DM **{card.name}** — the card is **not** posted in this chat.\n\n"
+            f"Could not DM **{display_label}** — the card is **not** posted in this chat.\n\n"
             f"{limit_block}\n\n"
             "Tap the button below, press **Start**, then send /credos again.\n"
             "You must log the amount **in your DMs** with the bot — not in this chat."
@@ -438,9 +500,10 @@ async def _log_card_usage(
         return
 
     used_before, capacity, remaining_before = _card_balance(settings, card_name)
+    display_label = _format_card_label(settings.database_path, card_name)
     if capacity > 0 and amount > remaining_before:
         await message.reply_text(
-            f"That would exceed what's left on **{card_name}** "
+            f"That would exceed what's left on **{display_label}** "
             f"({format_amount(remaining_before)} remaining).\n"
             f"Send a lower amount or ask an admin.",
             parse_mode="Markdown",
@@ -458,11 +521,11 @@ async def _log_card_usage(
     user_label = _user_label(user)
     limit_block = _format_card_limit_block(settings, card_name)
     summary = (
-        f"📊 **{card_name}** — {user_label} logged {format_amount(amount)}.\n\n"
+        f"📊 **{display_label}** — {user_label} logged {format_amount(amount)}.\n\n"
         f"{limit_block}"
     )
     await message.reply_text(
-        f"✅ Logged {format_amount(amount)} on **{card_name}**.\n\n{limit_block}",
+        f"✅ Logged {format_amount(amount)} on **{display_label}**.\n\n{limit_block}",
         parse_mode="Markdown",
     )
 
@@ -526,7 +589,12 @@ async def credo_active_command_guard(
         return
 
     session = get_active_credo_session(context.application.bot_data, user.id)
-    card_label = session.card_name if session else "a card"
+    settings: Settings = context.bot_data["settings"]
+    card_label = (
+        _format_card_label(settings.database_path, session.card_name)
+        if session
+        else "a card"
+    )
     await message.reply_text(
         f"**{card_label}** is active — only **/mail** and **/finished** work until you're done.",
         parse_mode="Markdown",
@@ -545,20 +613,21 @@ async def credo_finished_command(update: Update, context: ContextTypes.DEFAULT_T
         await message.reply_text("No active card session. Send /cc to pick one.")
         return
 
+    settings: Settings = context.bot_data["settings"]
+    display_label = _format_card_label(settings.database_path, session.card_name)
     await message.reply_text(
-        f"✅ Finished with **{session.card_name}**. You can use other commands again.",
+        f"✅ Finished with **{display_label}**. You can use other commands again.",
         parse_mode="Markdown",
     )
 
     public_chat_id = session.origin_chat_id
     if public_chat_id is None:
-        settings: Settings = context.bot_data["settings"]
         public_chat_id = context.application.bot_data.get("notify_chat_id") or settings.notify_chat_id
     if public_chat_id is not None and message.chat_id != public_chat_id:
         user_label = _user_label(user)
         await context.bot.send_message(
             chat_id=public_chat_id,
-            text=f"✅ {user_label} finished using **{session.card_name}**.",
+            text=f"✅ {user_label} finished using **{display_label}**.",
             parse_mode="Markdown",
         )
 
@@ -573,12 +642,13 @@ async def credo_reminder_loop(bot, settings: Settings, bot_data: dict) -> None:
                 if now - session.last_reminder_at < CREDO_REMINDER_INTERVAL_SECONDS:
                     continue
                 limit_block = _format_card_limit_block(settings, session.card_name)
+                display_label = _format_card_label(settings.database_path, session.card_name)
                 try:
                     await bot.send_message(
                         chat_id=user_id,
                         text=(
                             f"⏰ **Payment check** — have you sent anything on "
-                            f"**{session.card_name}**?\n\n"
+                            f"**{display_label}**?\n\n"
                             f"{limit_block}\n\n"
                             "Type the amount here (e.g. `500`) or send **/finished** when you're done."
                         ),
@@ -734,8 +804,9 @@ async def credos_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     active = get_active_credo_session(context.application.bot_data, user.id)
     if active is not None:
+        display_label = _format_card_label(settings.database_path, active.card_name)
         await message.reply_text(
-            f"You already have **{active.card_name}** active.\n\n"
+            f"You already have **{display_label}** active.\n\n"
             "Type payment amounts in your DMs or send **/finished** when you're done.",
             parse_mode="Markdown",
         )
@@ -932,9 +1003,10 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
         return AddCardState.NAME
 
     capacity = float(context.user_data.get("add_card_capacity") or 0)
+    stored_name = _allocate_card_name(settings.database_path, name)
     upsert_credo_credit_card(
         settings.database_path,
-        name,
+        stored_name,
         file_id,
         capacity=capacity,
     )
@@ -947,9 +1019,11 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
         if capacity > 0
         else "No limit set on this account."
     )
+    display_label = _format_card_label(settings.database_path, stored_name)
+    name_note = f" (saved as **{stored_name}**)" if stored_name != name else ""
     await message.reply_photo(
         photo=file_id,
-        caption=f"✅ **{name}** added · limit {cap_line}\n{limit_hint}",
+        caption=f"✅ **{display_label}** added{name_note} · limit {cap_line}\n{limit_hint}",
         parse_mode="Markdown",
     )
     return ConversationHandler.END

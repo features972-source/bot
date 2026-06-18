@@ -251,8 +251,11 @@ async def private_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     session = get_active_credo_session(context.application.bot_data, user.id)
     if session is not None and message.chat.type == "private":
+        from handlers.credo import _format_card_label
+
+        card_label = _format_card_label(settings.database_path, session.card_name)
         await message.reply_text(
-            f"**{session.card_name}** is active — type a payment amount (e.g. `500`) "
+            f"**{card_label}** is active — type a payment amount (e.g. `500`) "
             "or send **/finished** when you're done.",
             parse_mode="Markdown",
         )
