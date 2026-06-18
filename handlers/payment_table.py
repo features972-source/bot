@@ -271,3 +271,44 @@ def payment_totals_table_row(
 def wrap_bold_table(table: str) -> str:
     """Monospace Excel-style grid, all bold."""
     return f"<b><pre>{html.escape(table)}</pre></b>"
+
+
+def render_payments_table_text(
+    records: list[PaymentRecord],
+    *,
+    database_path: str,
+    total_amount: float,
+    total_count: int,
+    lookup_records: list[PaymentRecord] | None = None,
+    totals_records: list[PaymentRecord] | None = None,
+    full_excel: bool = False,
+    total_label: str = "TOTAL",
+) -> str:
+    """Plain-text table fallback when image upload fails."""
+    username_lookup = build_username_lookup(
+        database_path,
+        lookup_records if lookup_records is not None else records,
+    )
+    headers = table_headers(full_excel=full_excel)
+    body = [
+        payment_table_row(
+            record,
+            username_lookup=username_lookup,
+            full_excel=full_excel,
+            compact_names=not full_excel,
+        )
+        for record in records
+    ]
+    totals = payment_totals_table_row(
+        total_amount=total_amount,
+        total_count=total_count,
+        records=totals_records if totals_records is not None else records,
+        full_excel=full_excel,
+        total_label=total_label,
+    )
+
+    def _line(cells: list[str]) -> str:
+        return " | ".join(cells[i] if i < len(cells) else "" for i in range(len(headers)))
+
+    lines = [_line(list(headers)), *[_line(row) for row in body], _line(totals)]
+    return "\n".join(lines)

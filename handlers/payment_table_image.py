@@ -57,11 +57,25 @@ _MIN_COL_WIDTHS_FULL = (52, 88, 72, 88, 88, 52, 60, 72, 80, 72)
 _MIN_COL_WIDTHS_COMPACT = (52, 88, 72, 88, 88, 52, 60)
 
 
-def payment_table_input_file(png: bytes, *, filename: str = "payments.png") -> InputFile:
-    """Fresh InputFile for each Telegram upload (BytesIO must not be reused)."""
-    bio = BytesIO(png)
-    bio.seek(0)
-    return InputFile(bio, filename=filename)
+def payment_table_input_file(data: bytes, *, filename: str = "payments.png") -> InputFile:
+    """Fresh InputFile for each Telegram upload (pass raw bytes, not a reused stream)."""
+    return InputFile(data, filename=filename)
+
+
+def payment_table_jpeg_bytes(png: bytes, *, quality: int = 92) -> bytes:
+    """JPEG is accepted more reliably by Telegram sendPhoto than generated PNGs."""
+    from PIL import Image
+
+    img = Image.open(BytesIO(png))
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    return buf.getvalue()
+
+
+def payment_table_jpeg_input_file(png: bytes) -> InputFile:
+    return InputFile(payment_table_jpeg_bytes(png), filename="payments.jpg")
 
 
 def live_report_title(bot_display_name: str) -> str:

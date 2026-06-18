@@ -35,15 +35,18 @@ def bold_text(text: str | None, parse_mode: str | None) -> tuple[str | None, str
 
 
 def _copy_media_input(media_input):
-    """Return a fresh upload handle — BytesIO streams must not be reused after read."""
+    """Return a fresh upload handle — streams and InputFiles must not be reused."""
     from telegram import InputFile
 
+    if isinstance(media_input, bytes):
+        return InputFile(media_input, filename="photo.png")
     if isinstance(media_input, BytesIO):
-        data = media_input.getvalue()
         name = getattr(media_input, "name", None) or "photo.png"
-        bio = BytesIO(data)
-        bio.seek(0)
-        return InputFile(bio, filename=name)
+        return InputFile(media_input.getvalue(), filename=name)
+    content = getattr(media_input, "input_file_content", None)
+    if isinstance(content, bytes):
+        name = getattr(media_input, "filename", None) or "photo.png"
+        return InputFile(content, filename=name)
     return media_input
 
 

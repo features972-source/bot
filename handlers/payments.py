@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
-from telegram.error import BadRequest, TimedOut
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -50,10 +50,16 @@ from database import (
     update_payment_cleared,
 )
 from handlers.admin_access import is_bot_admin, iter_bot_admin_user_ids, require_admin
-from handlers.payment_table import format_image_subtitle, status_summary_totals, PAYMENTS_PAGE_SIZE
+from handlers.payment_table import (
+    format_image_subtitle,
+    render_payments_table_text,
+    status_summary_totals,
+    PAYMENTS_PAGE_SIZE,
+)
 from handlers.payment_table_image import (
     live_report_title,
     payment_table_input_file,
+    payment_table_jpeg_input_file,
     render_payments_table_png,
 )
 from handlers.stats_period import (
@@ -1116,26 +1122,6 @@ def _payments_summary_caption(
     return "\n".join(caption_parts)
 
 
-def _payments_summary_caption_html(
-    *,
-    since: datetime | None,
-    include_admin: bool,
-    total_pages: int = 1,
-    page_index: int = 0,
-    page_info: str = "",
-) -> str:
-    plain = _payments_summary_caption(
-        since=since,
-        include_admin=include_admin,
-        total_pages=total_pages,
-        page_index=page_index,
-        page_info=page_info,
-    )
-    if not plain:
-        return ""
-    return f"<b>{html.escape(plain)}</b>"
-
-
 def _edit_media_is_text_message(exc: BadRequest) -> bool:
     err = str(exc).lower()
     return any(
@@ -1149,6 +1135,56 @@ def _edit_media_is_text_message(exc: BadRequest) -> bool:
     )
 
 
+async def _send_payment_table_upload(
+    *,
+    bot,
+    chat_id: int,
+    caption: str,
+    keyboard: InlineKeyboardMarkup | None,
+    upload_fn,
+    reply_message=None,
+) -> None:
+    upload = upload_fn()
+    if reply_message is not None:
+        await reply_message.reply_document(
+            document=upload,
+            caption=caption,
+            reply_markup=keyboard,
+        )
+    else:
+        await bot.send_document(
+            chat_id=chat_id,
+            document=upload_fn(),
+            caption=caption,
+            reply_markup=keyboard,
+        )
+
+
+async def _send_payment_table_photo(
+    *,
+    bot,
+    chat_id: int,
+    caption: str,
+    keyboard: InlineKeyboardMarkup | None,
+    upload_fn,
+    reply_message=None,
+) -> None:
+    upload = upload_fn()
+    if reply_message is not None:
+        await reply_message.reply_photo(
+            photo=upload,
+            caption=caption,
+            reply_markup=keyboard,
+        )
+    else:
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=upload_fn(),
+            caption=caption,
+            reply_markup=keyboard,
+        )
+
+
 async def _deliver_payment_table_image(
     *,
     bot,
@@ -1159,15 +1195,12 @@ async def _deliver_payment_table_image(
     edit_message=None,
     reply_message=None,
 ) -> None:
-    """Send or edit the payment table PNG; fall back to document upload if needed."""
-    photo = payment_table_input_file(png)
-    media = InputMediaPhoto(
-        media=payment_table_input_file(png),
-        caption=caption,
-        parse_mode="HTML",
-    )
-
+    """Upload table image — document first, then JPEG/PNG photo. Plain-text caption."""
     if edit_message is not None:
+        media = InputMediaPhoto(
+            media=payment_table_jpeg_input_file(png),
+            caption=caption,
+        )
         try:
             await bot.edit_message_media(
                 chat_id=edit_message.chat_id,
@@ -1180,49 +1213,105 @@ async def _deliver_payment_table_image(
             if "message is not modified" in str(exc).lower():
                 return
             if not _edit_media_is_text_message(exc):
-                raise
-            logger.debug(
-                "Payment table edit failed for msg %s (%s); sending a new photo",
-                edit_message.message_id,
-                exc,
-            )
+                logger.warning("Payment table page edit failed: %s", exc)
+            else:
+                logger.debug(
+                    "Payment table edit failed for msg %s (%s); sending new upload",
+                    edit_message.message_id,
+                    exc,
+                )
 
-    try:
-        if reply_message is not None:
-            await reply_message.reply_photo(
-                photo=photo,
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
-        else:
-            await bot.send_photo(
+    senders = (
+        (
+            "document",
+            lambda: _send_payment_table_upload(
+                bot=bot,
                 chat_id=chat_id,
-                photo=payment_table_input_file(png),
                 caption=caption,
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
-        return
-    except (BadRequest, TimedOut) as exc:
-        logger.warning("Payment table photo send failed: %s", exc)
+                keyboard=keyboard,
+                upload_fn=lambda: payment_table_input_file(
+                    png, filename="payments-table.png"
+                ),
+                reply_message=reply_message,
+            ),
+        ),
+        (
+            "jpeg",
+            lambda: _send_payment_table_photo(
+                bot=bot,
+                chat_id=chat_id,
+                caption=caption,
+                keyboard=keyboard,
+                upload_fn=lambda: payment_table_jpeg_input_file(png),
+                reply_message=reply_message,
+            ),
+        ),
+        (
+            "png",
+            lambda: _send_payment_table_photo(
+                bot=bot,
+                chat_id=chat_id,
+                caption=caption,
+                keyboard=keyboard,
+                upload_fn=lambda: payment_table_input_file(png),
+                reply_message=reply_message,
+            ),
+        ),
+    )
 
-    doc = payment_table_input_file(png, filename="payments-table.png")
-    if reply_message is not None:
-        await reply_message.reply_document(
-            document=doc,
-            caption=caption,
-            parse_mode="HTML",
-            reply_markup=keyboard,
-        )
+    last_error: Exception | None = None
+    for label, sender in senders:
+        try:
+            await sender()
+            return
+        except TelegramError as exc:
+            last_error = exc
+            logger.warning("Payment table %s upload failed: %s", label, exc)
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Payment table upload failed with no error detail")
+
+
+async def _send_payments_text_fallback(
+    *,
+    message,
+    settings: Settings,
+    records: list[PaymentRecord],
+    since: datetime | None,
+    page_index: int,
+    page_info: str,
+    include_admin: bool,
+    keyboard: InlineKeyboardMarkup | None,
+    page_records: list[PaymentRecord],
+) -> None:
+    total_count, total_amount = get_payment_totals(settings.database_path, since=since)
+    if since is not None:
+        lookup_records = list_payments_since(settings.database_path, since=since)
     else:
-        await bot.send_document(
-            chat_id=chat_id,
-            document=payment_table_input_file(png, filename="payments-table.png"),
-            caption=caption,
-            parse_mode="HTML",
-            reply_markup=keyboard,
-        )
+        lookup_records = list_all_payments(settings.database_path)
+
+    table = render_payments_table_text(
+        page_records,
+        database_path=settings.database_path,
+        total_amount=total_amount,
+        total_count=total_count,
+        lookup_records=lookup_records,
+        totals_records=records,
+        full_excel=False,
+    )
+    caption = _payments_summary_caption(
+        since=since,
+        include_admin=include_admin,
+        total_pages=0,
+        page_index=page_index,
+        page_info=page_info,
+    )
+    await message.reply_text(
+        f"{caption}\n\n<pre>{html.escape(table)}</pre>",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
 
 
 def _build_payments_summary_image(
@@ -1327,7 +1416,10 @@ async def _send_payments_summary(
         )
         return
 
-    caption = _payments_summary_caption_html(
+    page_records, page_index, total_pages, page_info = _payment_page_slice(
+        all_records, page
+    )
+    caption = _payments_summary_caption(
         since=since,
         include_admin=include_admin,
         total_pages=total_pages,
@@ -1356,9 +1448,23 @@ async def _send_payments_summary(
         )
     except Exception:
         logger.exception("Failed to send payments summary image")
-        await message.reply_text(
-            "Could not send the payment table image. Try again in a moment."
-        )
+        try:
+            await _send_payments_text_fallback(
+                message=message,
+                settings=settings,
+                records=records,
+                since=since,
+                page_index=page_index,
+                page_info=page_info,
+                include_admin=include_admin,
+                keyboard=keyboard,
+                page_records=page_records,
+            )
+        except Exception:
+            logger.exception("Failed text fallback for payments summary")
+            await message.reply_text(
+                "Could not send the payment table image. Try again in a moment."
+            )
 
 
 async def payments_page_callback(
