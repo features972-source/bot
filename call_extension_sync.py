@@ -297,8 +297,7 @@ async def sync_extension_state(
                     _clear_empty_streak(bot_data, extension)
                     return
                 streak = _bump_empty_streak(bot_data, extension)
-                empty_confirm = 1 if urgent else EMPTY_CONFIRM_COUNT
-                if urgent or streak >= empty_confirm:
+                if streak >= EMPTY_CONFIRM_COUNT:
                     _clear_empty_streak(bot_data, extension)
                     if active is not None:
                         active.pop(extension, None)

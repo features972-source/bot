@@ -458,6 +458,14 @@ def _is_duplicate_announce(bot_data: dict, key: str) -> bool:
 
 
 
+def _end_dedupe_key(extension: str) -> str:
+
+    return f"end:{extension}"
+
+
+
+
+
 def _normalize_dn(value: Any) -> str | None:
 
     text = str(value or "").strip()
@@ -983,19 +991,28 @@ async def _stop_live_call(
 
     settings = bot_data.get("settings")
     if settings is not None:
-        chat_ids = _notify_chat_ids(settings, bot_data)
-        if chat_ids:
+        if live_call.message_ids:
+            await _edit_live_messages(
+                bot,
+                bot_data,
+                live_call.message_ids,
+                final_text,
+                reply_markup=None,
+            )
+        else:
+            chat_ids = _notify_chat_ids(settings, bot_data)
+            if chat_ids:
 
-            async def _send_off(chat_id: int) -> None:
-                await _telegram_send_message(
-                    bot,
-                    bot_data,
-                    chat_id=chat_id,
-                    text=final_text,
-                    inline=True,
-                )
+                async def _send_off(chat_id: int) -> None:
+                    await _telegram_send_message(
+                        bot,
+                        bot_data,
+                        chat_id=chat_id,
+                        text=final_text,
+                        inline=True,
+                    )
 
-            await asyncio.gather(*(_send_off(cid) for cid in chat_ids))
+                await asyncio.gather(*(_send_off(cid) for cid in chat_ids))
 
     return live_call
 
@@ -1142,11 +1159,11 @@ def _record_orphan_call_end(
     bot_data: dict,
     link: ExtensionLink,
     participant: dict[str, Any] | None,
-) -> None:
+) -> bool:
     """Count a completed call when off-phone fired without a tracked live call."""
     started_at_utc = bot_data.pop(f"call_start_utc:{link.extension}", None)
     if started_at_utc is None:
-        return
+        return False
 
     caller_name, caller_number = (
         caller_from_participant(participant) if participant else ("", "")
@@ -1164,6 +1181,7 @@ def _record_orphan_call_end(
         call_kind="normal",
         started_at_utc=started_at_utc,
     )
+    return True
 
 
 async def announce_call_ended(
@@ -1182,38 +1200,52 @@ async def announce_call_ended(
 
 ) -> None:
 
-    register_recent_call_handler(participant, link.extension, bot_data)
+    extension = link.extension
+    locks = _announce_locks(bot_data)
+    if extension not in locks:
+        locks[extension] = asyncio.Lock()
 
-    live_call = await _stop_live_call(bot, bot_data, link.extension)
-
-    if live_call is not None:
-
-        if live_call.silent:
+    async with locks[extension]:
+        dedupe_key = _end_dedupe_key(extension)
+        if _is_duplicate_announce(bot_data, dedupe_key):
             logger.info(
-                "Ended pre-restart call (no Telegram): ext %s", link.extension
+                "Skipping duplicate off-phone announce for ext %s", extension
             )
-        else:
-            from transcript import schedule_transcript_delivery
+            return
 
-            schedule_transcript_delivery(bot, settings, bot_data, live_call)
+        register_recent_call_handler(participant, extension, bot_data)
 
-            logger.info("Announced off phone: ext %s", link.extension)
+        live_call = await _stop_live_call(bot, bot_data, extension)
 
-        return
+        if live_call is not None:
+            _mark_recent_announce(bot_data, dedupe_key)
 
-    _record_orphan_call_end(settings, bot_data, link, participant)
+            if live_call.silent:
+                logger.info(
+                    "Ended pre-restart call (no Telegram): ext %s", extension
+                )
+            else:
+                from transcript import schedule_transcript_delivery
 
-    await send_to_notify_chats(
+                schedule_transcript_delivery(bot, settings, bot_data, live_call)
 
-        bot,
+                logger.info("Announced off phone: ext %s", extension)
 
-        settings,
+            return
 
-        bot_data,
+        if not _record_orphan_call_end(settings, bot_data, link, participant):
+            logger.debug(
+                "Skipping orphan off-phone (no tracked call) ext %s", extension
+            )
+            return
 
-        text=format_off_phone_message(link),
-
-    )
+        _mark_recent_announce(bot_data, dedupe_key)
+        await send_to_notify_chats(
+            bot,
+            settings,
+            bot_data,
+            text=format_off_phone_message(link),
+        )
 
 
 
