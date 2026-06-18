@@ -79,6 +79,35 @@ class AddCardState(IntEnum):
     PHOTO = auto()
 
 
+ADD_CARD_STEP_KEY = "add_card_step"
+
+
+def _end_conversation_by_name(
+    context: ContextTypes.DEFAULT_TYPE, update: Update, name: str
+) -> None:
+    """End another ConversationHandler so it does not swallow plain-text replies."""
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat:
+        return
+    chat_id = chat.id
+    user_id = user.id if user else None
+    for handlers in context.application.handlers.values():
+        for handler in handlers:
+            if getattr(handler, "name", None) != name:
+                continue
+            if not isinstance(handler, ConversationHandler):
+                continue
+            handler.update_state(ConversationHandler.END, chat_id, user_id, context)
+
+
+def _clear_add_card_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("add_card_name", None)
+    context.user_data.pop("add_card_capacity", None)
+    context.user_data.pop("add_card_active", None)
+    context.user_data.pop(ADD_CARD_STEP_KEY, None)
+
+
 @dataclass
 class CredoActiveSession:
     card_name: str
@@ -712,40 +741,21 @@ def build_credo_handlers() -> list:
         allow_reentry=True,
         name="credo_user",
     )
-    add_card_conversation = ConversationHandler(
-        entry_points=[CommandHandler("addcredo", addcredocard_start)],
-        states={
-            AddCardState.NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, addcredocard_receive_name)
-            ],
-            AddCardState.CAPACITY: [
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND, addcredocard_receive_capacity
-                )
-            ],
-            AddCardState.PHOTO: [
-                MessageHandler(PHOTO_FILTER, addcredocard_receive_photo),
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND, addcredocard_receive_photo_text
-                ),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", addcredocard_cancel),
-            CommandHandler("start", help_conversation_fallback),
-            CommandHandler("help", help_conversation_fallback),
-            CommandHandler("out", out_conversation_fallback),
-            CommandHandler("payments", payments_conversation_fallback),
-            CommandHandler("alltimepayments", alltimepayments_conversation_fallback),
-            CommandHandler("alltime", alltimepayments_conversation_fallback),
-        ],
-        allow_reentry=True,
-        name="credo_add_card",
-    )
     return [
-        # Conversations before catch-all DM text (same rule as payments in bot_commands).
+        # Add-card routes before credo_user — an open /credos picker blocks text otherwise.
+        CommandHandler("addcredo", addcredocard_start),
+        CommandHandler("cancel", addcredocard_cancel_if_active, block=False),
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
+            addcredocard_route_text,
+            block=False,
+        ),
+        MessageHandler(
+            PHOTO_FILTER & filters.ChatType.PRIVATE,
+            addcredocard_route_photo,
+            block=False,
+        ),
         user_conversation,
-        add_card_conversation,
         MessageHandler(
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
             credo_active_dm_amount_text,
@@ -953,13 +963,13 @@ async def credo_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return ConversationHandler.END
 
 
-async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     message = update.effective_message
     if not message:
-        return ConversationHandler.END
+        return
     if not await require_admin(update, settings):
-        return ConversationHandler.END
+        return
 
     if message.chat.type != "private":
         await message.reply_text(
@@ -968,18 +978,73 @@ async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "Open my profile → **Message**, then send **/addcredo** again.",
             parse_mode="Markdown",
         )
-        return ConversationHandler.END
+        return
 
-    context.user_data.pop("add_card_name", None)
-    context.user_data.pop("add_card_capacity", None)
+    _end_conversation_by_name(context, update, "credo_user")
+    context.user_data.pop("credo_cards", None)
+    _clear_add_card_flow(context)
     context.user_data["add_card_active"] = True
+    context.user_data[ADD_CARD_STEP_KEY] = AddCardState.NAME
 
     await message.reply_text(
         "💳 **Add credo card** (3 steps)\n\n"
         "**Step 1 of 3** — Send the **credit card name** (e.g. Lloyds).",
         parse_mode="Markdown",
     )
-    return AddCardState.NAME
+
+
+async def addcredocard_cancel_if_active(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    if not context.user_data.get("add_card_active"):
+        return
+    await addcredocard_cancel(update, context)
+    raise ApplicationHandlerStop
+
+
+async def addcredocard_route_text(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    if not context.user_data.get("add_card_active"):
+        return
+    message = update.effective_message
+    if not message or message.chat.type != "private":
+        return
+
+    step = context.user_data.get(ADD_CARD_STEP_KEY)
+    if step == AddCardState.NAME:
+        context.user_data[ADD_CARD_STEP_KEY] = await addcredocard_receive_name(
+            update, context
+        )
+    elif step == AddCardState.CAPACITY:
+        context.user_data[ADD_CARD_STEP_KEY] = await addcredocard_receive_capacity(
+            update, context
+        )
+    elif step == AddCardState.PHOTO:
+        await addcredocard_receive_photo_text(update, context)
+    else:
+        return
+
+    if context.user_data.get(ADD_CARD_STEP_KEY) == ConversationHandler.END:
+        _clear_add_card_flow(context)
+    raise ApplicationHandlerStop
+
+
+async def addcredocard_route_photo(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    if not context.user_data.get("add_card_active"):
+        return
+    message = update.effective_message
+    if not message or message.chat.type != "private":
+        return
+    if context.user_data.get(ADD_CARD_STEP_KEY) != AddCardState.PHOTO:
+        return
+
+    result = await addcredocard_receive_photo(update, context)
+    if result == ConversationHandler.END:
+        _clear_add_card_flow(context)
+    raise ApplicationHandlerStop
 
 
 async def addcredocard_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1075,12 +1140,9 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
     return ConversationHandler.END
 
 
-async def addcredocard_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data.pop("add_card_name", None)
-    context.user_data.pop("add_card_capacity", None)
-    context.user_data.pop("add_card_active", None)
+async def addcredocard_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_add_card_flow(context)
     await update.effective_message.reply_text("Add card cancelled.")
-    return ConversationHandler.END
 
 
 async def removecredocard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
