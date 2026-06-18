@@ -154,27 +154,44 @@ def _footer_note() -> str:
     return f"Updated {stamp} ({label})"
 
 
-def _export_rows(records: list[PaymentRecord]) -> list[list]:
+def format_payment_sheet_updated_note() -> str:
+    """Short footer matching the Excel sheet (e.g. Updated 18 Jun 2026,)."""
+    now_local = datetime.now(timezone.utc).astimezone(stats_timezone())
+    stamp = now_local.strftime(f"{now_local.day} %b %Y,")
+    return f"Updated {stamp}"
+
+
+def sorted_payment_records(records: list[PaymentRecord]) -> list[PaymentRecord]:
+    return _sorted_payments(records)
+
+
+def payment_sheet_totals_row(records: list[PaymentRecord]) -> list[str]:
     total = sum(record.amount for record in records)
     total_starter = sum(_starter_payout(record) for record in records)
     total_finisher = sum(_finisher_payout(record) for record in records)
     total_centre = sum(_centre_payout(record) for record in records)
     count_label = f"{len(records)} payment" + ("" if len(records) == 1 else "s")
+    return [
+        "TOTAL",
+        _format_amount(total),
+        count_label,
+        "",
+        "",
+        "",
+        _format_amount(total_starter),
+        _format_amount(total_finisher),
+        _format_amount(total_centre),
+    ]
+
+
+def payment_sheet_data_rows(records: list[PaymentRecord]) -> list[list[str]]:
+    return [[str(cell) for cell in row] for row in _payment_rows(records)]
+
+
+def _export_rows(records: list[PaymentRecord]) -> list[list]:
     rows: list[list] = [list(HEADERS)]
     rows.extend(_payment_rows(records))
-    rows.append(
-        [
-            "TOTAL",
-            _format_amount(total),
-            count_label,
-            "",
-            "",
-            "",
-            _format_amount(total_starter),
-            _format_amount(total_finisher),
-            _format_amount(total_centre),
-        ]
-    )
+    rows.append(payment_sheet_totals_row(records))
     rows.append(["", "", "", "", "", "", "", "", _footer_note()])
     return rows
 
