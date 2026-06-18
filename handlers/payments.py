@@ -195,11 +195,8 @@ def _cleared_status_label(cleared: bool | None) -> str:
     return "🟢 Cleared" if cleared else "🔴 Not cleared"
 
 
-def _format_card_saved_reply(settings: Settings) -> str:
-    sheet = (settings.payments_onedrive_worksheet or "").strip()
-    if sheet:
-        return f"✅ Added to {sheet}"
-    return "✅ Added to the tab"
+def _format_card_saved_reply() -> str:
+    return "✅ Added to the system"
 
 
 async def _finalize_payment_out(
@@ -550,7 +547,7 @@ async def _finalize_payment_out(
     record = get_payment_by_id(settings.database_path, payment_id)
     if record is None:
         return
-    await message.reply_text(_format_card_saved_reply(settings))
+    await message.reply_text(_format_card_saved_reply())
     try:
         from quiet_wins import maybe_quiet_win_close_rate
 
