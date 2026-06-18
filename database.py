@@ -2280,3 +2280,51 @@ def _connect(path: str):
         yield conn
     finally:
         conn.close()
+
+
+_DATA_TABLES = (
+    "extension_links",
+    "completed_calls",
+    "bot_admins",
+    "payment_outs",
+    "credo_whitelist",
+    "credo_profiles",
+    "credo_credit_cards",
+    "credo_card_usage",
+    "chat_blacklist",
+    "bot_settings",
+    "mailer_logs",
+    "missed_calls",
+    "q1_premium_users",
+    "quiet_win_log",
+    "ready_check_sent",
+)
+
+
+def summarize_bot_data(path: str) -> dict[str, int]:
+    """Row counts for /panic confirmation summary."""
+    stats: dict[str, int] = {}
+    try:
+        with _connect(path) as conn:
+            for table in _DATA_TABLES:
+                try:
+                    row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                    stats[table] = int(row[0] if row else 0)
+                except sqlite3.Error:
+                    stats[table] = 0
+    except sqlite3.Error:
+        pass
+    return stats
+
+
+def wipe_database_file(path: str) -> None:
+    """Delete the SQLite file and sidecars, then recreate an empty schema."""
+    db_path = Path(path)
+    for candidate in (
+        db_path,
+        Path(f"{path}-wal"),
+        Path(f"{path}-shm"),
+        Path(f"{path}.bot.lock"),
+    ):
+        candidate.unlink(missing_ok=True)
+    init_db(path)

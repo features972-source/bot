@@ -89,7 +89,6 @@ def build_payment_report_image(settings: Settings) -> bytes | None:
         return None
 
     total_count, total_amount = get_payment_totals(settings.database_path, since=since)
-    hidden = max(len(all_records) - 40, 0)
     return render_payments_table_png(
         all_records,
         database_path=settings.database_path,
@@ -99,7 +98,6 @@ def build_payment_report_image(settings: Settings) -> bytes | None:
         title=live_report_title(settings.bot_display_name),
         subtitle=format_image_subtitle(period_label),
         status_totals=_status_totals(settings, since),
-        hidden_count=hidden,
         live=True,
         full_excel=True,
     )
@@ -296,6 +294,10 @@ async def setnotifypayments_callback(
     await query.answer()
     set_payment_notify_chat_id(target_settings.database_path, chat.id)
     clear_payment_notify_message_id(target_settings.database_path)
+
+    from handlers.admin_access import sync_bot_command_menu
+
+    await sync_bot_command_menu(context.bot, target_settings)
 
     if query.message:
         await query.edit_message_text(

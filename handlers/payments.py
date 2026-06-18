@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 
 from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 
 from config import Settings
 from call_display import format_extension_user_plain
@@ -22,10 +22,12 @@ from database import (
     clear_all_payments,
     delete_payment_out,
     get_payment_by_id,
+    get_payment_by_message,
     is_chat_blacklisted,
     update_payment_amount,
     get_payment_leaderboard,
     get_payment_starter_leaderboard,
+    get_payment_notify_chat_id,
     get_payment_totals,
     list_links,
     list_payments_since,
@@ -118,18 +120,21 @@ def _normalize_payment_text(text: str) -> str:
     return re.sub(r"\s+", " ", stripped).strip()
 
 
-def build_payment_handlers() -> list:
+def build_payment_command_handlers() -> list:
     return [
         CommandHandler("out", out_command),
         CommandHandler("payments", payments_command),
         CommandHandler("sent", payments_command),
         CommandHandler("alltimepayments", alltimepayments_command),
+        CommandHandler("alltime", alltimepayments_command),
         CommandHandler("outstats", outstats_command),
         CommandHandler("outleaderboard", outstats_command),
         CommandHandler("clearpayments", clearpayments_command),
         CommandHandler("todaypayments", todaypayments_command),
         CommandHandler("cleared", cleared_command),
+        CommandHandler("setcleared", cleared_command),
         CommandHandler("notcleared", notcleared_command),
+        CommandHandler("setnotcleared", notcleared_command),
         CommandHandler("setpayment", setpayment_command),
         CommandHandler("updatepayment", setpayment_command),
         CommandHandler("editpayment", setpayment_command),
@@ -138,10 +143,23 @@ def build_payment_handlers() -> list:
         CommandHandler("paidside", paidside_command),
         CommandHandler("excelwebauth", excelwebauth_command),
         CommandHandler("myid", myid_command),
+    ]
+
+
+def build_payment_message_handlers() -> list:
+    return [
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             payment_out_message,
+            block=False,
         ),
+    ]
+
+
+def build_payment_handlers() -> list:
+    return [
+        *build_payment_command_handlers(),
+        *build_payment_message_handlers(),
     ]
 
 
@@ -177,6 +195,12 @@ def find_payment_out_in_text(text: str) -> tuple[float, str] | None:
     if amount is None:
         return None
     return amount, match.group(0).strip()
+
+
+def looks_like_payment_out(text: str, bot_username: str | None = None) -> bool:
+    """True when plain text is e.g. 5182 out (used to avoid credo intercepting outs)."""
+    cleaned = _strip_leading_bot_mention(text.strip(), bot_username)
+    return find_payment_out_in_text(_strip_explicit_starter(cleaned)) is not None
 
 
 def parse_payment_amount(text: str) -> tuple[float, str] | None:
@@ -256,6 +280,36 @@ def _format_payment_line(record: PaymentRecord) -> str:
             f"{amount} ({when})"
         )
     return f"{status} · #{record.id} · Finisher {finisher} · {amount} ({when})"
+
+
+def _resolve_payment_from_reply(
+    database_path: str,
+    message,
+) -> PaymentRecord | None:
+    """Find a payment linked to a replied-to message (out post or thread)."""
+    if message is None or message.reply_to_message is None:
+        return None
+    chat_id = message.chat_id
+    current = message.reply_to_message
+    for _ in range(6):
+        if current is None:
+            break
+        record = get_payment_by_message(
+            database_path,
+            chat_id=chat_id,
+            telegram_message_id=current.message_id,
+        )
+        if record is not None:
+            return record
+        current = current.reply_to_message
+    return None
+
+
+def _parse_payment_id_arg(raw: str) -> int | None:
+    try:
+        return int(raw.lstrip("#"))
+    except ValueError:
+        return None
 
 
 def _format_payment_block(record: PaymentRecord) -> str:
@@ -486,6 +540,9 @@ def _payment_chat_ids(settings: Settings, bot_data: dict) -> set[int]:
     notify_id = bot_data.get("notify_chat_id") or settings.notify_chat_id
     if notify_id is not None:
         ids.add(notify_id)
+    payment_notify_id = get_payment_notify_chat_id(settings.database_path)
+    if payment_notify_id is not None:
+        ids.add(payment_notify_id)
     if settings.copy_to_chat_id is not None:
         ids.add(settings.copy_to_chat_id)
     return ids
@@ -507,6 +564,30 @@ def _can_view_payments(
     if user and is_bot_admin(settings, settings.database_path, user.id):
         return True
     return _payment_chat_allowed(settings, bot_data, update.effective_chat)
+
+
+async def _require_payment_view(
+    update: Update, settings: Settings, bot_data: dict
+) -> bool:
+    if _can_view_payments(update, settings, bot_data):
+        return True
+    message = update.effective_message
+    chat = update.effective_chat
+    if message is None:
+        return False
+    allowed = _payment_chat_ids(settings, bot_data)
+    hint = (
+        f"Allowed chat id(s): {', '.join(str(i) for i in sorted(allowed))}"
+        if allowed
+        else "No notify group set — admin: run /setnotify in your payment group."
+    )
+    chat_id = chat.id if chat is not None else "unknown"
+    await message.reply_text(
+        "Payment commands only work in the **notify / payment group** "
+        f"(this chat is `{chat_id}`).\n\n{hint}",
+        parse_mode="Markdown",
+    )
+    return False
 
 
 def _pending_card_map(bot_data: dict) -> dict[tuple[int, int], PendingPaymentOut]:
@@ -881,6 +962,11 @@ async def payment_out_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if await _try_complete_pending_clearpayments(update, context):
         return
 
+    from handlers.panic import try_complete_pending_panic
+
+    if await try_complete_pending_panic(update, context):
+        return
+
     text = _strip_leading_bot_mention(
         message.text, getattr(context.bot, "username", None)
     )
@@ -908,12 +994,16 @@ def _payment_records_for_period(
     database_path: str,
     *,
     since: datetime | None,
-    limit: int = _PAYMENTS_LIST_LIMIT,
+    limit: int | None = None,
 ) -> list[PaymentRecord]:
     if since is None:
-        return list_recent_payments(database_path, limit=limit)
-    records = list_payments_since(database_path, since=since)
-    records.reverse()
+        records = list_all_payments(database_path)
+        records.reverse()
+    else:
+        records = list_payments_since(database_path, since=since)
+        records.reverse()
+    if limit is None:
+        return records
     return records[:limit]
 
 
@@ -940,7 +1030,7 @@ def _build_payments_summary_image(
     else:
         lookup_records = list_all_payments(settings.database_path)
 
-    hidden = max(total_count - len(records), 0)
+    hidden = 0
     status_totals = status_summary_totals(
         pending_amount=pending_amount,
         pending_count=pending_count,
@@ -950,8 +1040,10 @@ def _build_payments_summary_image(
         not_cleared_count=not_cleared_count,
     )
     title = live_report_title(settings.bot_display_name)
+    total_label = "WEEK TOTAL"
     if since is None:
         title = "All-time payments"
+        total_label = "ALL TIME"
     return render_payments_table_png(
         records,
         database_path=settings.database_path,
@@ -961,9 +1053,9 @@ def _build_payments_summary_image(
         title=title,
         subtitle=format_image_subtitle(period_label) if since is not None else "Every payment on record",
         status_totals=status_totals,
-        hidden_count=hidden,
         live=False,
         full_excel=False,
+        total_label=total_label,
     )
 
 
@@ -976,12 +1068,16 @@ async def _send_payments_summary(
     empty_text: str,
 ) -> None:
     settings: Settings = context.bot_data["settings"]
-    if not _can_view_payments(update, settings, context.bot_data):
+    if not await _require_payment_view(update, settings, context.bot_data):
+        return
+
+    message = update.effective_message
+    if message is None:
         return
 
     total_count, _ = get_payment_totals(settings.database_path, since=since)
     if total_count == 0:
-        await update.effective_message.reply_text(empty_text, parse_mode="Markdown")
+        await message.reply_text(empty_text, parse_mode="Markdown")
         return
 
     records = _payment_records_for_period(settings.database_path, since=since)
@@ -989,13 +1085,20 @@ async def _send_payments_summary(
     include_admin = bool(
         user and is_bot_admin(settings, settings.database_path, user.id)
     )
-    png = await asyncio.to_thread(
-        _build_payments_summary_image,
-        settings,
-        since=since,
-        period_label=period_label,
-        records=records,
-    )
+    try:
+        png = await asyncio.to_thread(
+            _build_payments_summary_image,
+            settings,
+            since=since,
+            period_label=period_label,
+            records=records,
+        )
+    except Exception:
+        logger.exception("Failed to build payments summary image")
+        await message.reply_text(
+            "Could not build the payment table image. Try again in a moment."
+        )
+        return
     caption_parts = []
     if since is not None:
         caption_parts.append(
@@ -1006,18 +1109,24 @@ async def _send_payments_summary(
         caption_parts.append("<i>All payments on record</i>")
     if include_admin:
         caption_parts.append(
-            "<i>Admin: /setpayment # amount · /removepayment # · /cleared #</i>"
+            "<i>Admin: use # from table in bot DM — /setcleared 12 · /setpayment 12 amount</i>"
         )
     caption = "\n".join(caption_parts) if caption_parts else None
 
     bio = BytesIO(png)
     bio.name = "payments.jpg"
     bio.seek(0)
-    await update.effective_message.reply_photo(
-        photo=bio,
-        caption=caption,
-        parse_mode="HTML",
-    )
+    try:
+        await message.reply_photo(
+            photo=bio,
+            caption=caption,
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception("Failed to send payments summary image")
+        await message.reply_text(
+            "Could not send the payment table image. Try again in a moment."
+        )
 
 
 async def payments_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1049,6 +1158,24 @@ async def alltimepayments_command(
             "Reply to the starter’s notes, then send e.g. `5182 out`."
         ),
     )
+
+
+def _payment_command_conversation_fallback(command_fn):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        context.user_data.clear()
+        await command_fn(update, context)
+        return ConversationHandler.END
+
+    return wrapper
+
+
+payments_conversation_fallback = _payment_command_conversation_fallback(
+    payments_command
+)
+alltimepayments_conversation_fallback = _payment_command_conversation_fallback(
+    alltimepayments_command
+)
+out_conversation_fallback = _payment_command_conversation_fallback(out_command)
 
 
 def _leaderboard_user_label(entry: PaymentLeaderboardEntry) -> str:
@@ -1203,15 +1330,29 @@ async def _set_payment_cleared_command(
     if message is None:
         return
 
-    if not context.args:
+    cmd = "setcleared" if cleared else "setnotcleared"
+    alt_cmd = "cleared" if cleared else "notcleared"
+    payment_id: int | None = None
+
+    if context.args:
+        payment_id = _parse_payment_id_arg(context.args[0])
+
+    if payment_id is None:
+        record = _resolve_payment_from_reply(settings.database_path, message)
+        if record is not None:
+            payment_id = record.id
+
+    if payment_id is None and not context.args:
         records = list_recent_payments(settings.database_path, limit=10)
         if not records:
             await message.reply_text("No payments logged yet.")
             return
-        cmd = "cleared" if cleared else "notcleared"
         blocks = [_format_payment_block(record) for record in records]
         await message.reply_text(
-            f"Usage: /{cmd} &lt;#&gt;\n\n"
+            f"<b>Mark cleared status</b>\n\n"
+            f"• <b>Easiest:</b> use the <b>#</b> column from /payments — "
+            f"DM the bot: /{cmd} 12\n"
+            f"• Or reply to the original <code>5182 out</code> with /{cmd}\n\n"
             f"<b>Recent payments</b>\n\n"
             f"{'\n\n'.join(blocks)}",
             parse_mode="HTML",
@@ -1219,13 +1360,11 @@ async def _set_payment_cleared_command(
         )
         return
 
-    raw_id = context.args[0].lstrip("#")
-    try:
-        payment_id = int(raw_id)
-    except ValueError:
-        example_cmd = "cleared" if cleared else "notcleared"
+    if payment_id is None:
         await message.reply_text(
-            f"Could not read that payment #. Example: /{example_cmd} 1"
+            f"Could not find that payment.\n\n"
+            f"Reply to the <code>5182 out</code> message with /{cmd}, "
+            f"or DM /{cmd} &lt;#&gt; using the # column on /payments."
         )
         return
 
@@ -1268,15 +1407,55 @@ async def setpayment_command(
         return
 
     if len(context.args) < 2:
+        payment_id: int | None = None
+        amount_text: str | None = None
+        if len(context.args) == 1:
+            payment_id = _parse_payment_id_arg(context.args[0])
+            if payment_id is None:
+                amount_text = context.args[0]
+        if payment_id is None and amount_text:
+            record = _resolve_payment_from_reply(settings.database_path, message)
+            if record is not None:
+                payment_id = record.id
+                parsed = parse_payment_amount(amount_text)
+                if parsed is not None:
+                    new_amount, _ = parsed
+                    old_amount = record.amount
+                    if update_payment_amount(
+                        settings.database_path, payment_id, amount=new_amount
+                    ):
+                        record = get_payment_by_id(settings.database_path, payment_id)
+                        if record:
+                            await message.reply_text(
+                                f"Updated #{payment_id}: "
+                                f"{html.escape(format_amount(old_amount))} → "
+                                f"<b>{html.escape(format_amount(new_amount))}</b>\n\n"
+                                f"{_format_payment_block(record)}",
+                                parse_mode="HTML",
+                                disable_web_page_preview=True,
+                            )
+                            await _pm_admin_today_payments(context.bot, settings)
+                            schedule_payments_excel_sync(settings)
+                            try:
+                                from handlers.payment_reports import (
+                                    schedule_payment_report_refresh,
+                                )
+
+                                schedule_payment_report_refresh(context.bot, settings)
+                            except Exception:
+                                logger.exception("Payment report refresh failed")
+                            return
         records = list_recent_payments(settings.database_path, limit=10)
         if not records:
             await message.reply_text("No payments logged yet.")
             return
         blocks = [_format_payment_block(record) for record in records]
         await message.reply_text(
-            "Usage: /setpayment &lt;#&gt; &lt;amount&gt;\n"
-            "Aliases: /updatepayment · /editpayment\n"
-            f"Example: /setpayment 12 260 · /setpayment 12 {currency_symbol()}1827.33\n\n"
+            "<b>Fix a payment amount</b>\n\n"
+            "• Reply to the <code>5182 out</code> message with "
+            f"<code>/setpayment 260</code>\n"
+            "• Or: /setpayment &lt;#&gt; &lt;amount&gt; (see # column on /payments)\n"
+            "Aliases: /updatepayment · /editpayment\n\n"
             f"<b>Recent payments</b>\n\n"
             f"{'\n\n'.join(blocks)}",
             parse_mode="HTML",
@@ -1348,28 +1527,28 @@ async def removepayment_command(
     if message is None:
         return
 
-    if not context.args:
+    payment_id: int | None = None
+    if context.args:
+        payment_id = _parse_payment_id_arg(context.args[0])
+    if payment_id is None:
+        record = _resolve_payment_from_reply(settings.database_path, message)
+        if record is not None:
+            payment_id = record.id
+
+    if payment_id is None:
         records = list_recent_payments(settings.database_path, limit=10)
         if not records:
             await message.reply_text("No payments logged yet.")
             return
         blocks = [_format_payment_block(record) for record in records]
         await message.reply_text(
-            "Usage: /removepayment &lt;#&gt;\n"
-            "Example: /removepayment 12\n\n"
+            "<b>Remove a payment</b>\n\n"
+            "• Reply to the <code>5182 out</code> message with /removepayment\n"
+            "• Or: /removepayment &lt;#&gt; (see # column on /payments)\n\n"
             f"<b>Recent payments</b>\n\n"
             f"{'\n\n'.join(blocks)}",
             parse_mode="HTML",
             disable_web_page_preview=True,
-        )
-        return
-
-    raw_id = context.args[0].lstrip("#")
-    try:
-        payment_id = int(raw_id)
-    except ValueError:
-        await message.reply_text(
-            "Could not read that payment #. Example: /removepayment 12"
         )
         return
 

@@ -12,7 +12,7 @@ from telegram.error import Conflict
 from telegram.ext import Application
 
 from instance_lock import acquire_single_instance_lock
-from instance_registry import register_instance
+from instance_registry import register_instance, register_bot
 from call_control_listener import start_call_control_listener
 from config import Settings
 from database import get_notify_chat_id, init_db, set_notify_chat_id
@@ -68,6 +68,7 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
     async def on_startup(app: Application) -> None:
         app.bot_data[ASYNCIO_LOOP_KEY] = asyncio.get_running_loop()
         app.bot_data["instance_id"] = instance_id
+        register_bot(instance_id, app.bot)
         ensure_telegram_send_worker(app.bot_data)
         get_token_holder(app.bot_data, settings)
         asyncio.create_task(

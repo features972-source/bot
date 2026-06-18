@@ -18,16 +18,23 @@ from handlers.admin_access import (
 from handlers.call_stats import build_call_stats_handlers
 from handlers.chat_blacklist import build_chat_blacklist_handlers
 from handlers.credo import build_credo_handlers
-from handlers.payments import build_payment_handlers
+from handlers.payments import (
+    build_payment_command_handlers,
+    build_payment_message_handlers,
+)
+from handlers.panic import build_panic_handlers
 from handlers.payment_reports import build_payment_report_handlers
+from handlers.premium_access import build_premium_access_handlers
 from handlers.ready_check import build_ready_check_handlers
 
 
 def build_bot_handlers() -> list:
     return [
-        # Conversation handlers must register before payment's catch-all text handler.
+        *build_panic_handlers(),
+        *build_payment_command_handlers(),
+        # Payment text outs before credo — credo reply guard must not block ON CALL replies.
+        *build_payment_message_handlers(),
         *build_credo_handlers(),
-        *build_payment_handlers(),
         *build_payment_report_handlers(),
         *build_call_stats_handlers(),
         *build_chat_blacklist_handlers(),
@@ -39,6 +46,7 @@ def build_bot_handlers() -> list:
         CommandHandler("users", users_command),
         CommandHandler("setnotify", set_notify_command),
         *build_admin_access_handlers(),
+        *build_premium_access_handlers(),
         *build_ready_check_handlers(),
     ]
 
@@ -64,13 +72,16 @@ def _format_help_text(
             f"📱 <b>{bot_name} — commands</b>\n\n"
             "<b>💸 Payments</b>\n"
             "/payments — this week's payments (resets Sunday)\n"
-            "/alltimepayments — all-time totals\n"
+            "/alltimepayments — all-time totals (/alltime works too)\n"
             "/outstats — opener & closer leaderboards\n"
-            "/cleared # — mark cleared · /notcleared # — mark not cleared\n"
+            "/out — log payment when Group Privacy is on (reply + /out 5182)\n"
+            "/setcleared — mark cleared (reply to out, or use # from /todaypayments)\n"
+            "/setnotcleared — mark not cleared\n"
             "/setpayment # amount — fix amount · /removepayment # — remove\n"
             f"{sync_line}"
             "/todaypayments — today's summary to your DM\n"
             "/clearpayments — wipe all (reply DELETE to confirm)\n"
+            "/panic — wipe everything (reply PANIC to confirm)\n"
             "/myid — your Telegram user id\n\n"
             "<b>📞 Calls</b>\n"
             "/stats — call leaderboard (today · 7 · 30 · all)\n"
@@ -88,10 +99,11 @@ def _format_help_text(
             "/cc · /creditcard · /credo · /credos\n"
             "/addcredouser · /removecredouser · /credousers\n"
             "/addcredo · /removecredo · /listcredocards\n"
+            "/addpremium · /removepremium · /premiumusers\n"
             f"/mail — {mailer_name} in DM · /maildone to stop\n"
             "/maillogs — recent /mail audit trail (admin)\n\n"
             "<i>Tip: reply to notes or ON CALL with 5182 out — or /out 5182 "
-            "(use /out if Group Privacy blocks plain text).</i>"
+            "if Group Privacy blocks plain text.</i>"
         )
 
     if credo:
@@ -310,6 +322,9 @@ async def set_notify_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     set_notify_chat_id(settings.database_path, chat.id)
     context.bot_data["notify_chat_id"] = chat.id
+    from handlers.admin_access import sync_bot_command_menu
+
+    await sync_bot_command_menu(context.bot, settings)
     await update.effective_message.reply_text(
         f"Announcements and **payment logging** will use this group.\n"
         f"Chat id: `{chat.id}`\n\n"

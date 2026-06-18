@@ -43,8 +43,23 @@ NOTIFY_GROUP_COMMANDS = [
     BotCommand("out", "Log payment (reply + /out 5182)"),
     BotCommand("payments", "This week's payments (resets Sunday)"),
     BotCommand("alltimepayments", "All-time payment totals"),
+    BotCommand("alltime", "All-time payment totals (short)"),
     BotCommand("outstats", "Payment out leaderboard"),
 ]
+
+
+def _payment_group_chat_ids(settings: Settings) -> set[int]:
+    from database import get_payment_notify_chat_id
+
+    ids: set[int] = set()
+    if settings.notify_chat_id is not None:
+        ids.add(settings.notify_chat_id)
+    payment_notify_id = get_payment_notify_chat_id(settings.database_path)
+    if payment_notify_id is not None:
+        ids.add(payment_notify_id)
+    if settings.copy_to_chat_id is not None:
+        ids.add(settings.copy_to_chat_id)
+    return ids
 
 
 def build_admin_access_handlers() -> list:
@@ -100,6 +115,11 @@ async def sync_bot_command_menu(bot: Bot, settings: Settings) -> None:
     if settings.copy_to_chat_id is not None:
         scopes_to_clear.append(BotCommandScopeChat(chat_id=settings.copy_to_chat_id))
 
+    if settings.notify_chat_id is not None:
+        scopes_to_clear.append(BotCommandScopeChat(chat_id=settings.notify_chat_id))
+    for chat_id in _payment_group_chat_ids(settings):
+        scopes_to_clear.append(BotCommandScopeChat(chat_id=chat_id))
+
     for scope in scopes_to_clear:
         await _clear_command_scope(bot, scope)
 
@@ -112,26 +132,27 @@ async def sync_bot_command_menu(bot: Bot, settings: Settings) -> None:
         scope=BotCommandScopeAllPrivateChats(),
     )
 
-    if settings.notify_chat_id is not None:
+    group_admin_extras = [
+        BotCommand("stats", "Call stats leaderboard (group admins)"),
+        BotCommand("missedcalls", "Download missed calls CSV (group admins)"),
+        BotCommand("setpayment", "Change payment # amount (group admins)"),
+        BotCommand("removepayment", "Remove payment # (group admins)"),
+        BotCommand("syncpayments", "Refresh payments CSV (group admins)"),
+        BotCommand("myid", "Show your Telegram user id"),
+    ]
+
+    for chat_id in _payment_group_chat_ids(settings):
         await bot.set_my_commands(
             NOTIFY_GROUP_COMMANDS,
-            scope=BotCommandScopeChat(chat_id=settings.notify_chat_id),
+            scope=BotCommandScopeChat(chat_id=chat_id),
         )
-        try:
-            await bot.set_my_commands(
-                NOTIFY_GROUP_COMMANDS
-                + [
-                    BotCommand("stats", "Call stats leaderboard (group admins)"),
-                    BotCommand("missedcalls", "Download missed calls CSV (group admins)"),
-                    BotCommand("setpayment", "Change payment # amount (group admins)"),
-                    BotCommand("removepayment", "Remove payment # (group admins)"),
-                    BotCommand("syncpayments", "Refresh payments CSV (group admins)"),
-                    BotCommand("myid", "Show your Telegram user id"),
-                ],
-                scope=BotCommandScopeAllChatAdministrators(),
-            )
-        except BadRequest:
-            logger.warning("Could not set group-admin payment commands")
+    try:
+        await bot.set_my_commands(
+            NOTIFY_GROUP_COMMANDS + group_admin_extras,
+            scope=BotCommandScopeAllChatAdministrators(),
+        )
+    except BadRequest:
+        logger.warning("Could not set group-admin payment commands")
 
     for user_id in iter_bot_admin_user_ids(settings, settings.database_path):
         scope = BotCommandScopeChat(chat_id=user_id)

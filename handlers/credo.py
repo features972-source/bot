@@ -579,6 +579,8 @@ async def try_log_active_credo_amount(
 async def credo_active_dm_amount_text(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    if context.user_data.get("add_card_active"):
+        return
     if await try_log_active_credo_amount(update, context):
         raise ApplicationHandlerStop
 
@@ -680,11 +682,21 @@ async def credo_reminder_loop(bot, settings: Settings, bot_data: dict) -> None:
 
 def build_credo_handlers() -> list:
     from handlers.bot_commands import help_conversation_fallback
+    from handlers.payments import (
+        alltimepayments_conversation_fallback,
+        looks_like_payment_out,
+        out_conversation_fallback,
+        payments_conversation_fallback,
+    )
 
     menu_fallbacks = [
         CommandHandler("cancel", credo_cancel),
         CommandHandler("start", help_conversation_fallback),
         CommandHandler("help", help_conversation_fallback),
+        CommandHandler("out", out_conversation_fallback),
+        CommandHandler("payments", payments_conversation_fallback),
+        CommandHandler("alltimepayments", alltimepayments_conversation_fallback),
+        CommandHandler("alltime", alltimepayments_conversation_fallback),
     ]
     user_conversation = ConversationHandler(
         entry_points=[
@@ -722,14 +734,22 @@ def build_credo_handlers() -> list:
             CommandHandler("cancel", addcredocard_cancel),
             CommandHandler("start", help_conversation_fallback),
             CommandHandler("help", help_conversation_fallback),
+            CommandHandler("out", out_conversation_fallback),
+            CommandHandler("payments", payments_conversation_fallback),
+            CommandHandler("alltimepayments", alltimepayments_conversation_fallback),
+            CommandHandler("alltime", alltimepayments_conversation_fallback),
         ],
         allow_reentry=True,
         name="credo_add_card",
     )
     return [
+        # Conversations before catch-all DM text (same rule as payments in bot_commands).
+        user_conversation,
+        add_card_conversation,
         MessageHandler(
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
             credo_active_dm_amount_text,
+            block=False,
         ),
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.REPLY,
@@ -737,8 +757,6 @@ def build_credo_handlers() -> list:
             block=False,
         ),
         CommandHandler("finished", credo_finished_command),
-        user_conversation,
-        add_card_conversation,
         CallbackQueryHandler(credos_standalone_callback, pattern=r"^credocard:\d+$"),
         CommandHandler("addcredouser", addcredouser_command),
         CommandHandler("removecredouser", removecredouser_command),
@@ -871,12 +889,22 @@ async def credo_reply_log_amount(update: Update, context: ContextTypes.DEFAULT_T
             and reply.from_user.is_bot
             and reply.from_user.id == context.bot.id
         ):
-            await message.reply_text(
-                "Log the amount **in your DMs** with the bot — reply there to the bot's "
-                "private message, **not in this group**.",
-                parse_mode="Markdown",
+            if looks_like_payment_out(
+                message.text, getattr(context.bot, "username", None)
+            ):
+                return
+            card_name = _lookup_credo_log_prompt(
+                context.application.bot_data,
+                chat_id=reply.chat_id,
+                message_id=reply.message_id,
             )
-            raise ApplicationHandlerStop
+            if card_name:
+                await message.reply_text(
+                    "Log the amount **in your DMs** with the bot — reply there to the bot's "
+                    "private message, **not in this group**.",
+                    parse_mode="Markdown",
+                )
+                raise ApplicationHandlerStop
         return
 
     reply = message.reply_to_message

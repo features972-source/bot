@@ -10,6 +10,7 @@ from handlers.stats_period import stats_timezone
 from money_format import format_amount
 
 TABLE_HEADERS_COMPACT = (
+    "#",
     "Amount",
     "Date",
     "Starter",
@@ -19,15 +20,16 @@ TABLE_HEADERS_COMPACT = (
 )
 
 TABLE_HEADERS_FULL = (
+    "#",
     "Amount",
     "Date",
     "Starter",
     "Finisher",
     "Card",
     "Cleared",
-    "Paying Starter (5%)",
-    "Paying Finisher (15%)",
-    "Paying Centre (20%)",
+    "Starter 5%",
+    "Finisher 15%",
+    "Centre 20%",
 )
 
 TABLE_HEADERS = TABLE_HEADERS_FULL
@@ -173,6 +175,7 @@ def payment_table_row(
             username_lookup=username_lookup,
         )
     row = [
+        str(record.id),
         format_amount(record.amount),
         format_payment_date(record.created_at),
         starter,
@@ -204,12 +207,14 @@ def payment_totals_table_row(
     total_count: int,
     records: list[PaymentRecord] | None = None,
     full_excel: bool = True,
+    total_label: str = "WEEK TOTAL",
 ) -> list[str]:
     count_label = f"{total_count} payment" + ("" if total_count == 1 else "s")
     if not full_excel:
         return [
-            "WEEK TOTAL",
+            "",
             format_amount(total_amount),
+            total_label,
             count_label,
             "",
             "",
@@ -219,9 +224,11 @@ def payment_totals_table_row(
     from payments_excel_export import centre_payout, finisher_payout, starter_payout
 
     recs = records or []
+    label = total_label
     return [
-        "TOTAL",
+        "",
         format_amount(total_amount),
+        label,
         count_label,
         "",
         "",
