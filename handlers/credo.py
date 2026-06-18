@@ -34,7 +34,6 @@ from database import (
     sum_credo_card_usage,
     upsert_credo_credit_card,
 )
-from database import CredoCreditCard
 from handlers.admin_access import (
     _display_name,
     _resolve_target_user,
@@ -65,7 +64,7 @@ UNAUTHORIZED = (
 CANCELLED = "Credo cancelled. Send /credos when you want to try again."
 NO_CARDS = (
     "No credit cards are set up yet.\n\n"
-    "An admin can add one with /addcredo (name → limit → bank logo → card photo)."
+    "An admin can add one with /addcredo (name → limit → card photo)."
 )
 
 
@@ -76,7 +75,6 @@ class State(IntEnum):
 class AddCardState(IntEnum):
     NAME = auto()
     CAPACITY = auto()
-    LOGO = auto()
     PHOTO = auto()
 
 
@@ -156,23 +154,6 @@ def get_credo_credit_cards(settings: Settings) -> list[str]:
     return cards
 
 
-def list_credo_picker_cards(settings: Settings) -> list[CredoCreditCard]:
-    cards: list[CredoCreditCard] = []
-    seen: set[str] = set()
-    for record in list_credo_credit_cards(settings.database_path):
-        if not record.photo_file_id or not record.logo_file_id:
-            continue
-        key = record.name.strip()
-        if not key:
-            continue
-        lowered = key.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        cards.append(record)
-    return cards
-
-
 def _card_balance(settings: Settings, card_name: str) -> tuple[float, float, float]:
     """Return (used, capacity, remaining) for a card."""
     card = get_credo_credit_card(settings.database_path, card_name)
@@ -232,9 +213,9 @@ def _format_usage_people_count(database_path: str, card_name: str) -> str:
     return f"Used by {count} people"
 
 
-def _format_dm_session_notice(card_name: str, limit_block: str) -> str:
+def _format_dm_photo_caption(card_name: str, limit_block: str) -> str:
     return (
-        f"Sent **{card_name}** to your DMs get worksy! 🔥\n\n"
+        f"💳 **{card_name}**\n\n"
         f"{limit_block}\n\n"
         "Type any payment amount here (e.g. `500` or `£500`) — **no need to reply** to a message.\n\n"
         "When you're finished with this card, send **/finished**.\n"
@@ -268,10 +249,20 @@ def _format_cards_list(settings: Settings, cards: list[str]) -> str:
     return "\n".join(_format_card_capacity(settings, name) for name in cards)
 
 
-def _logo_select_keyboard(index: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("\u200b", callback_data=f"{CALLBACK_CARD_PREFIX}{index}")]]
-    )
+def _card_keyboard(cards: list[str]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for index, name in enumerate(cards):
+        label = name if len(name) <= 32 else f"{name[:29]}…"
+        row.append(
+            InlineKeyboardButton(label, callback_data=f"{CALLBACK_CARD_PREFIX}{index}")
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
 
 
 async def _prompt_choose_card(
@@ -280,22 +271,16 @@ async def _prompt_choose_card(
     settings: Settings,
     user,
 ) -> int:
-    picker_cards = list_credo_picker_cards(settings)
-    if not picker_cards:
-        if get_credo_credit_cards(settings):
-            await message.reply_text(
-                "Cards are being set up — bank logos are missing. Ask an admin to /addcredo again."
-            )
-        else:
-            await message.reply_text(NO_CARDS)
+    cards = get_credo_credit_cards(settings)
+    if not cards:
+        await message.reply_text(NO_CARDS)
         return ConversationHandler.END
 
-    context.user_data["credo_cards"] = [card.name for card in picker_cards]
-    for index, card in enumerate(picker_cards):
-        await message.reply_photo(
-            photo=card.logo_file_id,
-            reply_markup=_logo_select_keyboard(index),
-        )
+    context.user_data["credo_cards"] = cards
+    await message.reply_text(
+        "\u200b",
+        reply_markup=_card_keyboard(cards),
+    )
     return State.CHOOSE
 
 
@@ -314,6 +299,7 @@ async def _deliver_credo_card(
     reply_target,
     context: ContextTypes.DEFAULT_TYPE,
     card_name: str,
+    edit_in_place: bool = False,
 ) -> int:
     if sender_user is None:
         return ConversationHandler.END
@@ -328,7 +314,7 @@ async def _deliver_credo_card(
 
     used, capacity, remaining = _card_balance(settings, card_name)
     limit_block = _format_card_limit_block(settings, card_name)
-    dm_caption = f"💳 **{card.name}**\n\n{limit_block}"
+    dm_caption = _format_dm_photo_caption(card.name, limit_block)
     sent_to_dm = False
 
     try:
@@ -344,7 +330,6 @@ async def _deliver_credo_card(
 
     context.user_data.pop("credo_selected_card", None)
 
-    dm_prompt_text = _format_dm_session_notice(card.name, limit_block)
     origin_chat_id = (
         reply_target.chat.id if reply_target.chat.type != "private" else None
     )
@@ -364,19 +349,21 @@ async def _deliver_credo_card(
             origin_chat_id=origin_chat_id,
         )
         if origin_chat_id is not None:
-            await reply_target.reply_text(
-                f"Sent **{card.name}** to your DMs get worksy! 🔥\n\nCheck your **DMs**",
-                parse_mode="Markdown",
+            group_text = (
+                f"Sent **{card.name}** to your DMs get worksy! 🔥\n\nCheck your **DMs**"
             )
-            prompt = await bot.send_message(
-                chat_id=sender_user.id,
-                text=dm_prompt_text,
-                parse_mode="Markdown",
-            )
-        else:
-            prompt = await reply_target.reply_text(
-                dm_prompt_text, parse_mode="Markdown"
-            )
+            if edit_in_place:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=reply_target.chat_id,
+                        message_id=reply_target.message_id,
+                        text=group_text,
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    await reply_target.reply_text(group_text, parse_mode="Markdown")
+            else:
+                await reply_target.reply_text(group_text, parse_mode="Markdown")
     else:
         pending = context.application.bot_data.setdefault("credo_pending", {})
         pending[sender_user.id] = card.name
@@ -397,30 +384,37 @@ async def _deliver_credo_card(
                 )
         except Exception:
             pass
-        prompt = None
-        await reply_target.reply_text(
+        fail_text = (
             f"Could not DM **{card.name}** — the card is **not** posted in this chat.\n\n"
             f"{limit_block}\n\n"
             "Tap the button below, press **Start**, then send /credos again.\n"
-            "You must log the amount **in your DMs** with the bot — not in this chat.",
-            parse_mode="Markdown",
-            reply_markup=keyboard,
+            "You must log the amount **in your DMs** with the bot — not in this chat."
         )
-
-    if prompt:
-        _register_credo_log_prompt(
-            context.application.bot_data,
-            chat_id=prompt.chat_id,
-            message_id=prompt.message_id,
-            card_name=card.name,
-        )
-        if origin_chat_id is not None:
-            _register_credo_log_origin(
-                context.application.bot_data,
-                user_id=sender_user.id,
-                card_name=card.name,
-                origin_chat_id=origin_chat_id,
+        if edit_in_place:
+            try:
+                await bot.edit_message_text(
+                    chat_id=reply_target.chat_id,
+                    message_id=reply_target.message_id,
+                    text=fail_text,
+                    parse_mode="Markdown",
+                    reply_markup=keyboard,
+                )
+            except Exception:
+                await reply_target.reply_text(
+                    fail_text, parse_mode="Markdown", reply_markup=keyboard
+                )
+        else:
+            await reply_target.reply_text(
+                fail_text, parse_mode="Markdown", reply_markup=keyboard
             )
+
+    if origin_chat_id is not None and sent_to_dm:
+        _register_credo_log_origin(
+            context.application.bot_data,
+            user_id=sender_user.id,
+            card_name=card.name,
+            origin_chat_id=origin_chat_id,
+        )
 
     return ConversationHandler.END
 
@@ -637,12 +631,6 @@ def build_credo_handlers() -> list:
                     filters.TEXT & ~filters.COMMAND, addcredocard_receive_capacity
                 )
             ],
-            AddCardState.LOGO: [
-                MessageHandler(PHOTO_FILTER, addcredocard_receive_logo),
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND, addcredocard_receive_logo_text
-                ),
-            ],
             AddCardState.PHOTO: [
                 MessageHandler(PHOTO_FILTER, addcredocard_receive_photo),
                 MessageHandler(
@@ -777,10 +765,6 @@ async def credos_choose_callback(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
     card_name = cards[index]
-    try:
-        await query.edit_message_reply_markup(reply_markup=None)
-    except Exception:
-        pass
     target = query.message
     if not target:
         return ConversationHandler.END
@@ -791,6 +775,7 @@ async def credos_choose_callback(update: Update, context: ContextTypes.DEFAULT_T
         reply_target=target,
         context=context,
         card_name=card_name,
+        edit_in_place=True,
     )
 
 
@@ -870,12 +855,11 @@ async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data.pop("add_card_name", None)
     context.user_data.pop("add_card_capacity", None)
-    context.user_data.pop("add_card_logo_file_id", None)
     context.user_data["add_card_active"] = True
 
     await message.reply_text(
-        "💳 **Add credo card** (4 steps)\n\n"
-        "**Step 1 of 4** — Send the **credit card name** (e.g. Lloyds).",
+        "💳 **Add credo card** (3 steps)\n\n"
+        "**Step 1 of 3** — Send the **credit card name** (e.g. Lloyds).",
         parse_mode="Markdown",
     )
     return AddCardState.NAME
@@ -885,7 +869,7 @@ async def addcredocard_receive_name(update: Update, context: ContextTypes.DEFAUL
     name = (update.message.text or "").strip()
     if len(name) < 2:
         await update.message.reply_text(
-            "**Step 1 of 4** — Please send a valid name (at least 2 characters).",
+            "**Step 1 of 3** — Please send a valid name (at least 2 characters).",
             parse_mode="Markdown",
         )
         return AddCardState.NAME
@@ -893,7 +877,7 @@ async def addcredocard_receive_name(update: Update, context: ContextTypes.DEFAUL
     context.user_data["add_card_name"] = name
     await update.message.reply_text(
         f"✅ Name: **{name}**\n\n"
-        "**Step 2 of 4** — Send the **£ limit** for this card (e.g. `5000` or `5k`).",
+        "**Step 2 of 3** — Send the **£ limit** for this card (e.g. `5000` or `5k`).",
         parse_mode="Markdown",
     )
     return AddCardState.CAPACITY
@@ -905,7 +889,7 @@ async def addcredocard_receive_capacity(
     amount = _parse_usage_amount(update.message.text or "")
     if amount is None:
         await update.message.reply_text(
-            "**Step 2 of 4** — Send a valid limit like `5000`, `£5000`, or `5k`.",
+            "**Step 2 of 3** — Send a valid limit like `5000`, `£5000`, or `5k`.",
             parse_mode="Markdown",
         )
         return AddCardState.CAPACITY
@@ -914,33 +898,7 @@ async def addcredocard_receive_capacity(
     name = context.user_data.get("add_card_name", "")
     await update.message.reply_text(
         f"✅ Limit: **{format_amount(amount)}** for **{name}**\n\n"
-        "**Step 3 of 4** — Send the **bank logo** photo (shown when users pick a card).",
-        parse_mode="Markdown",
-    )
-    return AddCardState.LOGO
-
-
-async def addcredocard_receive_logo_text(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    await update.message.reply_text(
-        "**Step 3 of 4** — Please send a **bank logo photo** (not text).",
-        parse_mode="Markdown",
-    )
-    return AddCardState.LOGO
-
-
-async def addcredocard_receive_logo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    file_id = _photo_file_id(update)
-    if not file_id:
-        await update.message.reply_text("Could not read that image. Try sending the logo again.")
-        return AddCardState.LOGO
-
-    context.user_data["add_card_logo_file_id"] = file_id
-    name = context.user_data.get("add_card_name", "")
-    await update.message.reply_text(
-        f"✅ Logo saved for **{name}**\n\n"
-        "**Step 4 of 4** — Send a **photo** of the card (sent privately to users).",
+        "**Step 3 of 3** — Send a **photo** of the card (sent privately to users).",
         parse_mode="Markdown",
     )
     return AddCardState.PHOTO
@@ -948,7 +906,7 @@ async def addcredocard_receive_logo(update: Update, context: ContextTypes.DEFAUL
 
 async def addcredocard_receive_photo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        "**Step 4 of 4** — Please send a **photo** of the card (not text).",
+        "**Step 3 of 3** — Please send a **photo** of the card (not text).",
         parse_mode="Markdown",
     )
     return AddCardState.PHOTO
@@ -968,18 +926,10 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
     name = context.user_data.get("add_card_name", "").strip()
     if not name:
         await message.reply_text(
-            "**Step 1 of 4** — Send the **credit card name** first.",
+            "**Step 1 of 3** — Send the **credit card name** first.",
             parse_mode="Markdown",
         )
         return AddCardState.NAME
-
-    logo_file_id = context.user_data.get("add_card_logo_file_id", "").strip()
-    if not logo_file_id:
-        await message.reply_text(
-            "**Step 3 of 4** — Send the **bank logo** first.",
-            parse_mode="Markdown",
-        )
-        return AddCardState.LOGO
 
     capacity = float(context.user_data.get("add_card_capacity") or 0)
     upsert_credo_credit_card(
@@ -987,11 +937,9 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
         name,
         file_id,
         capacity=capacity,
-        logo_file_id=logo_file_id,
     )
     context.user_data.pop("add_card_name", None)
     context.user_data.pop("add_card_capacity", None)
-    context.user_data.pop("add_card_logo_file_id", None)
     context.user_data.pop("add_card_active", None)
     cap_line = format_amount(capacity) if capacity > 0 else "no limit"
     limit_hint = (
@@ -1010,7 +958,6 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
 async def addcredocard_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop("add_card_name", None)
     context.user_data.pop("add_card_capacity", None)
-    context.user_data.pop("add_card_logo_file_id", None)
     context.user_data.pop("add_card_active", None)
     await update.effective_message.reply_text("Add card cancelled.")
     return ConversationHandler.END
