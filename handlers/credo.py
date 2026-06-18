@@ -33,7 +33,6 @@ from database import (
     remove_credo_whitelist_user,
     save_credo_profile,
     sum_credo_card_usage,
-    count_credo_card_usage_entries,
     upsert_credo_credit_card,
 )
 from handlers.admin_access import (
@@ -261,13 +260,6 @@ def _resolve_public_credo_chat(
 def _count_credo_users(database_path: str, card_name: str) -> int:
     usages = list_credo_card_usage(database_path, card_name, limit=500)
     return len({entry.telegram_user_id for entry in usages})
-
-
-def _format_usage_times(database_path: str, card_name: str) -> str:
-    count = count_credo_card_usage_entries(database_path, card_name)
-    if count == 1:
-        return "1 time"
-    return f"{count} times"
 
 
 def _format_usage_people_count(database_path: str, card_name: str) -> str:
@@ -532,11 +524,14 @@ async def _log_card_usage(
         amount=amount,
     )
     limit_block = _format_card_limit_block(settings, card_name)
-    usage_times = _format_usage_times(settings.database_path, card_name)
-    summary = (
-        f"📊 **{display_label}** has been used ({usage_times}).\n\n"
-        f"{limit_block}"
-    )
+    _, capacity, remaining = _card_balance(settings, card_name)
+    if capacity > 0:
+        summary = (
+            f"📊 **{display_label}** has just been used. "
+            f"{format_amount(remaining)} can still be sent!"
+        )
+    else:
+        summary = f"📊 **{display_label}** has just been used."
     await message.reply_text(
         f"✅ Logged {format_amount(amount)} on **{display_label}**.\n\n{limit_block}",
         parse_mode="Markdown",
