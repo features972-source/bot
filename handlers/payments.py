@@ -8,6 +8,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from io import BytesIO
 
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
@@ -39,11 +40,7 @@ from database import (
     update_payment_cleared,
 )
 from handlers.admin_access import is_bot_admin, require_admin
-from handlers.payment_table import (
-    format_payments_table,
-    payment_totals_table_row,
-    wrap_bold_table,
-)
+from handlers.payment_table_image import render_payments_table_png
 from handlers.stats_period import (
     _parse_stats_period,
     current_payment_week_start,
@@ -201,7 +198,6 @@ def _cleared_status_label(cleared: bool | None) -> str:
     return "🟢 Cleared" if cleared else "🔴 Not cleared"
 
 
-_PAYMENTS_SUMMARY_MAX_LEN = 4096
 _PAYMENTS_LIST_LIMIT = 25
 
 
@@ -920,14 +916,13 @@ def _payment_records_for_period(
     return records[:limit]
 
 
-def _build_payments_summary_message(
+def _build_payments_summary_image(
     settings: Settings,
     *,
     since: datetime | None,
     period_label: str,
     records: list[PaymentRecord],
-    include_admin_hint: bool,
-) -> str:
+) -> bytes:
     total_count, total_amount = get_payment_totals(settings.database_path, since=since)
     pending_count, pending_amount = get_payment_totals(
         settings.database_path, since=since, pending=True
@@ -944,58 +939,23 @@ def _build_payments_summary_message(
     else:
         lookup_records = list_all_payments(settings.database_path)
 
-    totals_row = payment_totals_table_row(
+    hidden = max(total_count - len(records), 0)
+    status = (
+        f"Pending {format_amount(pending_amount)} ({pending_count}) · "
+        f"Cleared {format_amount(cleared_amount)} ({cleared_count}) · "
+        f"Not cleared {format_amount(not_cleared_amount)} ({not_cleared_count})"
+    )
+    return render_payments_table_png(
+        records,
+        database_path=settings.database_path,
         total_amount=total_amount,
         total_count=total_count,
+        lookup_records=lookup_records,
+        title="💸 Payments",
+        subtitle=period_label,
+        status_summary=status,
+        hidden_count=hidden,
     )
-
-    hidden_from_limit = max(total_count - len(records), 0)
-    shown = list(records)
-    hidden_extra = 0
-
-    def _compose(shown_records: list[PaymentRecord], hidden: int) -> str:
-        header = f"💸 <b>Payments</b> · {html.escape(period_label)}"
-        if total_count > len(shown_records) + hidden:
-            header += (
-                f" · <i>{len(shown_records)} of {total_count} shown</i>"
-            )
-        elif hidden > 0:
-            header += f" · <i>{len(shown_records)} shown</i>"
-
-        table = format_payments_table(
-            shown_records,
-            totals_row=totals_row,
-            database_path=settings.database_path,
-            lookup_records=lookup_records,
-            hidden_count=hidden,
-        )
-        summary = (
-            f"\n🟧 {format_amount(pending_amount)} ({pending_count}) · "
-            f"🟩 {format_amount(cleared_amount)} ({cleared_count}) · "
-            f"🟥 {format_amount(not_cleared_amount)} ({not_cleared_count})"
-        )
-        hints = ""
-        if since is not None:
-            hints += (
-                "\n\n<i>/payments resets Sunday · /alltimepayments for all-time</i>"
-            )
-        if include_admin_hint:
-            hints += (
-                "\n<i>Admin: /setpayment # amount · /removepayment # · /syncpayments</i>"
-            )
-        body = f"{table}{summary}"
-        return f"{header}\n\n{wrap_bold_table(body)}{hints}"
-
-    while shown:
-        message = _compose(shown, hidden_from_limit + hidden_extra)
-        if len(message) <= _PAYMENTS_SUMMARY_MAX_LEN - 16:
-            return message
-        if len(shown) == 1:
-            break
-        shown.pop()
-        hidden_extra += 1
-
-    return _compose(shown, hidden_from_limit + hidden_extra)
 
 
 async def _send_payments_summary(
@@ -1020,17 +980,30 @@ async def _send_payments_summary(
     include_admin = bool(
         user and is_bot_admin(settings, settings.database_path, user.id)
     )
-    message = _build_payments_summary_message(
+    png = _build_payments_summary_image(
         settings,
         since=since,
         period_label=period_label,
         records=records,
-        include_admin_hint=include_admin,
     )
-    await update.effective_message.reply_text(
-        message,
+    caption_parts = []
+    if since is not None:
+        caption_parts.append(
+            "<i>/payments resets Sunday · /alltimepayments for all-time</i>"
+        )
+    if include_admin:
+        caption_parts.append(
+            "<i>Admin: /setpayment # amount · /removepayment # · /syncpayments</i>"
+        )
+    caption = "\n".join(caption_parts) if caption_parts else None
+
+    bio = BytesIO(png)
+    bio.name = "payments.png"
+    bio.seek(0)
+    await update.effective_message.reply_photo(
+        photo=bio,
+        caption=caption,
         parse_mode="HTML",
-        disable_web_page_preview=True,
     )
 
 
