@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 GRAPH_SCOPE = "Files.ReadWrite offline_access"
 GRAPH_AUTHORITY = "https://login.microsoftonline.com/common"
-REDIRECT_URI = "http://localhost:53682/"
-REDIRECT_PORT = 53682
+LOCAL_REDIRECT_URI = "http://localhost:53682/"
+LOCAL_REDIRECT_PORT = 53682
 ONEDRIVE_REMOTE_PATH = "q1.xlsx"
 CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -31,7 +31,7 @@ EXCEL_WEB_SETUP_HELP = (
     "Excel on the web needs a free Microsoft app (one-time setup):\n\n"
     "1. portal.azure.com → App registrations → New registration\n"
     "2. Name: Q1 Excel · Accounts: Personal Microsoft accounts only\n"
-    "3. Redirect URI: Web → http://localhost:53682/\n"
+    "3. Redirect URI: Web → your callback URL (see below)\n"
     "4. Certificates & secrets → New client secret → copy the Value\n"
     "5. API permissions → Microsoft Graph → Delegated → Files.ReadWrite\n"
     "6. Add to .env:\n"
@@ -39,6 +39,14 @@ EXCEL_WEB_SETUP_HELP = (
     "   MS_GRAPH_CLIENT_SECRET=your-secret\n"
     "7. Restart the bot, then run /excelwebauth again"
 )
+
+
+def excel_web_setup_help(settings: Settings) -> str:
+    redirect = settings.ms_graph_redirect_uri
+    return (
+        f"{EXCEL_WEB_SETUP_HELP}\n\n"
+        f"Redirect URI for this bot:\n{redirect}"
+    )
 
 
 def graph_app_configured(settings: Settings) -> bool:
@@ -109,21 +117,48 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
         return
 
 
+def build_oauth_authorize_url(settings: Settings, *, state: str) -> str | None:
+    if not graph_app_configured(settings):
+        return None
+    return (
+        f"{_auth_endpoint()}?client_id={quote(settings.ms_graph_client_id or '')}"
+        f"&response_type=code&redirect_uri={quote(settings.ms_graph_redirect_uri)}"
+        f"&scope={quote(GRAPH_SCOPE)}&response_mode=query&state={quote(state)}"
+    )
+
+
+def exchange_oauth_code(settings: Settings, code: str) -> dict[str, Any] | None:
+    response = httpx.post(
+        _token_endpoint(),
+        data=_token_request_data(
+            settings,
+            grant_type="authorization_code",
+            code=code,
+            redirect_uri=settings.ms_graph_redirect_uri,
+        ),
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        logger.warning("OAuth code exchange failed: %s", response.text[:300])
+        return None
+    return response.json()
+
+
 def browser_oauth_flow(settings: Settings) -> dict[str, Any] | None:
     """Open the system browser and capture the OAuth code on localhost."""
+    if settings.cloud_deployed:
+        return None
     if not graph_app_configured(settings):
         return None
 
     _OAuthCallbackHandler.auth_code = None
     _OAuthCallbackHandler.auth_error = None
     state = secrets.token_urlsafe(16)
-    auth_url = (
-        f"{_auth_endpoint()}?client_id={quote(settings.ms_graph_client_id or '')}"
-        f"&response_type=code&redirect_uri={quote(REDIRECT_URI)}"
-        f"&scope={quote(GRAPH_SCOPE)}&response_mode=query&state={quote(state)}"
-    )
+    auth_url = build_oauth_authorize_url(settings, state=state)
+    if not auth_url:
+        return None
 
-    server = HTTPServer(("127.0.0.1", REDIRECT_PORT), _OAuthCallbackHandler)
+    server = HTTPServer(("127.0.0.1", LOCAL_REDIRECT_PORT), _OAuthCallbackHandler)
     server.timeout = 300
     webbrowser.open(auth_url)
     server.handle_request()
@@ -134,20 +169,7 @@ def browser_oauth_flow(settings: Settings) -> dict[str, Any] | None:
     if not _OAuthCallbackHandler.auth_code:
         return None
 
-    response = httpx.post(
-        _token_endpoint(),
-        data=_token_request_data(
-            settings,
-            grant_type="authorization_code",
-            code=_OAuthCallbackHandler.auth_code,
-            redirect_uri=REDIRECT_URI,
-        ),
-        timeout=30,
-    )
-    if response.status_code >= 400:
-        logger.warning("OAuth code exchange failed: %s", response.text[:300])
-        return None
-    return response.json()
+    return exchange_oauth_code(settings, _OAuthCallbackHandler.auth_code)
 
 
 def refresh_access_token(settings: Settings) -> str | None:

@@ -23,7 +23,6 @@ from database import (
     get_payment_by_id,
     is_chat_blacklisted,
     update_payment_amount,
-    finisher_payment_streak_today,
     get_payment_leaderboard,
     get_payment_starter_leaderboard,
     get_payment_totals,
@@ -45,7 +44,6 @@ from handlers.stats_period import (
     stats_period_footnote,
     stats_timezone,
 )
-from payment_day_celebration import format_payment_day_celebration, load_agent_day_stats
 from payments_excel_export import (
     SYNC_ESTIMATE_SECONDS,
     excel_sync_with_timer,
@@ -197,31 +195,8 @@ def _cleared_status_label(cleared: bool | None) -> str:
     return "🟢 Cleared" if cleared else "🔴 Not cleared"
 
 
-def _format_payment_streak_line(streak: int | None) -> str | None:
-    if not streak or streak < 3:
-        return None
-    flames = "🔥"
-    if streak >= 10:
-        flames = "🔥🔥🔥"
-    elif streak >= 5:
-        flames = "🔥🔥"
-    return f"{flames} {streak} payments in a row today! {flames}"
-
-
-def _format_payment_reply(
-    record: PaymentRecord,
-    *,
-    streak: int | None = None,
-    day_celebration: str | None = None,
-) -> str:
-    parts = [_format_payment_celebration(record)]
-    if day_celebration:
-        parts.append(day_celebration)
-    streak_line = _format_payment_streak_line(streak)
-    if streak_line:
-        parts.append(streak_line)
-    parts.append(_cleared_status_label(record.cleared))
-    return "\n\n".join(parts)
+def _format_payment_reply(record: PaymentRecord) -> str:
+    return _format_payment_celebration(record)
 
 
 def _format_card_prompt(
@@ -330,9 +305,9 @@ def _format_payment_celebration(record: PaymentRecord) -> str:
         team = f"Finisher {finisher}"
     status = _cleared_status_label(record.cleared)
     if record.cleared:
-        header = f"🔥 {amount} OUT — added to the payment list! 🔥"
+        header = f"🔥 {amount} OUT 🔥"
     else:
-        header = f"🟠 {amount} OUT — Pending"
+        header = f"🟠 {amount} OUT"
     lines = [header, "", f"💸 {team}", f"⏱ {when}", status]
     if record.card_last4:
         lines.insert(3, f"💳 Card ····{record.card_last4}")
@@ -603,39 +578,7 @@ async def _finalize_payment_out(
     record = get_payment_by_id(settings.database_path, payment_id)
     if record is None:
         return
-    since, _ = _parse_stats_period([])
-    streak = finisher_payment_streak_today(
-        settings.database_path,
-        finisher_user_id=pending.finisher_user_id,
-        since=since,
-    )
-    finisher_stats = load_agent_day_stats(
-        settings.database_path,
-        telegram_user_id=pending.finisher_user_id,
-        since=since,
-    )
-    starter_stats = None
-    if (
-        pending.starter_user_id is not None
-        and pending.starter_user_id != pending.finisher_user_id
-    ):
-        starter_stats = load_agent_day_stats(
-            settings.database_path,
-            telegram_user_id=pending.starter_user_id,
-            since=since,
-        )
-    day_celebration = format_payment_day_celebration(
-        record,
-        finisher_stats=finisher_stats,
-        starter_stats=starter_stats,
-    )
-    await message.reply_text(
-        _format_payment_reply(
-            record,
-            streak=streak,
-            day_celebration=day_celebration,
-        )
-    )
+    await message.reply_text(_format_payment_reply(record))
     try:
         from quiet_wins import maybe_quiet_win_close_rate
 
@@ -1481,10 +1424,33 @@ async def excelwebauth_command(
     if message is None:
         return
 
-    from onedrive_cloud_sync import EXCEL_WEB_SETUP_HELP, browser_oauth_flow, graph_app_configured
+    from onedrive_cloud_sync import (
+        build_oauth_authorize_url,
+        browser_oauth_flow,
+        excel_web_setup_help,
+        graph_app_configured,
+    )
 
     if not graph_app_configured(settings):
-        await message.reply_text(EXCEL_WEB_SETUP_HELP)
+        await message.reply_text(excel_web_setup_help(settings))
+        return
+
+    if settings.cloud_deployed:
+        import secrets
+
+        state = secrets.token_urlsafe(16)
+        auth_url = build_oauth_authorize_url(settings, state=state)
+        if not auth_url:
+            await message.reply_text(excel_web_setup_help(settings))
+            return
+        pending = context.bot_data.setdefault("msgraph_oauth_states", {})
+        pending[state] = message.chat_id
+        await message.reply_text(
+            "Open this link to sign in with Microsoft "
+            "(same account that owns your OneDrive file):\n\n"
+            f"{auth_url}\n\n"
+            "After sign-in, return here — the bot will confirm when Excel is connected."
+        )
         return
 
     await message.reply_text(
@@ -1497,7 +1463,7 @@ async def excelwebauth_command(
     if not token_data or not token_data.get("refresh_token"):
         await message.reply_text(
             "Sign-in failed or timed out.\n\n"
-            "Make sure redirect URI is exactly http://localhost:53682/ in Azure, "
+            f"Make sure redirect URI is exactly {settings.ms_graph_redirect_uri} in Azure, "
             "then run /excelwebauth again."
         )
         return
@@ -1524,14 +1490,19 @@ async def syncpayments_command(
         return
 
     if not settings.payments_onedrive_path:
-        await message.reply_text(
-            "OneDrive Excel export is not configured.\n\n"
-            "Add to .env:\n"
-            "PAYMENTS_ONEDRIVE_PATH=C:\\Users\\You\\OneDrive\\…\\YourFile.xlsx\n"
-            "PAYMENTS_ONEDRIVE_WORKSHEET=Payments Automatic\n\n"
-            "The file must be in your synced OneDrive folder (open it once in "
-            "Excel desktop so the path exists on this PC)."
-        )
+        from onedrive_cloud_sync import graph_configured
+
+        if not graph_configured(settings):
+            await message.reply_text(
+                "Payment Excel export is not configured.\n\n"
+                "On Render/cloud: set MS_GRAPH_CLIENT_ID and MS_GRAPH_CLIENT_SECRET, "
+                "run /excelwebauth, then /syncpayments.\n\n"
+                "On PC: add PAYMENTS_ONEDRIVE_PATH to .env (synced OneDrive folder)."
+            )
+        else:
+            await message.reply_text(
+                "Cloud Excel is connected — run /syncpayments to push to OneDrive."
+            )
         return
 
     export_all = bool(context.args) and context.args[0].strip().lower() == "all"

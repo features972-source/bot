@@ -19,6 +19,21 @@ def _ensure_env_loaded() -> None:
     load_dotenv(_resolve_env_path())
 
 
+def _cloud_deployed() -> bool:
+    if os.getenv("CLOUD_DEPLOYED", "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    if os.getenv("RENDER", "").strip().lower() in {"true", "1", "yes"}:
+        return True
+    return bool(os.getenv("RENDER_EXTERNAL_URL", "").strip())
+
+
+def _data_dir() -> Path | None:
+    raw = os.getenv("DATA_DIR", "").strip()
+    if not raw:
+        return None
+    return Path(raw)
+
+
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
@@ -43,6 +58,7 @@ class Settings:
     excel_web_url: str | None
     ms_graph_client_id: str | None
     ms_graph_client_secret: str | None
+    ms_graph_redirect_uri: str
     bot_display_name: str
     telethon_api_id: int | None
     telethon_api_hash: str | None
@@ -53,6 +69,10 @@ class Settings:
     ready_check_hour: int | None
     ready_check_enabled: bool
     currency_symbol: str
+    data_dir: str | None
+    cloud_deployed: bool
+    skip_instance_lock: bool
+    public_base_url: str | None
 
     @property
     def threex_enabled(self) -> bool:
@@ -105,10 +125,17 @@ def load_settings() -> Settings:
     if not secret:
         raise RuntimeError(f"WEBHOOK_SECRET is not set in {env_path}.")
 
+    data_dir_path = _data_dir()
+    data_dir = str(data_dir_path) if data_dir_path else None
+    cloud_deployed = _cloud_deployed()
+    public_base_url = os.getenv("RENDER_EXTERNAL_URL", "").strip() or None
+
     onedrive_raw = os.getenv("PAYMENTS_ONEDRIVE_PATH", "").strip()
     payments_onedrive_path = None
     if onedrive_raw:
         payments_onedrive_path = str(Path(onedrive_raw).expanduser().resolve())
+    elif data_dir_path is not None:
+        payments_onedrive_path = str(data_dir_path / "exports" / "q1.xlsx")
 
     worksheet = os.getenv("PAYMENTS_ONEDRIVE_WORKSHEET", "Payments Automatic").strip()
     payments_onedrive_worksheet = worksheet or "Payments Automatic"
@@ -128,8 +155,22 @@ def load_settings() -> Settings:
         telethon_api_id = int(api_id_raw)
 
     telethon_api_hash = os.getenv("TELETHON_API_HASH", "").strip() or None
-    db_stem = Path(os.getenv("DATABASE_PATH", "links.db")).stem
-    telethon_session_path = str(_ROOT / f"mailer-{db_stem}")
+    db_default = (
+        str(data_dir_path / "links.db")
+        if data_dir_path is not None
+        else "links.db"
+    )
+    database_path = os.getenv("DATABASE_PATH", db_default)
+    if data_dir_path is None and database_path.replace("\\", "/").startswith("/data/"):
+        data_dir_path = Path("/data")
+        data_dir = str(data_dir_path)
+    if payments_onedrive_path is None and data_dir_path is not None:
+        payments_onedrive_path = str(data_dir_path / "exports" / "q1.xlsx")
+    db_stem = Path(database_path).stem
+    if data_dir_path is not None:
+        telethon_session_path = str(data_dir_path / f"mailer-{db_stem}")
+    else:
+        telethon_session_path = str(_ROOT / f"mailer-{db_stem}")
 
     mailer_bot_username = (
         os.getenv("MAILER_BOT_USERNAME", "RvssianMailBot").strip() or "RvssianMailBot"
@@ -161,20 +202,40 @@ def load_settings() -> Settings:
     currency_raw = os.getenv("PAYMENT_CURRENCY_SYMBOL", "£").strip()
     currency_symbol = currency_raw or "£"
 
+    ms_graph_redirect_uri = os.getenv("MS_GRAPH_REDIRECT_URI", "").strip()
+    if not ms_graph_redirect_uri and public_base_url:
+        ms_graph_redirect_uri = f"{public_base_url.rstrip('/')}/oauth/msgraph/callback"
+    elif not ms_graph_redirect_uri:
+        ms_graph_redirect_uri = "http://localhost:53682/"
+
+    listen_public_url = os.getenv("LISTEN_PUBLIC_URL", "").strip()
+    if not listen_public_url and public_base_url:
+        listen_public_url = public_base_url.rstrip("/")
+
+    skip_instance_lock = os.getenv("SKIP_INSTANCE_LOCK", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    } or cloud_deployed
+
+    webhook_port_raw = os.getenv("PORT", "").strip() or os.getenv(
+        "WEBHOOK_PORT", "8080"
+    )
+
     return Settings(
         bot_token=token,
         admin_chat_id=admin_chat_id,
         notify_chat_id=notify_chat_id,
         copy_to_chat_id=copy_to_chat_id,
         webhook_host=os.getenv("WEBHOOK_HOST", "0.0.0.0"),
-        webhook_port=int(os.getenv("WEBHOOK_PORT", "8080")),
+        webhook_port=int(webhook_port_raw),
         webhook_secret=secret,
-        database_path=os.getenv("DATABASE_PATH", "links.db"),
+        database_path=database_path,
         threex_fqdn=os.getenv("THREECX_FQDN", "").strip(),
         threex_client_id=os.getenv("THREECX_CLIENT_ID", "").strip(),
         threex_api_key=os.getenv("THREECX_API_KEY", "").strip(),
         threex_admin_ext=os.getenv("THREECX_ADMIN_EXT", "").strip(),
-        listen_public_url=os.getenv("LISTEN_PUBLIC_URL", "").strip(),
+        listen_public_url=listen_public_url,
         listen_chat_id=listen_chat_id,
         transcript_enabled=os.getenv("TRANSCRIPT_ENABLED", "true").strip().lower()
         in {"1", "true", "yes"},
@@ -185,6 +246,7 @@ def load_settings() -> Settings:
         excel_web_url=excel_web_url,
         ms_graph_client_id=ms_graph_client_id,
         ms_graph_client_secret=ms_graph_client_secret,
+        ms_graph_redirect_uri=ms_graph_redirect_uri,
         bot_display_name=bot_display_name,
         telethon_api_id=telethon_api_id,
         telethon_api_hash=telethon_api_hash,
@@ -195,4 +257,8 @@ def load_settings() -> Settings:
         ready_check_hour=ready_check_hour,
         ready_check_enabled=ready_check_enabled,
         currency_symbol=currency_symbol,
+        data_dir=data_dir,
+        cloud_deployed=cloud_deployed,
+        skip_instance_lock=skip_instance_lock,
+        public_base_url=public_base_url,
     )

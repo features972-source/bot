@@ -2,6 +2,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 
 @dataclass
@@ -2061,7 +2062,9 @@ def _row_to_mailer_log(row: sqlite3.Row) -> MailerLogEntry:
 
 @contextmanager
 def _connect(path: str):
-    conn = sqlite3.connect(path)
+    db_path = Path(path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
     try:
         yield conn
     finally:

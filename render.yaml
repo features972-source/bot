@@ -1,0 +1,172 @@
+# Render Blueprint — 3CX Telegram bots (24/7 on Render)
+# One Web Service per bot (Q1, Q2, Q1 Australia). Each needs its own BOT_TOKEN and disk.
+#
+# Before deploy: stop bots on your PC. Fill secrets in the Render dashboard after blueprint sync.
+# Paid Starter+ plan recommended (free tier sleeps).
+
+services:
+  - type: web
+    name: q1-telegram-bot
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    disk:
+      name: q1-bot-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: CLOUD_DEPLOYED
+        value: "true"
+      - key: DATABASE_PATH
+        value: /data/links.db
+      - key: PAYMENTS_ONEDRIVE_PATH
+        value: /data/exports/q1.xlsx
+      - key: PAYMENTS_ONEDRIVE_WORKSHEET
+        value: Sheet1
+      - key: WEBHOOK_HOST
+        value: 0.0.0.0
+      - key: BOT_DISPLAY_NAME
+        value: Q1 Call Manager
+      - key: STATS_TIMEZONE
+        value: Europe/London
+      - key: READY_CHECK_ENABLED
+        value: "true"
+      - key: READY_CHECK_HOUR
+        value: "9"
+      - key: BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: NOTIFY_CHAT_ID
+        sync: false
+      - key: THREECX_FQDN
+        sync: false
+      - key: THREECX_CLIENT_ID
+        sync: false
+      - key: THREECX_API_KEY
+        sync: false
+      - key: THREECX_ADMIN_EXT
+        sync: false
+      - key: MS_GRAPH_CLIENT_ID
+        sync: false
+      - key: MS_GRAPH_CLIENT_SECRET
+        sync: false
+      - key: EXCEL_WEB_URL
+        sync: false
+      - key: TELETHON_API_ID
+        sync: false
+      - key: TELETHON_API_HASH
+        sync: false
+      - key: TRANSCRIPT_ENABLED
+        value: "false"
+
+  - type: web
+    name: q2-telegram-bot
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    disk:
+      name: q2-bot-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: CLOUD_DEPLOYED
+        value: "true"
+      - key: DATABASE_PATH
+        value: /data/links-bot2.db
+      - key: PAYMENTS_ONEDRIVE_PATH
+        value: /data/exports/q2.xlsx
+      - key: WEBHOOK_HOST
+        value: 0.0.0.0
+      - key: BOT_DISPLAY_NAME
+        value: Q2 Call Manager
+      - key: STATS_TIMEZONE
+        value: Europe/London
+      - key: BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: NOTIFY_CHAT_ID
+        sync: false
+      - key: THREECX_FQDN
+        sync: false
+      - key: THREECX_CLIENT_ID
+        sync: false
+      - key: THREECX_API_KEY
+        sync: false
+      - key: THREECX_ADMIN_EXT
+        sync: false
+      - key: MS_GRAPH_CLIENT_ID
+        sync: false
+      - key: MS_GRAPH_CLIENT_SECRET
+        sync: false
+      - key: EXCEL_WEB_URL
+        sync: false
+      - key: TELETHON_API_ID
+        sync: false
+      - key: TELETHON_API_HASH
+        sync: false
+
+  - type: web
+    name: q1australia-telegram-bot
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    disk:
+      name: q1australia-bot-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: CLOUD_DEPLOYED
+        value: "true"
+      - key: DATABASE_PATH
+        value: /data/links-q1australia.db
+      - key: PAYMENTS_ONEDRIVE_PATH
+        value: /data/exports/q1australia.xlsx
+      - key: WEBHOOK_HOST
+        value: 0.0.0.0
+      - key: BOT_DISPLAY_NAME
+        value: Q1 Australia
+      - key: PAYMENT_CURRENCY_SYMBOL
+        value: A$
+      - key: STATS_TIMEZONE
+        value: Australia/Sydney
+      - key: BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: NOTIFY_CHAT_ID
+        sync: false
+      - key: THREECX_FQDN
+        sync: false
+      - key: THREECX_CLIENT_ID
+        sync: false
+      - key: THREECX_API_KEY
+        sync: false
+      - key: THREECX_ADMIN_EXT
+        sync: false
+      - key: MS_GRAPH_CLIENT_ID
+        sync: false
+      - key: MS_GRAPH_CLIENT_SECRET
+        sync: false
+      - key: EXCEL_WEB_URL
+        sync: false
+      - key: TELETHON_API_ID
+        sync: false
+      - key: TELETHON_API_HASH
+        sync: false

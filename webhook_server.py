@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import logging
 import os
@@ -56,6 +57,70 @@ def start_webhook_server(
     @app.get("/health")
     def health():
         return jsonify({"ok": True})
+
+    @app.get("/oauth/msgraph/callback")
+    def msgraph_oauth_callback():
+        from onedrive_cloud_sync import exchange_oauth_code
+        from database import set_ms_graph_refresh_token
+
+        error = request.args.get("error_description") or request.args.get("error")
+        if error:
+            return (
+                "<html><body><h2>Sign-in failed</h2>"
+                f"<p>{html.escape(str(error))}</p>"
+                "<p>Return to Telegram and run /excelwebauth again.</p>"
+                "</body></html>",
+                400,
+            )
+
+        code = request.args.get("code", "").strip()
+        state = request.args.get("state", "").strip()
+        if not code:
+            return "Missing authorization code.", 400
+
+        pending = bot_data.get("msgraph_oauth_states") or {}
+        chat_id = pending.pop(state, None)
+        bot_data["msgraph_oauth_states"] = pending
+        if chat_id is None:
+            return (
+                "<html><body><h2>Link expired</h2>"
+                "<p>Run /excelwebauth again in Telegram.</p></body></html>",
+                400,
+            )
+
+        token_data = exchange_oauth_code(settings, code)
+        if not token_data or not token_data.get("refresh_token"):
+            return (
+                "<html><body><h2>Sign-in failed</h2>"
+                "<p>Could not exchange the authorization code.</p>"
+                "<p>Check Azure redirect URI matches this bot URL, then try again.</p>"
+                "</body></html>",
+                400,
+            )
+
+        set_ms_graph_refresh_token(
+            settings.database_path, token_data["refresh_token"]
+        )
+
+        async def _notify() -> None:
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "Excel on the web is connected.\n\n"
+                        "Run /syncpayments — updates push to your OneDrive file. "
+                        "Press F5 in the browser tab if it is already open."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify admin after MS Graph OAuth")
+
+        asyncio.run_coroutine_threadsafe(_notify(), loop)
+        return (
+            "<html><body><h2>Sign-in OK</h2>"
+            "<p>Excel on the web is connected. You can close this tab and return to Telegram.</p>"
+            "</body></html>"
+        )
 
     @app.get("/listen/<path:session_id>")
     def listen_page(session_id: str):

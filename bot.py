@@ -127,10 +127,19 @@ def main() -> None:
     global _instance_lock
     settings = load_settings()
     from money_format import init_currency
+    from pathlib import Path
 
     init_currency(settings.currency_symbol)
+    data_root = Path(settings.data_dir) if settings.data_dir else None
+    if data_root is None and settings.database_path.startswith("/data"):
+        data_root = Path("/data")
+    if data_root is not None:
+        data_root.mkdir(parents=True, exist_ok=True)
+        (data_root / "exports").mkdir(parents=True, exist_ok=True)
+    Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
     init_db(settings.database_path)
-    _instance_lock = _acquire_single_instance_lock(settings.database_path)
+    if not settings.skip_instance_lock:
+        _instance_lock = _acquire_single_instance_lock(settings.database_path)
 
     async def on_startup(app: Application) -> None:
         app.bot_data[ASYNCIO_LOOP_KEY] = asyncio.get_running_loop()
@@ -198,6 +207,11 @@ def main() -> None:
 
     if settings.threex_enabled:
         print(f"3CX AI Call Control enabled for {settings.threex_fqdn}")
+    if settings.cloud_deployed:
+        base = settings.public_base_url or settings.listen_public_url
+        print(f"Cloud deploy active. Public URL: {base}")
+        print(f"Health check: {base}/health")
+        print(f"MS Graph OAuth callback: {settings.ms_graph_redirect_uri}")
     print(
         f"Bot is running. 3CX webhook URL (optional):\n"
         f"http://YOUR_SERVER:{settings.webhook_port}/webhook/3cx/{settings.webhook_secret}"
