@@ -129,6 +129,15 @@ def main() -> None:
     from money_format import init_currency
 
     init_currency(settings.currency_symbol)
+    if settings.cloud_deployed and not settings.persistent_data:
+        logger.warning(
+            "DATA NOT PERSISTENT — database is at %s. "
+            "Add a Render disk mounted at /data and set DATA_DIR=/data, "
+            "DATABASE_PATH=/data/links.db or data will be lost on every redeploy.",
+            settings.database_path,
+        )
+    elif settings.persistent_data:
+        logger.info("Using persistent database at %s", settings.database_path)
     init_db(settings.database_path)
     if not settings.skip_instance_lock:
         _instance_lock = _acquire_single_instance_lock(settings.database_path)

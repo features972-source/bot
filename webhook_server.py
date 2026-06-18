@@ -58,7 +58,14 @@ def start_webhook_server(
 
     @app.get("/health")
     def health():
-        return jsonify({"ok": True})
+        return jsonify(
+            {
+                "ok": True,
+                "database_path": settings.database_path,
+                "data_dir": settings.data_dir,
+                "persistent_data": settings.persistent_data,
+            }
+        )
 
     @app.post("/admin/restore-db")
     def restore_db():

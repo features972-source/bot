@@ -110,6 +110,7 @@ class Settings:
     currency_symbol: str
     data_dir: str | None
     cloud_deployed: bool
+    persistent_data: bool
     skip_instance_lock: bool
     public_base_url: str | None
 
@@ -279,6 +280,8 @@ def load_settings() -> Settings:
         "yes",
     } or cloud_deployed
 
+    persistent_data = database_path.replace("\\", "/").startswith("/data/")
+
     webhook_port_raw = os.getenv("PORT", "").strip() or os.getenv(
         "WEBHOOK_PORT", "8080"
     )
@@ -320,6 +323,7 @@ def load_settings() -> Settings:
         currency_symbol=currency_symbol,
         data_dir=data_dir,
         cloud_deployed=cloud_deployed,
+        persistent_data=persistent_data,
         skip_instance_lock=skip_instance_lock,
         public_base_url=public_base_url,
     )
