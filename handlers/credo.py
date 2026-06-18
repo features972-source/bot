@@ -416,6 +416,7 @@ async def _deliver_credo_card(
             origin_chat_id=origin_chat_id,
         )
 
+    context.user_data.pop("credo_cards", None)
     return ConversationHandler.END
 
 
@@ -618,7 +619,6 @@ def build_credo_handlers() -> list:
         },
         fallbacks=menu_fallbacks,
         allow_reentry=True,
-        per_message=True,
         name="credo_user",
     )
     add_card_conversation = ConversationHandler(
@@ -645,7 +645,6 @@ def build_credo_handlers() -> list:
             CommandHandler("help", help_conversation_fallback),
         ],
         allow_reentry=True,
-        per_message=True,
         name="credo_add_card",
     )
     return [
