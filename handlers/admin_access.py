@@ -44,7 +44,6 @@ NOTIFY_GROUP_COMMANDS = [
     BotCommand("payments", "This week's payments (resets Sunday)"),
     BotCommand("alltimepayments", "All-time payment totals"),
     BotCommand("alltime", "All-time payment totals (short)"),
-    BotCommand("outstats", "Payment out leaderboard"),
 ]
 
 

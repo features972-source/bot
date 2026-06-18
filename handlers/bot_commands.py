@@ -25,7 +25,6 @@ from handlers.payments import (
 from handlers.panic import build_panic_handlers
 from handlers.payment_reports import build_payment_report_handlers
 from handlers.premium_access import build_premium_access_handlers
-from handlers.ready_check import build_ready_check_handlers
 
 
 def build_bot_handlers() -> list:
@@ -47,7 +46,6 @@ def build_bot_handlers() -> list:
         CommandHandler("setnotify", set_notify_command),
         *build_admin_access_handlers(),
         *build_premium_access_handlers(),
-        *build_ready_check_handlers(),
     ]
 
 
@@ -62,9 +60,7 @@ def _format_help_text(
     if admin:
         sync_line = (
             "/syncpayments — export to OneDrive Excel\n"
-            "/syncpayments all — export every payment (exit paid-side mode)\n"
             "/paidside — clear Excel and track new outs only\n"
-            "/excelwebauth — connect Excel on the web (one-time)\n"
             if onedrive
             else ""
         )
@@ -73,7 +69,6 @@ def _format_help_text(
             "<b>💸 Payments</b>\n"
             "/payments — this week's payments (resets Sunday)\n"
             "/alltimepayments — all-time totals (/alltime works too)\n"
-            "/outstats — opener & closer leaderboards\n"
             "/out — log payment when Group Privacy is on (reply + /out 5182)\n"
             "/setcleared — mark cleared (reply to out, or use # from /todaypayments)\n"
             "/setnotcleared — mark not cleared\n"
@@ -91,8 +86,7 @@ def _format_help_text(
             "/setnotify — set announcement group\n"
             "/setnotifypayments — live payment list in a group (pick Q1/Q2, auto-updates)\n\n"
             "<b>👑 Admins</b>\n"
-            "/admin · /addadmin · /removeadmin — manage bot admins\n"
-            "/ready — shift ready check (headset, softphone, credo, mail)\n\n"
+            "/admin · /addadmin · /removeadmin — manage bot admins\n\n"
             "<b>🚫 Blacklist</b>\n"
             "/blacklist @user reason · /unblacklist @user · /blacklisted\n\n"
             "<b>💳 Credos</b>\n"
@@ -111,7 +105,7 @@ def _format_help_text(
             f"💳 <b>Credo & {mailer_name}</b>\n\n"
             "/cc — view cards & capacity, pick one (DM)\n"
             "(also /creditcard, /credo, /credos)\n"
-            "Type amounts in DMs · /finished when done · /mail still works\n"
+            "/finished — when done · /mail still works\n"
             f"/mail — open {mailer_name} via the bot (DM only)\n"
             "/maildone — end mailer session\n"
             "/cancel — cancel an in-progress flow"
@@ -122,9 +116,7 @@ def _format_help_text(
         "Call announcements and payments run in your team group.\n\n"
         f"<b>📧 {mailer_name}</b>\n"
         f"/mail — open {mailer_name} in this DM (joins queue if busy)\n"
-        "/maildone — end session or leave queue\n\n"
-        "<b>🟢 Shift</b>\n"
-        "/ready — headset, softphone, credo & mail check"
+        "/maildone — end session or leave queue"
     )
 
 

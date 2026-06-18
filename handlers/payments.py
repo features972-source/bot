@@ -25,7 +25,6 @@ from config import Settings
 from call_display import format_extension_user_plain
 from database import (
     ExtensionLink,
-    PaymentLeaderboardEntry,
     PaymentRecord,
     clear_all_payments,
     delete_payment_out,
@@ -33,8 +32,6 @@ from database import (
     get_payment_by_message,
     is_chat_blacklisted,
     update_payment_amount,
-    get_payment_leaderboard,
-    get_payment_starter_leaderboard,
     get_payment_notify_chat_id,
     get_payment_totals,
     list_links,
@@ -43,9 +40,7 @@ from database import (
     list_recent_payments,
     payment_message_exists,
     record_payment_out,
-    clear_paidside_epoch,
     get_paidside_epoch,
-    set_ms_graph_refresh_token,
     set_paidside_epoch,
     update_payment_cleared,
 )
@@ -64,9 +59,7 @@ from handlers.payment_table_image import (
     render_payments_table_png,
 )
 from handlers.stats_period import (
-    _parse_stats_period,
     current_payment_week_start,
-    stats_period_footnote,
     stats_timezone,
 )
 from payments_excel_export import (
@@ -146,8 +139,6 @@ def build_payment_command_handlers() -> list:
         CommandHandler("sent", payments_command),
         CommandHandler("alltimepayments", alltimepayments_command),
         CommandHandler("alltime", alltimepayments_command),
-        CommandHandler("outstats", outstats_command),
-        CommandHandler("outleaderboard", outstats_command),
         CommandHandler("clearpayments", clearpayments_command),
         CommandHandler("todaypayments", todaypayments_command),
         CommandHandler("cleared", cleared_command),
@@ -160,7 +151,6 @@ def build_payment_command_handlers() -> list:
         CommandHandler("removepayment", removepayment_command),
         CommandHandler("syncpayments", syncpayments_command),
         CommandHandler("paidside", paidside_command),
-        CommandHandler("excelwebauth", excelwebauth_command),
         CommandHandler("myid", myid_command),
         CallbackQueryHandler(payments_page_callback, pattern=r"^paypage:"),
     ]
@@ -1630,144 +1620,6 @@ alltimepayments_conversation_fallback = _payment_command_conversation_fallback(
 out_conversation_fallback = _payment_command_conversation_fallback(out_command)
 
 
-def _leaderboard_user_label(entry: PaymentLeaderboardEntry) -> str:
-    username = (entry.telegram_username or "").strip()
-    display = (entry.display_name or "").strip()
-    if username and display:
-        return f"@{html.escape(username.lstrip('@'))} ({html.escape(display)})"
-    if username:
-        return f"@{html.escape(username.lstrip('@'))}"
-    if display:
-        return html.escape(display)
-    return html.escape(str(entry.user_id))
-
-
-def _parse_outstats_args(
-    args: list[str],
-) -> tuple[datetime | None, str, str | None]:
-    """Return since, period label, and optional role filter (openers | closers)."""
-    role: str | None = None
-    rest = list(args)
-    if rest:
-        token = rest[0].strip().lower()
-        if token in {"openers", "open", "starters", "starter"}:
-            role = "openers"
-            rest = rest[1:]
-        elif token in {"closers", "close", "finishers", "finisher"}:
-            role = "closers"
-            rest = rest[1:]
-    since, period_label = _parse_stats_period(rest)
-    return since, period_label, role
-
-
-def _format_leaderboard_lines(
-    entries: list[PaymentLeaderboardEntry],
-    *,
-    empty_text: str,
-) -> list[str]:
-    if not entries:
-        return [empty_text]
-    medals = ("🥇", "🥈", "🥉")
-    lines: list[str] = []
-    for index, entry in enumerate(entries):
-        prefix = medals[index] if index < len(medals) else f"{index + 1}."
-        lines.append(
-            f"{prefix} {_leaderboard_user_label(entry)} · "
-            f"<b>{html.escape(format_amount(entry.total_amount))}</b> · "
-            f"{entry.payment_count} out{'s' if entry.payment_count != 1 else ''}"
-        )
-    return lines
-
-
-async def outstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings: Settings = context.bot_data["settings"]
-    if not _can_view_payments(update, settings, context.bot_data):
-        return
-
-    since, period_label, role_filter = _parse_outstats_args(context.args or [])
-    closers = get_payment_leaderboard(settings.database_path, since=since)
-    openers = get_payment_starter_leaderboard(settings.database_path, since=since)
-    total_count, total_amount = get_payment_totals(settings.database_path, since=since)
-
-    if role_filter == "closers":
-        if not closers:
-            await update.effective_message.reply_text(
-                f"💸 No closer stats for {period_label}.\n\n"
-                "Reply to the starter's notes with e.g. `5182 out`.",
-                parse_mode="Markdown",
-            )
-            return
-        lines = [
-            f"🔒 <b>Closers</b> — {html.escape(period_label)}",
-            "",
-            f"Total: <b>{html.escape(format_amount(total_amount))}</b> · "
-            f"<b>{total_count}</b> payment{'s' if total_count != 1 else ''}",
-            "",
-            *_format_leaderboard_lines(
-                closers,
-                empty_text="<i>No closers yet.</i>",
-            ),
-        ]
-    elif role_filter == "openers":
-        if not openers:
-            await update.effective_message.reply_text(
-                f"🚪 No opener stats for {period_label}.\n\n"
-                "Starters are tracked when OUT is logged as a reply to their notes.",
-                parse_mode="Markdown",
-            )
-            return
-        lines = [
-            f"🚪 <b>Openers</b> — {html.escape(period_label)}",
-            "",
-            *_format_leaderboard_lines(
-                openers,
-                empty_text="<i>No openers yet.</i>",
-            ),
-        ]
-    elif not closers and not openers:
-        await update.effective_message.reply_text(
-            f"💸 No payments logged for {period_label}.\n\n"
-            "Reply to the starter's notes with e.g. `5182 out`.",
-            parse_mode="Markdown",
-        )
-        return
-    else:
-        lines = [
-            f"💸 <b>Out leaderboard</b> — {html.escape(period_label)}",
-            "",
-            f"Total: <b>{html.escape(format_amount(total_amount))}</b> · "
-            f"<b>{total_count}</b> payment{'s' if total_count != 1 else ''}",
-            "",
-            "<b>🔒 Closers</b> <i>(who logged the OUT)</i>",
-            *_format_leaderboard_lines(
-                closers,
-                empty_text="<i>No closers yet.</i>",
-            ),
-            "",
-            "<b>🚪 Openers</b> <i>(reply-to notes on each OUT)</i>",
-            *_format_leaderboard_lines(
-                openers,
-                empty_text=(
-                    "<i>No opener data yet — reply to the starter's notes when logging OUT.</i>"
-                ),
-            ),
-        ]
-
-    lines.extend(
-        [
-            "",
-            stats_period_footnote(),
-            "",
-            "<i>/outstats · /outstats openers · /outstats closers · today · 7 · all</i>",
-        ]
-    )
-    await update.effective_message.reply_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
-
-
 async def _set_payment_cleared_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2086,72 +1938,6 @@ async def paidside_command(
         )
 
 
-async def excelwebauth_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """One-time Microsoft sign-in so sync pushes straight to Excel on the web."""
-    settings: Settings = context.bot_data["settings"]
-    if not await require_admin(update, settings, deny_message="Admin only."):
-        return
-
-    message = update.effective_message
-    if message is None:
-        return
-
-    from onedrive_cloud_sync import (
-        build_oauth_authorize_url,
-        browser_oauth_flow,
-        excel_web_setup_help,
-        graph_app_configured,
-    )
-
-    if not graph_app_configured(settings):
-        await message.reply_text(excel_web_setup_help(settings))
-        return
-
-    if settings.cloud_deployed:
-        import secrets
-
-        state = secrets.token_urlsafe(16)
-        auth_url = build_oauth_authorize_url(settings, state=state)
-        if not auth_url:
-            await message.reply_text(excel_web_setup_help(settings))
-            return
-        pending = context.bot_data.setdefault("msgraph_oauth_states", {})
-        pending[state] = message.chat_id
-        await message.reply_text(
-            "Open this link to sign in with Microsoft "
-            "(same account that owns your OneDrive file):\n\n"
-            f"{auth_url}\n\n"
-            "After sign-in, return here — the bot will confirm when Excel is connected."
-        )
-        return
-
-    await message.reply_text(
-        "Opening your browser for Microsoft sign-in…\n\n"
-        "Sign in with the **same account** that owns your OneDrive file "
-        "(not a work/school account unless that owns the file)."
-    )
-
-    token_data = await asyncio.to_thread(browser_oauth_flow, settings)
-    if not token_data or not token_data.get("refresh_token"):
-        await message.reply_text(
-            "Sign-in failed or timed out.\n\n"
-            f"Make sure redirect URI is exactly {settings.ms_graph_redirect_uri} in Azure, "
-            "then run /excelwebauth again."
-        )
-        return
-
-    set_ms_graph_refresh_token(
-        settings.database_path, token_data["refresh_token"]
-    )
-    await message.reply_text(
-        "Excel on the web is connected.\n\n"
-        "Run /syncpayments — updates push to your OneDrive file. "
-        "Press F5 in the browser tab if it is already open."
-    )
-
-
 async def syncpayments_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -2169,8 +1955,8 @@ async def syncpayments_command(
         if not graph_configured(settings):
             await message.reply_text(
                 "Payment Excel export is not configured.\n\n"
-                "On Render/cloud: set MS_GRAPH_CLIENT_ID and MS_GRAPH_CLIENT_SECRET, "
-                "run /excelwebauth, then /syncpayments.\n\n"
+                "On Render/cloud: set MS_GRAPH_CLIENT_ID, MS_GRAPH_CLIENT_SECRET, "
+                "and complete Microsoft OAuth in Azure (redirect URI on this bot URL).\n\n"
                 "On PC: add PAYMENTS_ONEDRIVE_PATH to .env (synced OneDrive folder)."
             )
         else:
@@ -2179,20 +1965,14 @@ async def syncpayments_command(
             )
         return
 
-    export_all = bool(context.args) and context.args[0].strip().lower() == "all"
-    if export_all:
-        clear_paidside_epoch(settings.database_path)
-        intro = "Syncing all payments to Excel (paid-side mode turned off)…"
+    epoch = get_paidside_epoch(settings.database_path)
+    if epoch is not None:
+        intro = (
+            "Syncing new outs to Excel (paid-side mode — only outs since "
+            f"{epoch.astimezone(stats_timezone()).strftime('%d %b %Y %H:%M')})…"
+        )
     else:
-        epoch = get_paidside_epoch(settings.database_path)
-        if epoch is not None:
-            intro = (
-                "Syncing new outs to Excel (paid-side mode — only outs since "
-                f"{epoch.astimezone(stats_timezone()).strftime('%d %b %Y %H:%M')})…\n\n"
-                "Use /syncpayments all to export every payment."
-            )
-        else:
-            intro = "Syncing payments to Excel…"
+        intro = "Syncing payments to Excel…"
 
     timer_msg = await message.reply_text(
         f"{intro}\n\n⏳ Updating Excel… ~{SYNC_ESTIMATE_SECONDS}s remaining"
@@ -2202,7 +1982,7 @@ async def syncpayments_command(
         chat_id=timer_msg.chat_id,
         message_id=timer_msg.message_id,
         settings=settings,
-        all_payments=export_all,
+        all_payments=False,
     )
 
 

@@ -90,12 +90,6 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
             active_calls_digest_loop(app.bot, settings, app.bot_data),
             name=f"active-calls-{instance_id}",
         )
-        from handlers.ready_check import ready_check_shift_loop
-
-        asyncio.create_task(
-            ready_check_shift_loop(app.bot, settings, app.bot_data),
-            name=f"ready-check-{instance_id}",
-        )
         from handlers.credo import credo_reminder_loop
 
         asyncio.create_task(

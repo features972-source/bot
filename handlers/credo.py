@@ -380,7 +380,7 @@ def _format_dm_photo_caption(card_name: str, limit_block: str) -> str:
     return (
         f"💳 **{card_name}**\n\n"
         f"{limit_block}\n\n"
-        "⚠️ **If you do not log how much you have sent, you will not be paid.**\n\n"
+        "⚠️ **Log outs in the group** (reply to ON CALL) — matching last 4 auto-deducts.\n\n"
         "**WHEN YOU ARE FINISHED WITH THE CC DO /finished**"
     )
 
@@ -563,8 +563,7 @@ async def _deliver_credo_card(
         fail_text = (
             f"Could not DM **{display_label}** — the card is **not** posted in this chat.\n\n"
             f"{limit_block}\n\n"
-            "Tap the button below, press **Start**, then send /credos again.\n"
-            "You must log the amount **in your DMs** with the bot — not in this chat."
+            "Tap the button below, press **Start**, then send /credos again."
         )
         if edit_in_place:
             try:
@@ -663,36 +662,6 @@ async def _log_card_usage(
         )
 
 
-async def try_log_active_credo_amount(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> bool:
-    """Log a plain-text amount for the user's active credo session. Returns True if handled."""
-    message = update.effective_message
-    user = update.effective_user
-    if not message or not user or not message.text or message.chat.type != "private":
-        return False
-
-    session = get_active_credo_session(context.application.bot_data, user.id)
-    if session is None:
-        return False
-
-    amount = _parse_usage_amount(message.text)
-    if amount is None:
-        return False
-
-    await _log_card_usage(update, context, card_name=session.card_name, amount=amount)
-    return True
-
-
-async def credo_active_dm_amount_text(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    if context.user_data.get("add_card_active"):
-        return
-    if await try_log_active_credo_amount(update, context):
-        raise ApplicationHandlerStop
-
-
 async def credo_active_command_guard(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -769,7 +738,7 @@ async def credo_reminder_loop(bot, settings: Settings, bot_data: dict) -> None:
                             f"⏰ **Payment check** — have you sent anything on "
                             f"**{display_label}**?\n\n"
                             f"{limit_block}\n\n"
-                            "Type the amount here (e.g. `500`) or send **/finished** when you're done."
+                            "Send **/finished** when you're done with this card."
                         ),
                         parse_mode="Markdown",
                     )
@@ -810,7 +779,6 @@ def build_credo_handlers() -> list:
     from handlers.bot_commands import help_conversation_fallback
     from handlers.payments import (
         alltimepayments_conversation_fallback,
-        looks_like_payment_out,
         out_conversation_fallback,
         payments_conversation_fallback,
     )
@@ -840,16 +808,6 @@ def build_credo_handlers() -> list:
     )
     return [
         user_conversation,
-        MessageHandler(
-            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
-            credo_active_dm_amount_text,
-            block=False,
-        ),
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.REPLY,
-            credo_reply_log_amount,
-            block=False,
-        ),
         CommandHandler("finished", credo_finished_command),
         CallbackQueryHandler(credos_standalone_callback, pattern=r"^credocard:\d+$"),
         CommandHandler("addcredouser", addcredouser_command),
@@ -928,7 +886,7 @@ async def credos_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         display_label = _format_card_label(settings.database_path, active.card_name)
         await message.reply_text(
             f"You already have **{display_label}** active.\n\n"
-            "Type payment amounts in your DMs or send **/finished** when you're done.",
+            "Send **/finished** when you're done.",
             parse_mode="Markdown",
         )
         return ConversationHandler.END
@@ -969,63 +927,6 @@ async def credos_choose_callback(update: Update, context: ContextTypes.DEFAULT_T
         card_name=card_name,
         edit_in_place=True,
     )
-
-
-async def credo_reply_log_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    if not message or not message.text or not message.reply_to_message:
-        return
-
-    if message.chat.type != "private":
-        reply = message.reply_to_message
-        if (
-            reply.from_user
-            and reply.from_user.is_bot
-            and reply.from_user.id == context.bot.id
-        ):
-            if looks_like_payment_out(
-                message.text, getattr(context.bot, "username", None)
-            ):
-                return
-            card_name = _lookup_credo_log_prompt(
-                context.application.bot_data,
-                chat_id=reply.chat_id,
-                message_id=reply.message_id,
-            )
-            if card_name:
-                await message.reply_text(
-                    "Log the amount **in your DMs** with the bot — reply there to the bot's "
-                    "private message, **not in this group**.",
-                    parse_mode="Markdown",
-                )
-                raise ApplicationHandlerStop
-        return
-
-    reply = message.reply_to_message
-    if not reply.from_user or not reply.from_user.is_bot:
-        return
-    if reply.from_user.id != context.bot.id:
-        return
-
-    card_name = _lookup_credo_log_prompt(
-        context.application.bot_data,
-        chat_id=reply.chat_id,
-        message_id=reply.message_id,
-    )
-    if not card_name:
-        return
-
-    amount = _parse_usage_amount(message.text)
-    if amount is None:
-        await message.reply_text(
-            "🚨 **Reply to the bot's message above** with the amount you sent "
-            "(e.g. `500` or `£500`). You must do this — don't skip it.",
-            parse_mode="Markdown",
-        )
-        raise ApplicationHandlerStop
-
-    await _log_card_usage(update, context, card_name=card_name, amount=amount)
-    raise ApplicationHandlerStop
 
 
 def _photo_file_id(update: Update) -> str | None:

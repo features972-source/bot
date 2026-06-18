@@ -264,8 +264,7 @@ async def private_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         card_label = _format_card_label(settings.database_path, session.card_name)
         await message.reply_text(
-            f"**{card_label}** is active — type a payment amount (e.g. `500`) "
-            "or send **/finished** when you're done.",
+            f"**{card_label}** is active — send **/finished** when you're done.",
             parse_mode="Markdown",
         )
         raise ApplicationHandlerStop

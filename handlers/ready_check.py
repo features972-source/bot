@@ -25,11 +25,7 @@ READY_LOOP_SECONDS = 45
 
 
 def build_ready_check_handlers() -> list:
-    return [
-        CommandHandler("ready", ready_command),
-        CommandHandler("startshift", ready_command),
-        CallbackQueryHandler(ready_callback, pattern=f"^{CALLBACK_PREFIX}"),
-    ]
+    return []
 
 
 async def ready_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
