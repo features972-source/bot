@@ -651,7 +651,6 @@ def build_credo_handlers() -> list:
         MessageHandler(
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
             credo_active_dm_amount_text,
-            block=False,
         ),
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.REPLY,
