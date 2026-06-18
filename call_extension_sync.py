@@ -38,7 +38,11 @@ LIST_PARTICIPANTS_SEM = asyncio.Semaphore(12)
 SYNC_DEBOUNCE_SECONDS = 0.08
 RECONCILE_INTERVAL_SECONDS = 12
 RECONCILE_CONCURRENCY = 6
-EMPTY_CONFIRM_COUNT = 2
+EMPTY_CONFIRM_COUNT = 3
+CALL_START_STABLE_SECONDS = 4
+CALL_START_STABLE_HITS = 3
+CALL_REPLACE_GRACE_SECONDS = 20
+PENDING_START_KEY = "pending_call_starts"
 QUIET_SYNC_KEY = "call_sync_quiet"
 STARTUP_CONNECTED_KEY = "startup_connected_callids"
 
@@ -120,6 +124,72 @@ def _bump_empty_streak(bot_data: dict, extension: str) -> int:
     streaks = _empty_streak(bot_data)
     streaks[extension] = streaks.get(extension, 0) + 1
     return streaks[extension]
+
+
+def _clear_pending_start(bot_data: dict, extension: str) -> None:
+    bot_data.get(PENDING_START_KEY, {}).pop(extension, None)
+
+
+def _call_start_is_stable(
+    bot_data: dict,
+    extension: str,
+    *,
+    callid: int | None,
+    participant_id: int | None,
+) -> bool:
+    """Wait for the same callid to stay connected before posting ON CALL."""
+    if callid is None:
+        return False
+    now = time.monotonic()
+    pending = bot_data.setdefault(PENDING_START_KEY, {})
+    state = pending.get(extension)
+    if state is None or state.get("callid") != callid:
+        pending[extension] = {
+            "callid": callid,
+            "participant_id": participant_id,
+            "since": now,
+            "hits": 1,
+        }
+        return False
+    state["hits"] = int(state.get("hits", 0)) + 1
+    if participant_id is not None:
+        state["participant_id"] = participant_id
+    if now - float(state["since"]) >= CALL_START_STABLE_SECONDS:
+        pending.pop(extension, None)
+        return True
+    if state["hits"] >= CALL_START_STABLE_HITS:
+        pending.pop(extension, None)
+        return True
+    return False
+
+
+def _queue_start_if_stable(
+    bot_data: dict,
+    extension: str,
+    pending: list[dict[str, Any]],
+    *,
+    participant: dict[str, Any],
+    callid: int | None,
+    participant_id: int | None,
+) -> None:
+    if not _call_start_is_stable(
+        bot_data,
+        extension,
+        callid=callid,
+        participant_id=participant_id,
+    ):
+        return
+    pending.append(
+        {
+            "kind": "start",
+            "participant": participant,
+            "callid": callid,
+            "participant_id": participant_id,
+            "active_participant_id": (
+                participant_id if participant_id and participant_id > 0 else None
+            ),
+        }
+    )
 
 
 async def get_extension_participant(
@@ -293,6 +363,7 @@ async def sync_extension_state(
             live = live_call is not None
 
             if not connected:
+                _clear_pending_start(bot_data, extension)
                 if not live:
                     _clear_empty_streak(bot_data, extension)
                     return
@@ -318,21 +389,49 @@ async def sync_extension_state(
                     participant_id = None
 
                 if live:
+                    from call_end import record_call_leg_visibility
+
                     if (
                         live_call is not None
                         and callid is not None
                         and live_call.callid == callid
                     ):
-                        from call_end import record_call_leg_visibility
-
                         record_call_leg_visibility(
                             bot_data,
                             extension,
                             participants or [],
                             callid,
                         )
+                        _clear_pending_start(bot_data, extension)
                         return
                     if live_call is not None:
+                        if callid is None:
+                            return
+                        if live_call.callid is None:
+                            live_call.callid = callid
+                            if participant_id is not None:
+                                live_call.participant_id = participant_id
+                            record_call_leg_visibility(
+                                bot_data,
+                                extension,
+                                participants or [],
+                                callid,
+                            )
+                            _clear_pending_start(bot_data, extension)
+                            return
+                        elapsed = time.monotonic() - live_call.started_at
+                        if elapsed < CALL_REPLACE_GRACE_SECONDS:
+                            live_call.callid = callid
+                            if participant_id is not None:
+                                live_call.participant_id = participant_id
+                            record_call_leg_visibility(
+                                bot_data,
+                                extension,
+                                participants or [],
+                                callid,
+                            )
+                            _clear_pending_start(bot_data, extension)
+                            return
                         if active is not None:
                             active.pop(extension, None)
                         pending.append(
@@ -342,6 +441,7 @@ async def sync_extension_state(
                                 "log": "call replaced",
                             }
                         )
+                    _clear_pending_start(bot_data, extension)
 
                 if not announce:
                     if callid is not None:
@@ -387,18 +487,13 @@ async def sync_extension_state(
                                 }
                             )
                         else:
-                            pending.append(
-                                {
-                                    "kind": "start",
-                                    "participant": participant,
-                                    "callid": callid,
-                                    "participant_id": participant_id,
-                                    "active_participant_id": (
-                                        participant_id
-                                        if participant_id and participant_id > 0
-                                        else None
-                                    ),
-                                }
+                            _queue_start_if_stable(
+                                bot_data,
+                                extension,
+                                pending,
+                                participant=participant,
+                                callid=callid,
+                                participant_id=participant_id,
                             )
                 else:
                     from_extension = detect_transfer_from(
@@ -419,18 +514,13 @@ async def sync_extension_state(
                             }
                         )
                     else:
-                        pending.append(
-                            {
-                                "kind": "start",
-                                "participant": participant,
-                                "callid": callid,
-                                "participant_id": participant_id,
-                                "active_participant_id": (
-                                    participant_id
-                                    if participant_id and participant_id > 0
-                                    else None
-                                ),
-                            }
+                        _queue_start_if_stable(
+                            bot_data,
+                            extension,
+                            pending,
+                            participant=participant,
+                            callid=callid,
+                            participant_id=participant_id,
                         )
 
     if empty_refetch:

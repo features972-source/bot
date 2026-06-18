@@ -60,6 +60,10 @@ ANNOUNCE_LOCKS_KEY = "announce_locks"
 
 ANNOUNCE_DEDUPE_SECONDS = 120
 
+MIN_CALL_ANNOUNCE_SECONDS = 8
+
+POST_END_START_COOLDOWN_SECONDS = 15
+
 ACTIVE_CALLS_DIGEST_SECONDS = 300
 
 TELEGRAM_SEND_QUEUE_KEY = "telegram_send_queue"
@@ -934,37 +938,51 @@ async def _stop_live_call(
         return None
 
     duration = int(time.monotonic() - live_call.started_at)
+    short_glitch = (
+        not live_call.silent and duration < MIN_CALL_ANNOUNCE_SECONDS
+    )
     settings = bot_data.get("settings")
     if settings is not None:
-        record_completed_call(
-            settings.database_path,
-            extension=live_call.extension,
-            telegram_user_id=live_call.link.telegram_user_id,
-            telegram_username=live_call.link.telegram_username,
-            display_name=live_call.link.display_name,
-            duration_seconds=duration,
-            caller_name=live_call.caller_name,
-            caller_number=live_call.caller_number,
-            call_kind=live_call.call_kind,
-            started_at_utc=live_call.started_at_utc,
-        )
-        bot_data.pop(f"call_start_utc:{extension}", None)
-        try:
-            from quiet_wins import maybe_quiet_win_handle_time
+        if not short_glitch:
+            record_completed_call(
+                settings.database_path,
+                extension=live_call.extension,
+                telegram_user_id=live_call.link.telegram_user_id,
+                telegram_username=live_call.link.telegram_username,
+                display_name=live_call.link.display_name,
+                duration_seconds=duration,
+                caller_name=live_call.caller_name,
+                caller_number=live_call.caller_number,
+                call_kind=live_call.call_kind,
+                started_at_utc=live_call.started_at_utc,
+            )
+            try:
+                from quiet_wins import maybe_quiet_win_handle_time
 
-            await maybe_quiet_win_handle_time(
-                bot,
-                settings,
-                live_call.link,
-                duration,
-            )
-        except Exception:
-            logger.exception(
-                "Quiet win handle-time check failed for ext %s",
-                extension,
-            )
+                await maybe_quiet_win_handle_time(
+                    bot,
+                    settings,
+                    live_call.link,
+                    duration,
+                )
+            except Exception:
+                logger.exception(
+                    "Quiet win handle-time check failed for ext %s",
+                    extension,
+                )
+        bot_data.pop(f"call_start_utc:{extension}", None)
 
     if live_call.silent:
+        return live_call
+
+    if short_glitch:
+        if live_call.message_ids:
+            await _delete_live_messages(bot, live_call.message_ids)
+        logger.info(
+            "Dropped short phantom call ext %s (%ss) — no CALL ENDED post",
+            extension,
+            duration,
+        )
         return live_call
 
     ended_by_html = consume_telegram_hangup_label(bot_data, extension)
@@ -1076,6 +1094,16 @@ async def announce_call_started(
 
             logger.info("Skipping duplicate on-phone announce for %s", dedupe_key)
 
+            return False
+
+        end_key = _end_dedupe_key(extension)
+        last_end = _recent_announces(bot_data).get(end_key)
+        if last_end is not None and (
+            time.monotonic() - last_end < POST_END_START_COOLDOWN_SECONDS
+        ):
+            logger.info(
+                "Skipping on-phone during post-end cooldown ext %s", extension
+            )
             return False
 
 
@@ -1409,6 +1437,40 @@ async def live_call_timers_loop(bot, bot_data: dict) -> None:
 
 
 
+
+
+async def _delete_one_live_message(
+    bot,
+    *,
+    chat_id: int,
+    message_id: int,
+) -> None:
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except BadRequest as exc:
+        logger.debug(
+            "Could not delete call message in chat %s: %s", chat_id, exc
+        )
+    except Exception:
+        logger.exception("Failed to delete call message in chat %s", chat_id)
+
+
+async def _delete_live_messages(
+    bot,
+    message_ids: dict[int, int],
+) -> None:
+    if not message_ids:
+        return
+    await asyncio.gather(
+        *(
+            _delete_one_live_message(
+                bot,
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            for chat_id, message_id in message_ids.items()
+        )
+    )
 
 
 async def _edit_one_live_message(
