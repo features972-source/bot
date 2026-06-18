@@ -48,6 +48,10 @@ STARTER_PAY_RATE = 0.05
 FINISHER_PAY_RATE = 0.15
 CENTRE_PAY_RATE = 0.20
 
+STARTER_PAY_PERCENT = int(STARTER_PAY_RATE * 100)
+FINISHER_PAY_PERCENT = int(FINISHER_PAY_RATE * 100)
+CENTRE_PAY_PERCENT = int(CENTRE_PAY_RATE * 100)
+
 
 def _parse_created_at(created_at: str) -> datetime:
     text = created_at.replace("Z", "+00:00")
@@ -77,6 +81,18 @@ def _user_label(
     if username:
         return f"@{username.lstrip('@')}"
     return str(user_id)
+
+
+def starter_payout(record: PaymentRecord) -> float:
+    return _starter_payout(record)
+
+
+def finisher_payout(record: PaymentRecord) -> float:
+    return _finisher_payout(record)
+
+
+def centre_payout(record: PaymentRecord) -> float:
+    return _centre_payout(record)
 
 
 def _starter_payout(record: PaymentRecord) -> float:

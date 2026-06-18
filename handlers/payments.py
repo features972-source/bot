@@ -577,6 +577,12 @@ async def _finalize_payment_out(
             pending.finisher_user_id,
         )
     await _pm_admin_today_payments(context.bot, settings)
+    try:
+        from handlers.payment_reports import refresh_payment_report
+
+        await refresh_payment_report(context.bot, settings)
+    except Exception:
+        logger.exception("Payment report refresh failed")
     if settings.payments_onedrive_path:
         timer_msg = await message.reply_text(
             f"⏳ Updating Excel… ~{SYNC_ESTIMATE_SECONDS}s remaining"
@@ -673,6 +679,12 @@ async def _try_complete_pending_clearpayments(
         "outs are logged."
     )
     schedule_payments_excel_sync(settings)
+    try:
+        from handlers.payment_reports import refresh_payment_report
+
+        await refresh_payment_report(context.bot, settings)
+    except Exception:
+        logger.exception("Payment report refresh failed")
     return True
 
 
@@ -1204,6 +1216,12 @@ async def _set_payment_cleared_command(
     )
     await _pm_admin_today_payments(context.bot, settings)
     schedule_payments_excel_sync(settings)
+    try:
+        from handlers.payment_reports import refresh_payment_report
+
+        await refresh_payment_report(context.bot, settings)
+    except Exception:
+        logger.exception("Payment report refresh failed")
 
 
 async def setpayment_command(
@@ -1279,6 +1297,12 @@ async def setpayment_command(
     )
     await _pm_admin_today_payments(context.bot, settings)
     schedule_payments_excel_sync(settings)
+    try:
+        from handlers.payment_reports import refresh_payment_report
+
+        await refresh_payment_report(context.bot, settings)
+    except Exception:
+        logger.exception("Payment report refresh failed")
 
 
 async def removepayment_command(
@@ -1334,6 +1358,12 @@ async def removepayment_command(
     )
     await _pm_admin_today_payments(context.bot, settings)
     schedule_payments_excel_sync(settings)
+    try:
+        from handlers.payment_reports import refresh_payment_report
+
+        await refresh_payment_report(context.bot, settings)
+    except Exception:
+        logger.exception("Payment report refresh failed")
 
 
 async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -12,6 +12,7 @@ from telegram.error import Conflict
 from telegram.ext import Application
 
 from instance_lock import acquire_single_instance_lock
+from instance_registry import register_instance
 from call_control_listener import start_call_control_listener
 from config import Settings
 from database import get_notify_chat_id, init_db, set_notify_chat_id
@@ -61,6 +62,8 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
 
     if not settings.skip_instance_lock:
         acquire_single_instance_lock(settings.database_path)
+
+    register_instance(instance_id, settings)
 
     async def on_startup(app: Application) -> None:
         app.bot_data[ASYNCIO_LOOP_KEY] = asyncio.get_running_loop()

@@ -450,6 +450,49 @@ def set_notify_chat_id(path: str, chat_id: int) -> None:
     _set_bot_setting(path, NOTIFY_CHAT_ID_KEY, str(chat_id))
 
 
+PAYMENT_NOTIFY_CHAT_ID_KEY = "payment_notify_chat_id"
+
+
+def get_payment_notify_chat_id(path: str) -> int | None:
+    raw = _get_bot_setting(path, PAYMENT_NOTIFY_CHAT_ID_KEY)
+    if not raw:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return None
+
+
+def set_payment_notify_chat_id(path: str, chat_id: int) -> None:
+    _set_bot_setting(path, PAYMENT_NOTIFY_CHAT_ID_KEY, str(chat_id))
+
+
+PAYMENT_NOTIFY_MESSAGE_ID_KEY = "payment_notify_message_id"
+
+
+def get_payment_notify_message_id(path: str) -> int | None:
+    raw = _get_bot_setting(path, PAYMENT_NOTIFY_MESSAGE_ID_KEY)
+    if not raw:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return None
+
+
+def set_payment_notify_message_id(path: str, message_id: int) -> None:
+    _set_bot_setting(path, PAYMENT_NOTIFY_MESSAGE_ID_KEY, str(message_id))
+
+
+def clear_payment_notify_message_id(path: str) -> None:
+    with _connect(path) as conn:
+        conn.execute(
+            "DELETE FROM bot_settings WHERE key = ?",
+            (PAYMENT_NOTIFY_MESSAGE_ID_KEY,),
+        )
+        conn.commit()
+
+
 def _get_bot_setting(path: str, key: str) -> str | None:
     with _connect(path) as conn:
         row = conn.execute(

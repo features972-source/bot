@@ -19,6 +19,7 @@ from handlers.call_stats import build_call_stats_handlers
 from handlers.chat_blacklist import build_chat_blacklist_handlers
 from handlers.credo import build_credo_handlers
 from handlers.payments import build_payment_handlers
+from handlers.payment_reports import build_payment_report_handlers
 from handlers.ready_check import build_ready_check_handlers
 
 
@@ -27,6 +28,7 @@ def build_bot_handlers() -> list:
         # Conversation handlers must register before payment's catch-all text handler.
         *build_credo_handlers(),
         *build_payment_handlers(),
+        *build_payment_report_handlers(),
         *build_call_stats_handlers(),
         *build_chat_blacklist_handlers(),
         CommandHandler("start", start_command),
@@ -75,7 +77,8 @@ def _format_help_text(
             "/missedcalls — download missed calls CSV (today · 7 · all)\n\n"
             "<b>🔗 Extensions</b>\n"
             "/link — link extension (reply to user) · /unlink · /links · /users\n"
-            "/setnotify — set announcement group\n\n"
+            "/setnotify — set announcement group\n"
+            "/setnotifypayments — live payment list in a group (pick Q1/Q2, auto-updates)\n\n"
             "<b>👑 Admins</b>\n"
             "/admin · /addadmin · /removeadmin — manage bot admins\n"
             "/ready — shift ready check (headset, softphone, credo, mail)\n\n"
