@@ -90,7 +90,9 @@ def _format_help_text(
             "<b>🚫 Blacklist</b>\n"
             "/blacklist @user reason · /unblacklist @user · /blacklisted\n\n"
             "<b>💳 Credos</b>\n"
-            "/cc · /creditcard · /credo · /credos\n"
+            "/blastmode — turn card picking on/off for the team\n"
+            "/blastmode off · /blastmodeoff — lock /cc\n"
+            "/cc · /creditcard · /credo · /credos — only when blast mode is on\n"
             "/addcredouser · /removecredouser · /credousers\n"
             "/addcredo · /removecredo · /listcredocards\n"
             "/addpremium · /removepremium · /premiumusers\n"
@@ -103,7 +105,7 @@ def _format_help_text(
     if credo:
         return (
             f"💳 <b>Credo & {mailer_name}</b>\n\n"
-            "/cc — view cards & capacity, pick one (DM)\n"
+            "/cc — view cards & pick one when blast mode is on (DM)\n"
             "(also /creditcard, /credo, /credos)\n"
             "/finished — when done · /mail still works\n"
             f"/mail — open {mailer_name} via the bot (DM only)\n"

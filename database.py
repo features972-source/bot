@@ -433,6 +433,7 @@ def init_db(path: str) -> None:
 
 
 PAIDSIDE_EPOCH_KEY = "paidside_export_epoch"
+BLASTMODE_ACTIVE_KEY = "blastmode_active"
 MS_GRAPH_REFRESH_TOKEN_KEY = "ms_graph_refresh_token"
 EXCEL_WEB_URL_KEY = "excel_web_url"
 NOTIFY_CHAT_ID_KEY = "notify_chat_id"
@@ -544,6 +545,14 @@ def clear_paidside_epoch(path: str) -> None:
             (PAIDSIDE_EPOCH_KEY,),
         )
         conn.commit()
+
+
+def get_blastmode_active(path: str) -> bool:
+    return _get_bot_setting(path, BLASTMODE_ACTIVE_KEY) == "1"
+
+
+def set_blastmode_active(path: str, active: bool) -> None:
+    _set_bot_setting(path, BLASTMODE_ACTIVE_KEY, "1" if active else "0")
 
 
 def get_ms_graph_refresh_token(path: str) -> str | None:

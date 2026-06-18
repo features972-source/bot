@@ -71,6 +71,9 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         app.bot_data[ASYNCIO_LOOP_KEY] = asyncio.get_running_loop()
         app.bot_data["instance_id"] = instance_id
         register_bot(instance_id, app.bot)
+        from handlers.credo import sync_blastmode_cache
+
+        sync_blastmode_cache(app.bot_data, settings)
         ensure_telegram_send_worker(app.bot_data)
         get_token_holder(app.bot_data, settings)
         asyncio.create_task(

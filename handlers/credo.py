@@ -23,6 +23,7 @@ from telegram.ext import (
 from config import Settings
 from database import (
     add_credo_whitelist_user,
+    get_blastmode_active,
     get_credo_credit_card,
     get_credo_credit_card_by_last4,
     is_on_credo_whitelist,
@@ -33,6 +34,7 @@ from database import (
     remove_credo_credit_card,
     remove_credo_whitelist_user,
     save_credo_profile,
+    set_blastmode_active,
     sum_credo_card_usage,
     upsert_credo_credit_card,
 )
@@ -63,6 +65,8 @@ CREDO_ACTIVE_ALLOWED_COMMANDS = frozenset({
     "finished",
     "addcredo",
     "cancel",
+    "blastmode",
+    "blastmodeoff",
     "payments",
     "sent",
     "alltimepayments",
@@ -77,6 +81,11 @@ NO_CARDS = (
     "No credit cards are set up yet.\n\n"
     "An admin can add one with /addcredo (name → limit → last 4 → card photo)."
 )
+BLASTMODE_OFF = (
+    "Blast mode is **off** — /cc is locked.\n\n"
+    "Ask an admin to run **/blastmode** when it's time to send."
+)
+BLASTMODE_BOT_DATA_KEY = "blastmode_active"
 CARD_LAST4_PATTERN = re.compile(r"^\d{4}$")
 
 
@@ -242,6 +251,21 @@ def is_credo_allowed(settings: Settings, database_path: str, user_id: int) -> bo
     if is_bot_admin(settings, database_path, user_id):
         return True
     return is_on_credo_whitelist(database_path, user_id)
+
+
+def is_blastmode_active(bot_data: dict, settings: Settings) -> bool:
+    cached = bot_data.get(BLASTMODE_BOT_DATA_KEY)
+    if cached is not None:
+        return bool(cached)
+    active = get_blastmode_active(settings.database_path)
+    bot_data[BLASTMODE_BOT_DATA_KEY] = active
+    return active
+
+
+def sync_blastmode_cache(bot_data: dict, settings: Settings) -> bool:
+    active = get_blastmode_active(settings.database_path)
+    bot_data[BLASTMODE_BOT_DATA_KEY] = active
+    return active
 
 
 def get_credo_credit_cards(settings: Settings) -> list[str]:
@@ -476,6 +500,10 @@ async def _deliver_credo_card(
     edit_in_place: bool = False,
 ) -> int:
     if sender_user is None:
+        return ConversationHandler.END
+
+    if not is_blastmode_active(context.application.bot_data, settings):
+        await reply_target.reply_text(BLASTMODE_OFF, parse_mode="Markdown")
         return ConversationHandler.END
 
     card = get_credo_credit_card(settings.database_path, card_name)
@@ -757,6 +785,82 @@ async def credo_reminder_loop(bot, settings: Settings, bot_data: dict) -> None:
             logger.exception("credo reminder loop error")
 
 
+async def _apply_blastmode(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    active: bool,
+) -> None:
+    settings: Settings = context.bot_data["settings"]
+    message = update.effective_message
+    if message is None:
+        return
+
+    bot_data = context.application.bot_data
+    set_blastmode_active(settings.database_path, active)
+    bot_data[BLASTMODE_BOT_DATA_KEY] = active
+
+    from notify import send_to_notify_chats
+
+    if active:
+        await message.reply_text(
+            "🔥 **Blast mode ON** — agents can use /cc to pick cards.",
+            parse_mode="Markdown",
+        )
+        await send_to_notify_chats(
+            context.bot,
+            settings,
+            bot_data,
+            text="🔥 <b>Blast mode is ON</b> — use /cc to pick a card.",
+        )
+    else:
+        await message.reply_text(
+            "⏸️ **BLASTMODE OFF** — /cc is locked.",
+            parse_mode="Markdown",
+        )
+        await send_to_notify_chats(
+            context.bot,
+            settings,
+            bot_data,
+            text="⏸️ <b>BLASTMODE OFF</b> — /cc is locked.",
+        )
+
+
+async def blastmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not await require_admin(update, settings):
+        return
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    bot_data = context.application.bot_data
+    arg = context.args[0].strip().lower() if context.args else ""
+    if arg in {"on", "start", "enable", "yes"}:
+        active = True
+    elif arg in {"off", "stop", "disable", "no"}:
+        active = False
+    elif arg in {"", "status", "toggle"}:
+        active = not is_blastmode_active(bot_data, settings)
+    else:
+        await message.reply_text(
+            "Usage: /blastmode · /blastmode on · /blastmode off · /blastmodeoff",
+            parse_mode="Markdown",
+        )
+        return
+
+    await _apply_blastmode(update, context, active=active)
+
+
+async def blastmodeoff_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not await require_admin(update, settings):
+        return
+
+    await _apply_blastmode(update, context, active=False)
+
+
 def build_add_card_handlers() -> list:
     """Register in group -1 so add-card replies beat the mailer text router."""
     return [
@@ -808,6 +912,8 @@ def build_credo_handlers() -> list:
     )
     return [
         user_conversation,
+        CommandHandler("blastmode", blastmode_command),
+        CommandHandler("blastmodeoff", blastmodeoff_command),
         CommandHandler("finished", credo_finished_command),
         CallbackQueryHandler(credos_standalone_callback, pattern=r"^credocard:\d+$"),
         CommandHandler("addcredouser", addcredouser_command),
@@ -831,6 +937,10 @@ async def credos_start_resume(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if not is_credo_allowed(settings, settings.database_path, user.id):
         await message.reply_text(UNAUTHORIZED)
+        return
+
+    if not is_blastmode_active(context.application.bot_data, settings):
+        await message.reply_text(BLASTMODE_OFF, parse_mode="Markdown")
         return
 
     pending_map = context.application.bot_data.get("credo_pending", {})
@@ -857,6 +967,9 @@ async def open_credo_picker(
 ) -> None:
     if not is_credo_allowed(settings, settings.database_path, user.id):
         await message.reply_text(UNAUTHORIZED)
+        return
+    if not is_blastmode_active(context.application.bot_data, settings):
+        await message.reply_text(BLASTMODE_OFF, parse_mode="Markdown")
         return
     context.user_data.clear()
     await _prompt_choose_card(message, context, settings, user)
@@ -902,6 +1015,10 @@ async def credos_choose_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     await query.answer()
     settings: Settings = context.bot_data["settings"]
+    if not is_blastmode_active(context.application.bot_data, settings):
+        await query.edit_message_text(BLASTMODE_OFF, parse_mode="Markdown")
+        return ConversationHandler.END
+
     cards = context.user_data.get("credo_cards") or get_credo_credit_cards(settings)
     context.user_data["credo_cards"] = cards
 

@@ -32,7 +32,10 @@ MENU_BOT_COMMANDS = [
     BotCommand("help", "Command list"),
 ]
 
-ADMIN_BOT_COMMANDS = MENU_BOT_COMMANDS
+ADMIN_BOT_COMMANDS = MENU_BOT_COMMANDS + [
+    BotCommand("blastmode", "Turn credo card picking on/off"),
+    BotCommand("blastmodeoff", "Turn blast mode off"),
+]
 
 CREDO_USER_COMMANDS = MENU_BOT_COMMANDS + [
     BotCommand("cc", "View credo cards & capacity"),
