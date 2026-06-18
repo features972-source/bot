@@ -267,7 +267,7 @@ async def _deliver_credo_card(
     context.user_data.pop("credo_selected_card", None)
 
     prompt_text = (
-        f"✅ Sent **{card.name}** to your DMs.\n\n"
+        f"Sent **{card.name}** to your DMs get worksy! 🔥\n\n"
         f"{limit_block}\n\n"
         f"{_format_reply_required_notice()}"
     )
