@@ -560,6 +560,7 @@ async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data.pop("add_card_name", None)
     context.user_data.pop("add_card_capacity", None)
+    context.user_data["add_card_active"] = True
 
     await message.reply_text(
         "💳 **Add credo card** (3 steps)\n\n"
@@ -641,6 +642,7 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
     )
     context.user_data.pop("add_card_name", None)
     context.user_data.pop("add_card_capacity", None)
+    context.user_data.pop("add_card_active", None)
     cap_line = format_amount(capacity) if capacity > 0 else "no limit"
     await message.reply_photo(
         photo=file_id,
@@ -653,6 +655,7 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
 async def addcredocard_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop("add_card_name", None)
     context.user_data.pop("add_card_capacity", None)
+    context.user_data.pop("add_card_active", None)
     await update.effective_message.reply_text("Add card cancelled.")
     return ConversationHandler.END
 

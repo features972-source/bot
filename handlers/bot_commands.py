@@ -23,10 +23,11 @@ from handlers.ready_check import build_ready_check_handlers
 
 def build_bot_handlers() -> list:
     return [
+        # Conversation handlers must register before payment's catch-all text handler.
+        *build_credo_handlers(),
         *build_payment_handlers(),
         *build_call_stats_handlers(),
         *build_chat_blacklist_handlers(),
-        *build_credo_handlers(),
         CommandHandler("start", start_command),
         CommandHandler("help", help_command),
         CommandHandler("link", link_command),

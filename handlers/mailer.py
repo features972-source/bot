@@ -187,6 +187,18 @@ async def mailer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text(detail or "Button click failed.")
 
 
+def _credo_conversation_active(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """True when credo add-card or usage wizard is in progress."""
+    data = context.user_data
+    return bool(
+        data.get("add_card_active")
+        or data.get("add_card_name")
+        or data.get("add_card_capacity")
+        or data.get("credo_selected_card")
+        or data.get("credo_cards")
+    )
+
+
 async def private_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Route private DM text: active mailer session first, then credo picker."""
     from handlers.credo import credos_choose_text as credo_choose_text
@@ -195,6 +207,9 @@ async def private_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = update.effective_user
     message = update.effective_message
     if not user or not message or not message.text:
+        return
+
+    if _credo_conversation_active(context):
         return
 
     bridge = _bridge(context)
