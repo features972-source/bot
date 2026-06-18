@@ -103,8 +103,8 @@ def _format_help_text(
             "/addpremium · /removepremium · /premiumusers\n"
             f"/mail — {mailer_name} in DM · /maildone to stop\n"
             "/maillogs — recent /mail audit trail (admin)\n\n"
-            "<i>Tip: in the group, reply to notes or ON CALL with 5182 out. "
-            "Other commands — DM the bot.</i>"
+            "<i>Tip: in the group, reply to notes or ON CALL with 5182 out, "
+            "or use /payments and /out. Other commands — DM the bot.</i>"
         )
 
     if credo:
@@ -121,8 +121,8 @@ def _format_help_text(
 
     return (
         f"📱 <b>{bot_name}</b>\n\n"
-        "Call announcements run in your team group. Bot commands are DM-only "
-        "(except /cc and related credo commands).\n\n"
+        "Call announcements run in your team group. Use /payments and /out in the group; "
+        "other bot commands are DM-only (except /cc and credo commands).\n\n"
         f"<b>📧 {mailer_name}</b>\n"
         f"/mail — open {mailer_name} in this DM (joins queue if busy)\n"
         "/maildone — end session or leave queue"

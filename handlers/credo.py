@@ -875,10 +875,10 @@ def build_credo_handlers() -> list:
         ],
         CommandHandler("start", help_conversation_fallback, filters=PM_ONLY),
         CommandHandler("help", help_conversation_fallback, filters=PM_ONLY),
-        CommandHandler("out", out_conversation_fallback, filters=PM_ONLY),
-        CommandHandler("payments", payments_conversation_fallback, filters=PM_ONLY),
-        CommandHandler("alltimepayments", alltimepayments_conversation_fallback, filters=PM_ONLY),
-        CommandHandler("alltime", alltimepayments_conversation_fallback, filters=PM_ONLY),
+        CommandHandler("out", out_conversation_fallback),
+        CommandHandler("payments", payments_conversation_fallback),
+        CommandHandler("alltimepayments", alltimepayments_conversation_fallback),
+        CommandHandler("alltime", alltimepayments_conversation_fallback),
     ]
     user_conversation = ConversationHandler(
         entry_points=[

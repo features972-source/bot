@@ -10,6 +10,16 @@ from telegram.ext import (
     filters,
 )
 
+GROUP_PAYMENT_COMMANDS = frozenset(
+    {
+        "out",
+        "payments",
+        "sent",
+        "alltimepayments",
+        "alltime",
+    }
+)
+
 GROUP_ALLOWED_COMMANDS = frozenset(
     {
         "cc",
@@ -24,7 +34,7 @@ GROUP_ALLOWED_COMMANDS = frozenset(
         "setnotifypayments",
         "setexpenses",
     }
-)
+) | GROUP_PAYMENT_COMMANDS
 
 CREDO_START_ARGS = frozenset({"cc", "creditcard", "credo", "credos"})
 
@@ -32,9 +42,9 @@ PM_ONLY = filters.ChatType.PRIVATE
 GROUP_ONLY = filters.ChatType.GROUPS
 
 GROUP_DM_HINT = (
-    "Use bot commands in a **private chat** with me.\n\n"
-    "In this group you can still use **/cc**, **/finished**, **/usingcc**, "
-    "and log outs by replying with amounts (e.g. `5182 out`)."
+    "Use other bot commands in a **private chat** with me.\n\n"
+    "In this group you can use **/payments**, **/out**, **/cc**, **/finished**, "
+    "**/usingcc**, and log outs by replying with amounts (e.g. `5182 out`)."
 )
 
 

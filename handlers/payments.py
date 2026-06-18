@@ -135,11 +135,11 @@ def _normalize_payment_text(text: str) -> str:
 
 def build_payment_command_handlers() -> list:
     return [
-        CommandHandler("out", out_command, filters=PM_ONLY),
-        CommandHandler("payments", payments_command, filters=PM_ONLY),
-        CommandHandler("sent", payments_command, filters=PM_ONLY),
-        CommandHandler("alltimepayments", alltimepayments_command, filters=PM_ONLY),
-        CommandHandler("alltime", alltimepayments_command, filters=PM_ONLY),
+        CommandHandler("out", out_command),
+        CommandHandler("payments", payments_command),
+        CommandHandler("sent", payments_command),
+        CommandHandler("alltimepayments", alltimepayments_command),
+        CommandHandler("alltime", alltimepayments_command),
         CommandHandler("clearpayments", clearpayments_command, filters=PM_ONLY),
         CommandHandler("todaypayments", todaypayments_command, filters=PM_ONLY),
         CommandHandler("cleared", cleared_command, filters=PM_ONLY),
@@ -627,7 +627,8 @@ async def _require_payment_view(
     if message is None:
         return False
     await message.reply_text(
-        "Payment commands only work in a **private chat** with the bot.",
+        "Payment commands only work in the **notify / payment group** "
+        "or in a private chat with the bot.",
         parse_mode="Markdown",
     )
     return False
@@ -942,8 +943,8 @@ async def out_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             chat.id,
         )
         await message.reply_text(
-            "Use /out in a **private chat** with the bot, "
-            "or reply in the group with `5182 out` (no slash command).",
+            "Payments only work in the announcement group for this bot.\n"
+            f"This chat: `{chat.id}`",
             parse_mode="Markdown",
         )
         return
@@ -1889,7 +1890,7 @@ async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if chat:
         lines.append(f"This chat id: <code>{chat.id}</code>")
     if chat and chat.type in ("group", "supergroup"):
-        lines.append("Bot commands in groups are limited to /cc and related credo commands.")
+        lines.append("In groups: /payments, /out, /cc, /finished, /usingcc.")
     await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 

@@ -46,6 +46,10 @@ CREDO_USER_COMMANDS = MENU_BOT_COMMANDS + [
 ]
 
 CREDO_GROUP_COMMANDS = [
+    BotCommand("out", "Log payment (reply + /out 5182)"),
+    BotCommand("payments", "This week's payments (resets Sunday)"),
+    BotCommand("alltimepayments", "All-time payment totals"),
+    BotCommand("alltime", "All-time payment totals (short)"),
     BotCommand("cc", "Pick a credo card"),
     BotCommand("credos", "Pick a credo card"),
     BotCommand("usingcc", "See which cards are in use"),
