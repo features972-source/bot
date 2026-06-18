@@ -278,7 +278,7 @@ async def _prompt_choose_card(
 
     context.user_data["credo_cards"] = cards
     await message.reply_text(
-        "\u200b",
+        "💳",
         reply_markup=_card_keyboard(cards),
     )
     return State.CHOOSE
@@ -618,6 +618,7 @@ def build_credo_handlers() -> list:
         },
         fallbacks=menu_fallbacks,
         allow_reentry=True,
+        per_message=True,
         name="credo_user",
     )
     add_card_conversation = ConversationHandler(
@@ -644,6 +645,7 @@ def build_credo_handlers() -> list:
             CommandHandler("help", help_conversation_fallback),
         ],
         allow_reentry=True,
+        per_message=True,
         name="credo_add_card",
     )
     return [
