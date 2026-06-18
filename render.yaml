@@ -30,6 +30,8 @@ services:
         value: 0.0.0.0
       - key: BOT_DISPLAY_NAME
         value: Q1 Call Manager
+      - key: BOT_INSTANCE_ID
+        value: q1
       - key: STATS_TIMEZONE
         value: Europe/London
       - key: READY_CHECK_ENABLED
@@ -90,6 +92,8 @@ services:
         value: 0.0.0.0
       - key: BOT_DISPLAY_NAME
         value: Q2 Call Manager
+      - key: BOT_INSTANCE_ID
+        value: q2
       - key: STATS_TIMEZONE
         value: Europe/London
       - key: READY_CHECK_ENABLED
@@ -148,6 +152,8 @@ services:
         value: 0.0.0.0
       - key: BOT_DISPLAY_NAME
         value: Q1 Australia
+      - key: BOT_INSTANCE_ID
+        value: q1australia
       - key: PAYMENT_CURRENCY_SYMBOL
         value: A$
       - key: STATS_TIMEZONE

@@ -47,9 +47,9 @@ Render sets automatically: `PORT`, `RENDER_EXTERNAL_URL`, `RENDER=true`.
 
 `LISTEN_PUBLIC_URL` defaults to your Render HTTPS URL (for live listen in Telegram).
 
-## Q2 Call Manager (second bot, 24/7)
+## Q2 Call Manager (separate Web Service — required)
 
-Q1 and Q2 share **one GitHub repo** — every push to `main` deploys the same code to each service. Q2 is **not** included in a single-service deploy; you need a **second Render Web Service**.
+Q1 and Q2 share **one GitHub repo** — every push to `main` deploys the same code to each service. **Do not** run both bots on one Render service; create a **second Web Service** for Q2.
 
 ### Create Q2 on Render (one time)
 
@@ -59,19 +59,25 @@ Q1 and Q2 share **one GitHub repo** — every push to `main` deploys the same co
 4. **Disk:** mount `/data`, 1 GB
 5. **Environment:** copy from `.env.render.q2.example`, then paste values from your local `.env.bot2`:
    - `BOT_TOKEN` — **Q2 token only** (never reuse Q1's)
+   - `BOT_INSTANCE_ID` — `q2`
+   - `DATABASE_PATH` — `/data/links-bot2.db`
    - `NOTIFY_CHAT_ID` — **Q2 Telegram group**
    - `THREECX_*` — Q2 PBX credentials
-   - `DATA_DIR=/data`, `DATABASE_PATH=/data/links-bot2.db`, `CLOUD_DEPLOYED=true`
+   - `DATA_DIR=/data`, `CLOUD_DEPLOYED=true`
 6. Deploy. Open `https://YOUR-Q2-APP.onrender.com/health` — expect:
    ```json
-   {"ok":true,"bot":"Q2 Call Manager","persistent_data":true,"payments_logged":...}
+   {"ok":true,"id":"q2","bot":"Q2 Call Manager","persistent_data":true}
    ```
-7. In the **Q2 payment group**, admin runs **`/setnotify`** once (saved to disk — survives redeploys).
+7. Set `LISTEN_PUBLIC_URL` to your Q2 Render URL and redeploy once.
+8. In the **Q2 payment group**, admin runs **`/setnotify`** and **`/setnotifypayments`** once.
+
+Or use **New → Blueprint** with `render.yaml` to create Q1 + Q2 services together.
 
 ### Restore Q2 database (if empty)
 
 ```powershell
-curl.exe -X POST "https://YOUR-Q2-APP.onrender.com/admin/restore-db?secret=WEBHOOK_SECRET" -F "file=@C:\Users\User\3cx-telegram-bot\links-bot2.db"
+# Set LISTEN_PUBLIC_URL in .env.bot2 to your Q2 Render URL first, then:
+powershell -File scripts/restore-render-databases.ps1
 ```
 
 ---
@@ -120,7 +126,7 @@ Copy your local `links.db` to `/data/links.db` on the disk (Render Shell or one-
 
 - Local OneDrive folder sync (use Graph + `/excelwebauth` instead)
 - Browser popup OAuth on localhost (use the Render callback link from `/excelwebauth`)
-- Running **two instances** (Q1 + Q2) in one Render service — use separate services with separate disks and tokens if needed
+- Running Q1 and Q2 on the **same** Render service (use one Web Service per bot)
 
 ## Troubleshooting
 

@@ -4,9 +4,9 @@ import os
 import sys
 
 from bot_core import prepare_bot_runtime, run_bot_polling
-from config import load_settings
+from config import load_settings, resolve_instance_id
 from money_format import init_currency
-from webhook_server import start_webhook_server
+from webhook_server import start_multi_webhook_server
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -30,15 +30,14 @@ def main() -> None:
     assert_cloud_run_or_exit()
     settings = load_settings()
     init_currency(settings.currency_symbol)
-    runtime = prepare_bot_runtime(settings, instance_id="q1")
+    instance_id = resolve_instance_id(
+        database_path=settings.database_path,
+        bot_display_name=settings.bot_display_name,
+    )
+    runtime = prepare_bot_runtime(settings, instance_id=instance_id)
 
     loop = asyncio.get_event_loop()
-    start_webhook_server(
-        settings,
-        runtime.application.bot,
-        runtime.application.bot_data,
-        loop,
-    )
+    start_multi_webhook_server([runtime], loop)
 
     if settings.threex_enabled:
         print(f"3CX AI Call Control enabled for {settings.threex_fqdn}")

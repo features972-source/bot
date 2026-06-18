@@ -142,7 +142,7 @@ def build_payment_report_image(settings: Settings) -> bytes | None:
         subtitle=format_image_subtitle(period_label),
         status_totals=_status_totals(settings, since),
         live=True,
-        full_excel=False,
+        full_excel=True,
         page_info=page_info,
     )
 
@@ -298,7 +298,7 @@ async def setnotifypayments_command(
         "💸 **Live payment table**\n\n"
         "Choose **Q1** or **Q2**. The bot posts **one table** in this group and "
         "**updates the same image** whenever a payment is logged, changed, or removed.\n\n"
-        "Same data as **/payments** · new week every **Sunday**.",
+        "Includes **starter**, **finisher**, and **centre** payouts · new week every **Sunday**.",
         parse_mode="Markdown",
         reply_markup=_instance_picker_keyboard(instance_id),
     )

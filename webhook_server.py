@@ -49,7 +49,7 @@ END_EVENTS = {
 
 
 def start_multi_webhook_server(runtimes, loop: asyncio.AbstractEventLoop) -> threading.Thread:
-    """One HTTP server for Q1 + Q2 (health, restore, listen, 3CX webhooks)."""
+    """HTTP server for one bot per Render service (health, restore, listen, 3CX webhooks)."""
     primary = runtimes[0].settings
     return _start_webhook_app(
         runtimes=runtimes,
@@ -126,7 +126,7 @@ def _start_webhook_app(
     @app.post("/admin/restore-db")
     def restore_db():
         secret = request.args.get("secret", "")
-        instance_id = (request.args.get("instance") or "q1").strip().lower()
+        instance_id = (request.args.get("instance") or runtimes[0].instance_id).strip().lower()
         runtime = _runtime_by_id(instance_id)
         if runtime is None:
             return jsonify({"ok": False, "error": f"unknown instance {instance_id}"}), 400

@@ -16,7 +16,8 @@ from handlers.payment_table import (
 )
 
 _SCALE = 1
-_CHAT_TARGET_WIDTH = 640
+_OUTPUT_INNER_WIDTH = 640
+_SUPERSAMPLE = 2  # render 2× then downscale → sharper text at same output size
 
 # Tuned for Telegram inline preview (narrow image, readable text at chat width)
 _ROW_H = 30
@@ -69,6 +70,11 @@ def _s(value: int) -> int:
 
 
 _RENDER_SCALE = 1.0
+
+
+def _ss(value: int | float) -> int:
+    """Supersampled pixel size for internal render (downscaled before PNG export)."""
+    return max(1, int(round(float(value) * _SUPERSAMPLE)))
 
 
 @lru_cache(maxsize=16)
@@ -230,7 +236,7 @@ def render_payments_table_png(
         _RENDER_SCALE = (
             1.0
             if pass_num == 0
-            else min(1.0, _CHAT_TARGET_WIDTH / max(sum(col_w), 1))
+            else min(1.0, _OUTPUT_INNER_WIDTH / max(sum(col_w), 1))
         )
 
         header_cells = list(table_headers(full_excel=full_excel))
@@ -255,7 +261,7 @@ def render_payments_table_png(
         col_w = _measure_col_widths(probe_draw, measure_rows, min_widths=min_widths)
         _fit_id_column(probe_draw, col_w, body_rows)
         _fit_header_columns(probe_draw, col_w, header_cells)
-        if sum(col_w) <= _CHAT_TARGET_WIDTH:
+        if sum(col_w) <= _OUTPUT_INNER_WIDTH:
             break
 
     pad = _s(_PAD)
@@ -269,32 +275,54 @@ def render_payments_table_png(
     n_rows = len(shown) + 2
     table_h = pad + title_block + n_rows * row_h + footer_h + pad
 
-    img = Image.new("RGB", (table_w, table_h), _BG)
+    # Supersampled draw buffer (2×) → downscale to table_w×table_h for crisp PNG text
+    pad_hi = _ss(pad)
+    table_inner_hi = _ss(table_inner_w)
+    table_w_hi = table_inner_hi + pad_hi * 2
+    title_block_hi = _ss(title_block)
+    row_h_hi = _ss(row_h)
+    footer_h_hi = _ss(footer_h)
+    table_h_hi = pad_hi + title_block_hi + n_rows * row_h_hi + footer_h_hi
+    col_w_hi = [_ss(w) for w in col_w]
+
+    img = Image.new("RGB", (table_w_hi, table_h_hi), _BG)
     draw = ImageDraw.Draw(img)
 
-    font_title = _cached_font(_s(_TITLE_SIZE), True)
-    font_stamp = _cached_font(_s(_STAMP_SIZE), False)
+    font_title = _cached_font(_ss(_s(_TITLE_SIZE)), True)
+    font_stamp = _cached_font(_ss(_s(_STAMP_SIZE)), False)
 
-    x0 = pad
-    y = pad
+    x0 = pad_hi
+    y = pad_hi
     if title:
         draw.text((x0, y), title, fill=_HEADER_TEXT, font=font_title)
-        y += title_block
+        y += title_block_hi
 
     sheet_top = y
     draw.rectangle(
-        (x0, sheet_top, x0 + table_inner_w, sheet_top + n_rows * row_h),
+        (x0, sheet_top, x0 + table_inner_hi, sheet_top + n_rows * row_h_hi),
         fill=_SHEET_BG,
         outline=_SHEET_BORDER,
-        width=max(1, _SCALE),
+        width=max(1, _SUPERSAMPLE),
     )
 
     col_x = [x0]
-    for w in col_w[:-1]:
+    for w in col_w_hi[:-1]:
         col_x.append(col_x[-1] + w)
 
-    grid_w = max(1, _SCALE)
-    text_y_off = max(_s(8), (row_h - _s(_BODY_SIZE)) // 2)
+    grid_w = max(1, _SUPERSAMPLE)
+    text_y_off = max(_ss(_s(8)), (row_h_hi - _ss(_s(_BODY_SIZE))) // 2)
+
+    def _hi_font(
+        col_index: int,
+        *,
+        header: bool,
+        total: bool,
+        is_id_value: bool,
+        is_cleared_value: bool,
+    ):
+        if header or total or is_id_value or is_cleared_value:
+            return _cached_font(_ss(_s(_BODY_SIZE)), True)
+        return _cached_font(_ss(_s(_BODY_SIZE)), False)
 
     def draw_row(
         cells: list[str],
@@ -305,16 +333,15 @@ def render_payments_table_png(
         total: bool = False,
     ) -> None:
         nonlocal y
-        draw.rectangle((x0, y, x0 + table_inner_w, y + row_h), fill=bg)
-        for i, w in enumerate(col_w):
+        draw.rectangle((x0, y, x0 + table_inner_hi, y + row_h_hi), fill=bg)
+        for i, w in enumerate(col_w_hi):
             cell = cells[i] if i < len(cells) else ""
             is_id = i == _ID_COL and cell and not header and not total
             is_cleared = i == _CLEARED_COL and cell and not header and not total
-            f_cell = _cell_draw_font(
+            f_cell = _hi_font(
                 i,
                 header=header,
                 total=total,
-                stamp=False,
                 is_id_value=is_id,
                 is_cleared_value=is_cleared,
             )
@@ -329,11 +356,11 @@ def render_payments_table_png(
             else:
                 color = text_color
             label = cell
-            cx = col_x[i] + _s(8)
+            cx = col_x[i] + _ss(_s(8))
             draw.text((cx, y + text_y_off), label, fill=color, font=f_cell)
-            draw.line((col_x[i] + w, y, col_x[i] + w, y + row_h), fill=_GRID, width=grid_w)
-        draw.line((x0, y + row_h, x0 + table_inner_w, y + row_h), fill=_GRID, width=grid_w)
-        y += row_h
+            draw.line((col_x[i] + w, y, col_x[i] + w, y + row_h_hi), fill=_GRID, width=grid_w)
+        draw.line((x0, y + row_h_hi, x0 + table_inner_hi, y + row_h_hi), fill=_GRID, width=grid_w)
+        y += row_h_hi
 
     draw_row(header_cells, bg=_HEADER_BG, text_color=_HEADER_TEXT, header=True)
     for record, cells in zip(shown, body_rows):
@@ -341,11 +368,13 @@ def render_payments_table_png(
         draw_row(cells, bg=bg, text_color=txt)
     draw_row(totals, bg=_TOTAL_BG, text_color=_TOTAL_TEXT, total=True)
 
-    footer_y = y + _s(6)
+    footer_y = y + _ss(_s(6))
     footer_w = int(draw.textlength(stamp_text, font=font_stamp))
-    footer_x = x0 + max(_s(8), table_inner_w - footer_w - _s(8))
+    footer_x = x0 + max(_ss(_s(8)), table_inner_hi - footer_w - _ss(_s(8)))
     draw.text((footer_x, footer_y), stamp_text, fill=_STAMP_TEXT, font=font_stamp)
 
+    img = img.resize((table_w, table_h), Image.Resampling.LANCZOS)
+
     buf = BytesIO()
-    img.save(buf, format="PNG", optimize=False)
+    img.save(buf, format="PNG", compress_level=1, optimize=False)
     return buf.getvalue()

@@ -29,6 +29,33 @@ def _cloud_deployed() -> bool:
     return bool(os.getenv("RENDER_EXTERNAL_URL", "").strip())
 
 
+def _export_filename_for_db(database_path: str) -> str:
+    stem = Path(database_path).stem.lower()
+    if "bot2" in stem:
+        return "q2.xlsx"
+    if "australia" in stem:
+        return "q1australia.xlsx"
+    return "q1.xlsx"
+
+
+def resolve_instance_id(*, database_path: str, bot_display_name: str) -> str:
+    """q1, q2, q1australia — from BOT_INSTANCE_ID or database / display name."""
+    explicit = os.getenv("BOT_INSTANCE_ID", "").strip().lower()
+    if explicit:
+        return explicit
+    stem = Path(database_path).stem.lower()
+    if "bot2" in stem:
+        return "q2"
+    if "australia" in stem:
+        return "q1australia"
+    label = (bot_display_name or "").lower()
+    if "q2" in label:
+        return "q2"
+    if "australia" in label:
+        return "q1australia"
+    return "q1"
+
+
 def _data_dir() -> Path | None:
     raw = os.getenv("DATA_DIR", "").strip()
     if not raw:
@@ -142,7 +169,7 @@ def load_settings(env_prefix: str = "", *, optional: bool = False) -> Settings |
         label = env_prefix.rstrip("_") or "primary"
         raise RuntimeError(
             f"BOT_TOKEN is not set for {label} bot ({env_path}). "
-            "Add BOT_TOKEN or BOT2_BOT_TOKEN on Render."
+            "Add BOT_TOKEN on Render (one token per Web Service)."
         )
 
     admin_raw = getenv("ADMIN_CHAT_ID")
@@ -198,8 +225,9 @@ def load_settings(env_prefix: str = "", *, optional: bool = False) -> Settings |
     if onedrive_raw:
         payments_onedrive_path = str(Path(onedrive_raw).expanduser().resolve())
     elif data_dir_path is not None:
-        export_name = "q2.xlsx" if env_prefix.startswith("BOT2") else "q1.xlsx"
-        payments_onedrive_path = str(data_dir_path / "exports" / export_name)
+        payments_onedrive_path = str(
+            data_dir_path / "exports" / _export_filename_for_db(database_path_raw or "links.db")
+        )
 
     worksheet = getenv("PAYMENTS_ONEDRIVE_WORKSHEET", "Payments Automatic")
     payments_onedrive_worksheet = worksheet or "Payments Automatic"
@@ -220,9 +248,7 @@ def load_settings(env_prefix: str = "", *, optional: bool = False) -> Settings |
 
     telethon_api_hash = getenv("TELETHON_API_HASH") or None
     db_default = (
-        str(data_dir_path / ("links-bot2.db" if env_prefix.startswith("BOT2") else "links.db"))
-        if data_dir_path is not None
-        else ("links-bot2.db" if env_prefix.startswith("BOT2") else "links.db")
+        str(data_dir_path / "links.db") if data_dir_path is not None else "links.db"
     )
     database_path = database_path_raw or db_default
     if (
@@ -242,8 +268,9 @@ def load_settings(env_prefix: str = "", *, optional: bool = False) -> Settings |
                 payments_onedrive_path, requested_data_dir, data_dir_path
             )
     if payments_onedrive_path is None and data_dir_path is not None:
-        export_name = "q2.xlsx" if env_prefix.startswith("BOT2") else "q1.xlsx"
-        payments_onedrive_path = str(data_dir_path / "exports" / export_name)
+        payments_onedrive_path = str(
+            data_dir_path / "exports" / _export_filename_for_db(database_path)
+        )
     db_stem = Path(database_path).stem
     if data_dir_path is not None:
         telethon_session_path = str(data_dir_path / f"mailer-{db_stem}")
