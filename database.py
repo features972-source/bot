@@ -55,6 +55,7 @@ class CredoProfile:
 class CredoCreditCard:
     name: str
     photo_file_id: str | None
+    logo_file_id: str | None
     capacity: float
     added_at: str
 
@@ -527,6 +528,8 @@ def _ensure_credo_credit_card_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE credo_credit_cards ADD COLUMN capacity REAL NOT NULL DEFAULT 0"
         )
+    if "logo_file_id" not in columns:
+        conn.execute("ALTER TABLE credo_credit_cards ADD COLUMN logo_file_id TEXT")
 
 
 def _ensure_payment_out_columns(conn: sqlite3.Connection) -> None:
@@ -1347,6 +1350,7 @@ def upsert_credo_credit_card(
     photo_file_id: str,
     *,
     capacity: float = 0,
+    logo_file_id: str | None = None,
 ) -> None:
     cleaned = name.strip()
     if not cleaned or not photo_file_id.strip():
@@ -1357,14 +1361,17 @@ def upsert_credo_credit_card(
     with _connect(path) as conn:
         conn.execute(
             """
-            INSERT INTO credo_credit_cards (name, photo_file_id, capacity, added_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO credo_credit_cards (
+                name, photo_file_id, logo_file_id, capacity, added_at
+            )
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 photo_file_id = excluded.photo_file_id,
                 capacity = excluded.capacity,
-                added_at = excluded.added_at
+                added_at = excluded.added_at,
+                logo_file_id = COALESCE(excluded.logo_file_id, credo_credit_cards.logo_file_id)
             """,
-            (cleaned, photo_file_id, capacity, added_at),
+            (cleaned, photo_file_id, logo_file_id, capacity, added_at),
         )
         conn.commit()
 
@@ -1384,7 +1391,7 @@ def list_credo_credit_cards(path: str) -> list[CredoCreditCard]:
     with _connect(path) as conn:
         rows = conn.execute(
             """
-            SELECT name, photo_file_id, COALESCE(capacity, 0), added_at
+            SELECT name, photo_file_id, logo_file_id, COALESCE(capacity, 0), added_at
             FROM credo_credit_cards
             ORDER BY added_at ASC, name ASC
             """
@@ -1393,8 +1400,9 @@ def list_credo_credit_cards(path: str) -> list[CredoCreditCard]:
         CredoCreditCard(
             name=row[0],
             photo_file_id=row[1],
-            capacity=float(row[2] or 0),
-            added_at=row[3],
+            logo_file_id=row[2],
+            capacity=float(row[3] or 0),
+            added_at=row[4],
         )
         for row in rows
     ]
@@ -1407,7 +1415,7 @@ def get_credo_credit_card(path: str, name: str) -> CredoCreditCard | None:
     with _connect(path) as conn:
         row = conn.execute(
             """
-            SELECT name, photo_file_id, COALESCE(capacity, 0), added_at
+            SELECT name, photo_file_id, logo_file_id, COALESCE(capacity, 0), added_at
             FROM credo_credit_cards
             WHERE name = ? COLLATE NOCASE
             """,
@@ -1418,8 +1426,9 @@ def get_credo_credit_card(path: str, name: str) -> CredoCreditCard | None:
     return CredoCreditCard(
         name=row[0],
         photo_file_id=row[1],
-        capacity=float(row[2] or 0),
-        added_at=row[3],
+        logo_file_id=row[2],
+        capacity=float(row[3] or 0),
+        added_at=row[4],
     )
 
 
