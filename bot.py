@@ -127,16 +127,8 @@ def main() -> None:
     global _instance_lock
     settings = load_settings()
     from money_format import init_currency
-    from pathlib import Path
 
     init_currency(settings.currency_symbol)
-    data_root = Path(settings.data_dir) if settings.data_dir else None
-    if data_root is None and settings.database_path.startswith("/data"):
-        data_root = Path("/data")
-    if data_root is not None:
-        data_root.mkdir(parents=True, exist_ok=True)
-        (data_root / "exports").mkdir(parents=True, exist_ok=True)
-    Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
     init_db(settings.database_path)
     if not settings.skip_instance_lock:
         _instance_lock = _acquire_single_instance_lock(settings.database_path)

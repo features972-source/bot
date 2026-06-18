@@ -1,3 +1,4 @@
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 _ROOT = Path(__file__).resolve().parent
+logger = logging.getLogger(__name__)
 
 
 def _resolve_env_path() -> Path:
@@ -32,6 +34,43 @@ def _data_dir() -> Path | None:
     if not raw:
         return None
     return Path(raw)
+
+
+def _path_is_writable(path: Path) -> bool:
+    return path.is_dir() and os.access(path, os.W_OK)
+
+
+def _remap_under_root(path: str, old_root: Path, new_root: Path) -> str:
+    normalized = path.replace("\\", "/")
+    old = old_root.as_posix().rstrip("/")
+    new = new_root.as_posix().rstrip("/")
+    if normalized == old:
+        return new
+    prefix = f"{old}/"
+    if normalized.startswith(prefix):
+        return str(new_root / normalized[len(prefix) :])
+    return path
+
+
+def _prepare_data_directory(requested: Path) -> Path:
+    """Use Render's /data disk when mounted; otherwise fall back under the app dir."""
+    if requested.as_posix() == "/data":
+        if _path_is_writable(requested):
+            (requested / "exports").mkdir(parents=True, exist_ok=True)
+            return requested
+        fallback = _ROOT / "data"
+        fallback.mkdir(parents=True, exist_ok=True)
+        (fallback / "exports").mkdir(parents=True, exist_ok=True)
+        logger.warning(
+            "Cannot write to /data — add a Render persistent disk mounted at /data. "
+            "Using %s until then (data is lost on redeploy).",
+            fallback,
+        )
+        return fallback
+
+    requested.mkdir(parents=True, exist_ok=True)
+    (requested / "exports").mkdir(parents=True, exist_ok=True)
+    return requested
 
 
 @dataclass(frozen=True)
@@ -125,10 +164,19 @@ def load_settings() -> Settings:
     if not secret:
         raise RuntimeError(f"WEBHOOK_SECRET is not set in {env_path}.")
 
-    data_dir_path = _data_dir()
-    data_dir = str(data_dir_path) if data_dir_path else None
+    requested_data_dir = _data_dir()
+    data_dir_path: Path | None = None
+    data_dir: str | None = None
     cloud_deployed = _cloud_deployed()
     public_base_url = os.getenv("RENDER_EXTERNAL_URL", "").strip() or None
+
+    database_path_raw = os.getenv("DATABASE_PATH", "").strip()
+    if requested_data_dir is None and database_path_raw.replace("\\", "/").startswith("/data/"):
+        requested_data_dir = Path("/data")
+
+    if requested_data_dir is not None:
+        data_dir_path = _prepare_data_directory(requested_data_dir)
+        data_dir = str(data_dir_path)
 
     onedrive_raw = os.getenv("PAYMENTS_ONEDRIVE_PATH", "").strip()
     payments_onedrive_path = None
@@ -160,10 +208,23 @@ def load_settings() -> Settings:
         if data_dir_path is not None
         else "links.db"
     )
-    database_path = os.getenv("DATABASE_PATH", db_default)
-    if data_dir_path is None and database_path.replace("\\", "/").startswith("/data/"):
-        data_dir_path = Path("/data")
-        data_dir = str(data_dir_path)
+    database_path = database_path_raw or db_default
+    if (
+        requested_data_dir is not None
+        and data_dir_path is not None
+        and data_dir_path != requested_data_dir
+    ):
+        database_path = _remap_under_root(
+            database_path, requested_data_dir, data_dir_path
+        )
+        if onedrive_raw:
+            payments_onedrive_path = _remap_under_root(
+                payments_onedrive_path or "", requested_data_dir, data_dir_path
+            )
+        elif payments_onedrive_path:
+            payments_onedrive_path = _remap_under_root(
+                payments_onedrive_path, requested_data_dir, data_dir_path
+            )
     if payments_onedrive_path is None and data_dir_path is not None:
         payments_onedrive_path = str(data_dir_path / "exports" / "q1.xlsx")
     db_stem = Path(database_path).stem
