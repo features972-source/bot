@@ -49,7 +49,7 @@ UNAUTHORIZED = (
 CANCELLED = "Credo cancelled. Send /credos when you want to try again."
 NO_CARDS = (
     "No credit cards are set up yet.\n\n"
-    "An admin can add one with /addcredocard (name, limit, then photo)."
+    "An admin can add one with /addcredocard (step by step: name → limit → photo)."
 )
 
 
@@ -560,43 +560,10 @@ async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data.pop("add_card_name", None)
     context.user_data.pop("add_card_capacity", None)
-    args = context.args or []
-    name = ""
-    capacity_text = None
-    if len(args) >= 2:
-        maybe_amount = _parse_usage_amount(args[-1])
-        if maybe_amount is not None:
-            name = " ".join(args[:-1]).strip()
-            capacity_text = args[-1]
-    if not name and args:
-        name = " ".join(args).strip()
-
-    if name and capacity_text:
-        parsed = _parse_usage_amount(capacity_text)
-        if parsed is None:
-            await message.reply_text("Could not read the limit amount. Try again.")
-            return AddCardState.NAME
-        context.user_data["add_card_name"] = name
-        context.user_data["add_card_capacity"] = parsed
-        await message.reply_text(
-            f"Got it: **{name}** · limit **{format_amount(parsed)}**\n\n"
-            "Now send a **photo** for this card.",
-            parse_mode="Markdown",
-        )
-        return AddCardState.PHOTO
-
-    if name:
-        context.user_data["add_card_name"] = name
-        await message.reply_text(
-            f"Got it: **{name}**\n\n"
-            "Send the **£ limit** for this card (e.g. `5000` or `5k`).",
-            parse_mode="Markdown",
-        )
-        return AddCardState.CAPACITY
 
     await message.reply_text(
-        "Send the **credit card name** to add (e.g. Visa).\n\n"
-        "Or: /addcredocard Visa 5000 then send the photo.",
+        "💳 **Add credo card** (3 steps)\n\n"
+        "**Step 1 of 3** — Send the **credit card name** (e.g. Visa).",
         parse_mode="Markdown",
     )
     return AddCardState.NAME
@@ -605,12 +572,16 @@ async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def addcredocard_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     name = (update.message.text or "").strip()
     if len(name) < 2:
-        await update.message.reply_text("Please send a valid name (at least 2 characters).")
+        await update.message.reply_text(
+            "**Step 1 of 3** — Please send a valid name (at least 2 characters).",
+            parse_mode="Markdown",
+        )
         return AddCardState.NAME
 
     context.user_data["add_card_name"] = name
     await update.message.reply_text(
-        f"Got it: **{name}**\n\nSend the **£ limit** for this card (e.g. `5000` or `5k`).",
+        f"✅ Name: **{name}**\n\n"
+        "**Step 2 of 3** — Send the **£ limit** for this card (e.g. `5000` or `5k`).",
         parse_mode="Markdown",
     )
     return AddCardState.CAPACITY
@@ -622,7 +593,7 @@ async def addcredocard_receive_capacity(
     amount = _parse_usage_amount(update.message.text or "")
     if amount is None:
         await update.message.reply_text(
-            "Send a valid limit like `5000`, `£5000`, or `5k`.",
+            "**Step 2 of 3** — Send a valid limit like `5000`, `£5000`, or `5k`.",
             parse_mode="Markdown",
         )
         return AddCardState.CAPACITY
@@ -630,7 +601,8 @@ async def addcredocard_receive_capacity(
     context.user_data["add_card_capacity"] = amount
     name = context.user_data.get("add_card_name", "")
     await update.message.reply_text(
-        f"Limit **{format_amount(amount)}** for **{name}**.\n\nNow send a **photo** for this card.",
+        f"✅ Limit: **{format_amount(amount)}** for **{name}**\n\n"
+        "**Step 3 of 3** — Send a **photo** of the card.",
         parse_mode="Markdown",
     )
     return AddCardState.PHOTO
@@ -638,7 +610,7 @@ async def addcredocard_receive_capacity(
 
 async def addcredocard_receive_photo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        "Please send a **photo** (not text).",
+        "**Step 3 of 3** — Please send a **photo** (not text).",
         parse_mode="Markdown",
     )
     return AddCardState.PHOTO
@@ -658,7 +630,7 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
     name = context.user_data.get("add_card_name", "").strip()
     if not name:
         await message.reply_text(
-            "Send the **credit card name** first.",
+            "**Step 1 of 3** — Send the **credit card name** first.",
             parse_mode="Markdown",
         )
         return AddCardState.NAME
@@ -672,7 +644,7 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
     cap_line = format_amount(capacity) if capacity > 0 else "no limit"
     await message.reply_photo(
         photo=file_id,
-        caption=f"✅ Added **{name}** · limit {cap_line}",
+        caption=f"✅ **{name}** added · limit {cap_line}",
         parse_mode="Markdown",
     )
     return ConversationHandler.END
