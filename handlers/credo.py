@@ -418,7 +418,7 @@ async def _deliver_credo_card(
         )
         if origin_chat_id is not None:
             group_text = (
-                f"Sent **{display_label}** to your DMs get worksy! 🔥\n\nCheck your **DMs**"
+                f"Sent **{display_label} cc** to your DMs get busy! 🔥   **Check your DMs**"
             )
             if edit_in_place:
                 try:

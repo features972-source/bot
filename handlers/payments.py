@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
 
-from telegram import Update
+from telegram import InputMediaPhoto, Update
 from telegram.ext import CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 
 from config import Settings
@@ -226,11 +226,11 @@ def _cleared_status_label(cleared: bool | None) -> str:
 _PAYMENTS_LIST_LIMIT = 25
 
 
-def _format_card_saved_reply() -> str:
-    return "✅ Added to the system"
+def _format_card_saved_reply(payment_id: int) -> str:
+    return f"✅ Added to the system · **#{payment_id}**"
 
 
-async def _finalize_payment_out(
+def _format_card_prompt(
     amount: float,
     *,
     finisher_user_id: int,
@@ -635,7 +635,9 @@ async def _finalize_payment_out(
     record = get_payment_by_id(settings.database_path, payment_id)
     if record is None:
         return
-    await message.reply_text(_format_card_saved_reply())
+    await message.reply_text(
+        _format_card_saved_reply(payment_id), parse_mode="Markdown"
+    )
     try:
         from quiet_wins import maybe_quiet_win_close_rate
 
@@ -1013,7 +1015,7 @@ def _build_payments_summary_image(
     since: datetime | None,
     period_label: str,
     records: list[PaymentRecord],
-) -> bytes:
+) -> bytes | list[bytes]:
     total_count, total_amount = get_payment_totals(settings.database_path, since=since)
     pending_count, pending_amount = get_payment_totals(
         settings.database_path, since=since, pending=True
@@ -1056,6 +1058,7 @@ def _build_payments_summary_image(
         live=False,
         full_excel=False,
         total_label=total_label,
+        mobile=True,
     )
 
 
@@ -1086,7 +1089,7 @@ async def _send_payments_summary(
         user and is_bot_admin(settings, settings.database_path, user.id)
     )
     try:
-        png = await asyncio.to_thread(
+        result = await asyncio.to_thread(
             _build_payments_summary_image,
             settings,
             since=since,
@@ -1099,6 +1102,9 @@ async def _send_payments_summary(
             "Could not build the payment table image. Try again in a moment."
         )
         return
+
+    pages = result if isinstance(result, list) else [result]
+
     caption_parts = []
     if since is not None:
         caption_parts.append(
@@ -1107,21 +1113,41 @@ async def _send_payments_summary(
         )
     else:
         caption_parts.append("<i>All payments on record</i>")
+    if len(pages) > 1:
+        caption_parts.append(
+            f"<i>{len(pages)} pages — swipe through all images</i>"
+        )
     if include_admin:
         caption_parts.append(
             "<i>Admin: use # from table in bot DM — /setcleared 12 · /setpayment 12 amount</i>"
         )
     caption = "\n".join(caption_parts) if caption_parts else None
 
-    bio = BytesIO(png)
-    bio.name = "payments.jpg"
-    bio.seek(0)
     try:
-        await message.reply_photo(
-            photo=bio,
-            caption=caption,
-            parse_mode="HTML",
-        )
+        if len(pages) == 1:
+            bio = BytesIO(pages[0])
+            bio.name = "payments.jpg"
+            bio.seek(0)
+            await message.reply_photo(
+                photo=bio,
+                caption=caption,
+                parse_mode="HTML",
+            )
+            return
+
+        media: list[InputMediaPhoto] = []
+        for index, png in enumerate(pages):
+            bio = BytesIO(png)
+            bio.name = f"payments-{index + 1}.jpg"
+            bio.seek(0)
+            media.append(
+                InputMediaPhoto(
+                    media=bio,
+                    caption=caption if index == 0 else None,
+                    parse_mode="HTML" if index == 0 else None,
+                )
+            )
+        await message.reply_media_group(media=media)
     except Exception:
         logger.exception("Failed to send payments summary image")
         await message.reply_text(

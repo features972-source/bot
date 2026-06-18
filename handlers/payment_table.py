@@ -27,9 +27,9 @@ TABLE_HEADERS_FULL = (
     "Finisher",
     "Card",
     "Cleared",
-    "Starter 5%",
-    "Finisher 15%",
-    "Centre 20%",
+    "Paying Starter",
+    "Paying Finisher",
+    "Paying Centre",
 )
 
 TABLE_HEADERS = TABLE_HEADERS_FULL
@@ -56,6 +56,24 @@ def build_username_lookup(
     return lookup
 
 
+def sheet_user_label(
+    username: str | None,
+    display_name: str | None,
+    user_id: int,
+    *,
+    username_lookup: dict[int, str] | None = None,
+) -> str:
+    """Match Excel export: display name first, then @username."""
+    name = (display_name or "").strip()
+    if name:
+        return name
+    if username:
+        return f"@{username.lstrip('@')}"
+    if username_lookup and user_id in username_lookup:
+        return f"@{username_lookup[user_id]}"
+    return str(user_id)
+
+
 def user_at_label(
     username: str | None,
     display_name: str | None,
@@ -63,17 +81,15 @@ def user_at_label(
     *,
     username_lookup: dict[int, str] | None = None,
 ) -> str:
-    if username:
-        return f"@{username.lstrip('@')}"
-    if username_lookup and user_id in username_lookup:
-        return f"@{username_lookup[user_id]}"
-    if display_name:
-        return display_name
-    return str(user_id)
+    return sheet_user_label(
+        username,
+        display_name,
+        user_id,
+        username_lookup=username_lookup,
+    )
 
 
 def format_status_label(cleared: bool | None) -> str:
-    """Plain status text for compact tables and footer summaries."""
     if cleared is None:
         return "Waiting"
     if cleared:
@@ -82,7 +98,6 @@ def format_status_label(cleared: bool | None) -> str:
 
 
 def format_cleared_label(cleared: bool | None) -> str:
-    """Excel Cleared column: Yes / Pending / No."""
     if cleared is None:
         return "Pending"
     if cleared:
@@ -141,12 +156,12 @@ def status_summary_totals(
 
 
 def format_image_footer(*, live: bool = False) -> str:
-    from payments_excel_export import format_payment_sheet_updated_note
+    from payments_excel_export import payment_sheet_footer_note
 
-    stamp = format_payment_sheet_updated_note()
+    note = payment_sheet_footer_note()
     if live:
-        return f"{stamp} · updates automatically when payments change"
-    return stamp
+        return f"{note} · updates automatically when payments change"
+    return note
 
 
 def format_payment_date(iso_timestamp: str) -> str:
@@ -168,24 +183,24 @@ def payment_table_row(
 ) -> list[str]:
     starter = ""
     if record.starter_user_id is not None:
-        starter = user_at_label(
+        starter = sheet_user_label(
             record.starter_username,
             record.starter_display_name,
             record.starter_user_id,
             username_lookup=username_lookup,
         )
     row = [
-        str(record.id),
+        f"#{record.id}",
         format_amount(record.amount),
         format_payment_date(record.created_at),
         starter,
-        user_at_label(
+        sheet_user_label(
             record.finisher_username,
             record.finisher_display_name,
             record.finisher_user_id,
             username_lookup=username_lookup,
         ),
-        record.card_last4 or "—",
+        record.card_last4 or "",
     ]
     if not full_excel:
         return row + [format_status_label(record.cleared)]
@@ -207,14 +222,14 @@ def payment_totals_table_row(
     total_count: int,
     records: list[PaymentRecord] | None = None,
     full_excel: bool = True,
-    total_label: str = "WEEK TOTAL",
+    total_label: str = "TOTAL",
 ) -> list[str]:
     count_label = f"{total_count} payment" + ("" if total_count == 1 else "s")
     if not full_excel:
         return [
             "",
-            format_amount(total_amount),
             total_label,
+            format_amount(total_amount),
             count_label,
             "",
             "",
@@ -224,11 +239,10 @@ def payment_totals_table_row(
     from payments_excel_export import centre_payout, finisher_payout, starter_payout
 
     recs = records or []
-    label = total_label
     return [
         "",
+        total_label,
         format_amount(total_amount),
-        label,
         count_label,
         "",
         "",

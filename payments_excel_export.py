@@ -154,6 +154,11 @@ def _footer_note() -> str:
     return f"Updated {stamp} ({label})"
 
 
+def payment_sheet_footer_note() -> str:
+    """Footer stamp for payment sheet images and Excel export."""
+    return _footer_note()
+
+
 def format_payment_sheet_updated_note() -> str:
     """Short footer matching the Excel sheet (e.g. Updated 18 Jun 2026,)."""
     now_local = datetime.now(timezone.utc).astimezone(stats_timezone())
