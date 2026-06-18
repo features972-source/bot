@@ -902,11 +902,11 @@ def build_credo_handlers() -> list:
             for command in ACTIVECCS_COMMANDS
         ],
         CallbackQueryHandler(credos_standalone_callback, pattern=r"^credocard:\d+$"),
-        CommandHandler("addcredouser", addcredouser_command, filters=PM_ONLY),
-        CommandHandler("removecredouser", removecredouser_command, filters=PM_ONLY),
-        CommandHandler("credousers", credousers_command, filters=PM_ONLY),
-        CommandHandler("removecredo", removecredocard_command, filters=PM_ONLY),
-        CommandHandler("listcredocards", listcredocards_command, filters=PM_ONLY),
+        CommandHandler("addcredouser", addcredouser_command),
+        CommandHandler("removecredouser", removecredouser_command),
+        CommandHandler("credousers", credousers_command),
+        CommandHandler("removecredo", removecredocard_command),
+        CommandHandler("listcredocards", listcredocards_command),
     ]
 
 
@@ -1351,11 +1351,12 @@ async def addcredouser_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not await require_admin(update, settings):
         return
 
-    target = _resolve_target_user(update, context.args)
+    target = _resolve_target_user(update, context.args, database_path=settings.database_path)
     if target is None:
         await update.effective_message.reply_text(
             "Add credo access:\n"
             "• Reply to their message with /addcredouser\n"
+            "• Or: /addcredouser @username\n"
             "• Or: /addcredouser <telegram_user_id>"
         )
         return
@@ -1385,11 +1386,12 @@ async def removecredouser_command(update: Update, context: ContextTypes.DEFAULT_
     if not await require_admin(update, settings):
         return
 
-    target = _resolve_target_user(update, context.args)
+    target = _resolve_target_user(update, context.args, database_path=settings.database_path)
     if target is None:
         await update.effective_message.reply_text(
             "Remove credo access:\n"
             "• Reply to their message with /removecredouser\n"
+            "• Or: /removecredouser @username\n"
             "• Or: /removecredouser <telegram_user_id>"
         )
         return

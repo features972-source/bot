@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from telegram import (
     Bot,
@@ -23,10 +24,13 @@ from database import (
     add_bot_admin,
     list_bot_admins,
     list_credo_whitelist,
+    list_links,
     remove_bot_admin,
 )
 
 logger = logging.getLogger(__name__)
+
+USERNAME_TOKEN = re.compile(r"^@?([A-Za-z0-9_]{4,})$", re.IGNORECASE)
 
 MENU_BOT_COMMANDS = [
     BotCommand("start", "Bot info"),
@@ -280,24 +284,61 @@ async def admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-def _resolve_target_user(update: Update, args: list[str]):
-    reply = update.message.reply_to_message if update.message else None
-    if reply and reply.from_user and not reply.from_user.is_bot:
-        return reply.from_user
+def _resolve_target_user(
+    update: Update, args: list[str], *, database_path: str | None = None
+):
+    message = update.effective_message
+    if message and message.reply_to_message:
+        user = message.reply_to_message.from_user
+        if user and not user.is_bot:
+            return user
 
-    if len(args) == 1 and args[0].strip().lstrip("-").isdigit():
-        user_id = int(args[0].strip())
-        return _MinimalUser(user_id)
+    if len(args) == 1:
+        arg = args[0].strip()
+        if arg.lstrip("-").isdigit():
+            return _MinimalUser(int(arg))
+
+        if database_path:
+            match = USERNAME_TOKEN.match(arg)
+            if match:
+                username = match.group(1).lower()
+                for link in list_links(database_path):
+                    if (
+                        link.telegram_username
+                        and link.telegram_username.lower().lstrip("@") == username
+                    ):
+                        return _MinimalUser(
+                            link.telegram_user_id,
+                            username=link.telegram_username,
+                            first_name=link.display_name or "",
+                        )
+                for entry in list_credo_whitelist(database_path):
+                    if (
+                        entry.telegram_username
+                        and entry.telegram_username.lower().lstrip("@") == username
+                    ):
+                        return _MinimalUser(
+                            entry.telegram_user_id,
+                            username=entry.telegram_username,
+                            first_name=entry.display_name or "",
+                        )
 
     return None
 
 
 class _MinimalUser:
-    def __init__(self, user_id: int) -> None:
+    def __init__(
+        self,
+        user_id: int,
+        *,
+        username: str | None = None,
+        first_name: str = "",
+        last_name: str | None = None,
+    ) -> None:
         self.id = user_id
-        self.username = None
-        self.first_name = ""
-        self.last_name = None
+        self.username = username
+        self.first_name = first_name
+        self.last_name = last_name
 
 
 def _display_name(user) -> str:
