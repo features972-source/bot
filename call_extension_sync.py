@@ -38,10 +38,10 @@ LIST_PARTICIPANTS_SEM = asyncio.Semaphore(12)
 SYNC_DEBOUNCE_SECONDS = 0.08
 RECONCILE_INTERVAL_SECONDS = 12
 RECONCILE_CONCURRENCY = 6
-EMPTY_CONFIRM_COUNT = 3
-CALL_START_STABLE_SECONDS = 4
-CALL_START_STABLE_HITS = 3
-CALL_REPLACE_GRACE_SECONDS = 20
+EMPTY_CONFIRM_COUNT = 2
+CALL_START_STABLE_SECONDS = 2
+CALL_START_STABLE_HITS = 2
+CALL_REPLACE_GRACE_SECONDS = 15
 PENDING_START_KEY = "pending_call_starts"
 QUIET_SYNC_KEY = "call_sync_quiet"
 STARTUP_CONNECTED_KEY = "startup_connected_callids"
@@ -317,16 +317,24 @@ async def sync_extension_state(
     pending: list[dict[str, Any]] = []
     participants_resolved = participants
     empty_refetch = False
+    live_before = _live_calls(bot_data).get(extension)
+    quick_end = False
 
-    quick_end = (
-        force_end
-        and removed_participant_id is not None
-        and _live_calls(bot_data).get(extension) is not None
-        and _live_calls(bot_data)[extension].participant_id == removed_participant_id
-    )
-
-    if not quick_end and not participants_known:
-        if ws_participant and is_real_connected_participant(
+    if not participants_known:
+        if force_end or live_before is not None:
+            participants_resolved = await list_extension_participants(
+                fqdn,
+                tokens,
+                extension,
+                http_client=http_client,
+                urgent=True,
+            )
+            if participants_resolved is None:
+                if force_end and live_before is not None:
+                    participants_resolved = []
+                else:
+                    return
+        elif ws_participant and is_real_connected_participant(
             ws_participant, extension=extension
         ):
             participants_resolved = [ws_participant]
@@ -340,6 +348,13 @@ async def sync_extension_state(
             )
             if participants_resolved is None:
                 return
+
+    if live_before is not None and participants_resolved is not None:
+        connected_now = _connected_participants(
+            participants_resolved, extension=extension
+        )
+        if not connected_now:
+            quick_end = True
 
     async with _extension_lock(bot_data, extension):
         live_calls = _live_calls(bot_data)
@@ -368,7 +383,8 @@ async def sync_extension_state(
                     _clear_empty_streak(bot_data, extension)
                     return
                 streak = _bump_empty_streak(bot_data, extension)
-                if streak >= EMPTY_CONFIRM_COUNT:
+                empty_confirm = 1 if urgent else EMPTY_CONFIRM_COUNT
+                if streak >= empty_confirm:
                     _clear_empty_streak(bot_data, extension)
                     if active is not None:
                         active.pop(extension, None)
