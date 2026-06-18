@@ -58,6 +58,7 @@ class CredoCreditCard:
     logo_file_id: str | None
     capacity: float
     added_at: str
+    card_last4: str | None = None
 
 
 @dataclass
@@ -298,6 +299,7 @@ def init_db(path: str) -> None:
             ON credo_card_usage (card_name, created_at DESC)
             """
         )
+        _ensure_credo_card_usage_columns(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS chat_blacklist (
@@ -588,6 +590,30 @@ def _ensure_credo_credit_card_columns(conn: sqlite3.Connection) -> None:
         )
     if "logo_file_id" not in columns:
         conn.execute("ALTER TABLE credo_credit_cards ADD COLUMN logo_file_id TEXT")
+    if "card_last4" not in columns:
+        conn.execute("ALTER TABLE credo_credit_cards ADD COLUMN card_last4 TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_credo_credit_cards_last4
+        ON credo_credit_cards (card_last4)
+        WHERE card_last4 IS NOT NULL
+        """
+    )
+
+
+def _ensure_credo_card_usage_columns(conn: sqlite3.Connection) -> None:
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(credo_card_usage)").fetchall()
+    }
+    if "source_payment_id" not in columns:
+        conn.execute("ALTER TABLE credo_card_usage ADD COLUMN source_payment_id INTEGER")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_credo_usage_payment
+        ON credo_card_usage (source_payment_id)
+        WHERE source_payment_id IS NOT NULL
+        """
+    )
 
 
 def _ensure_payment_out_columns(conn: sqlite3.Connection) -> None:
@@ -1409,27 +1435,38 @@ def upsert_credo_credit_card(
     *,
     capacity: float = 0,
     logo_file_id: str | None = None,
+    card_last4: str | None = None,
 ) -> None:
     cleaned = name.strip()
     if not cleaned or not photo_file_id.strip():
         raise ValueError("name and photo_file_id required")
     if capacity < 0:
         raise ValueError("capacity must be zero or positive")
+    last4_clean: str | None = None
+    if card_last4 is not None:
+        last4_clean = card_last4.strip()
+        if last4_clean and not last4_clean.isdigit():
+            raise ValueError("card_last4 must be four digits")
+        if last4_clean and len(last4_clean) != 4:
+            raise ValueError("card_last4 must be four digits")
+        if not last4_clean:
+            last4_clean = None
     added_at = datetime.now(timezone.utc).isoformat()
     with _connect(path) as conn:
         conn.execute(
             """
             INSERT INTO credo_credit_cards (
-                name, photo_file_id, logo_file_id, capacity, added_at
+                name, photo_file_id, logo_file_id, capacity, added_at, card_last4
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 photo_file_id = excluded.photo_file_id,
                 capacity = excluded.capacity,
                 added_at = excluded.added_at,
-                logo_file_id = COALESCE(excluded.logo_file_id, credo_credit_cards.logo_file_id)
+                logo_file_id = COALESCE(excluded.logo_file_id, credo_credit_cards.logo_file_id),
+                card_last4 = COALESCE(excluded.card_last4, credo_credit_cards.card_last4)
             """,
-            (cleaned, photo_file_id, logo_file_id, capacity, added_at),
+            (cleaned, photo_file_id, logo_file_id, capacity, added_at, last4_clean),
         )
         conn.commit()
 
@@ -1449,7 +1486,8 @@ def list_credo_credit_cards(path: str) -> list[CredoCreditCard]:
     with _connect(path) as conn:
         rows = conn.execute(
             """
-            SELECT name, photo_file_id, logo_file_id, COALESCE(capacity, 0), added_at
+            SELECT name, photo_file_id, logo_file_id, COALESCE(capacity, 0), added_at,
+                   card_last4
             FROM credo_credit_cards
             ORDER BY added_at ASC, name ASC
             """
@@ -1461,6 +1499,7 @@ def list_credo_credit_cards(path: str) -> list[CredoCreditCard]:
             logo_file_id=row[2],
             capacity=float(row[3] or 0),
             added_at=row[4],
+            card_last4=row[5] if len(row) > 5 else None,
         )
         for row in rows
     ]
@@ -1473,7 +1512,8 @@ def get_credo_credit_card(path: str, name: str) -> CredoCreditCard | None:
     with _connect(path) as conn:
         row = conn.execute(
             """
-            SELECT name, photo_file_id, logo_file_id, COALESCE(capacity, 0), added_at
+            SELECT name, photo_file_id, logo_file_id, COALESCE(capacity, 0), added_at,
+                   card_last4
             FROM credo_credit_cards
             WHERE name = ? COLLATE NOCASE
             """,
@@ -1487,6 +1527,35 @@ def get_credo_credit_card(path: str, name: str) -> CredoCreditCard | None:
         logo_file_id=row[2],
         capacity=float(row[3] or 0),
         added_at=row[4],
+        card_last4=row[5] if len(row) > 5 else None,
+    )
+
+
+def get_credo_credit_card_by_last4(path: str, last4: str) -> CredoCreditCard | None:
+    cleaned = last4.strip()
+    if len(cleaned) != 4 or not cleaned.isdigit():
+        return None
+    with _connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT name, photo_file_id, logo_file_id, COALESCE(capacity, 0), added_at,
+                   card_last4
+            FROM credo_credit_cards
+            WHERE card_last4 = ?
+            ORDER BY added_at ASC, name ASC
+            LIMIT 1
+            """,
+            (cleaned,),
+        ).fetchone()
+    if row is None:
+        return None
+    return CredoCreditCard(
+        name=row[0],
+        photo_file_id=row[1],
+        logo_file_id=row[2],
+        capacity=float(row[3] or 0),
+        added_at=row[4],
+        card_last4=row[5] if len(row) > 5 else None,
     )
 
 
@@ -1526,18 +1595,28 @@ def record_credo_card_usage(
     telegram_username: str | None,
     display_name: str | None,
     amount: float,
-) -> int:
+    source_payment_id: int | None = None,
+) -> int | None:
     if amount <= 0:
         raise ValueError("amount must be positive")
     created_at = datetime.now(timezone.utc).isoformat()
     with _connect(path) as conn:
+        if source_payment_id is not None:
+            existing = conn.execute(
+                """
+                SELECT 1 FROM credo_card_usage WHERE source_payment_id = ?
+                """,
+                (source_payment_id,),
+            ).fetchone()
+            if existing is not None:
+                return None
         cursor = conn.execute(
             """
             INSERT INTO credo_card_usage (
                 card_name, telegram_user_id, telegram_username, display_name,
-                amount, created_at
+                amount, created_at, source_payment_id
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 card_name.strip(),
@@ -1546,6 +1625,7 @@ def record_credo_card_usage(
                 display_name,
                 amount,
                 created_at,
+                source_payment_id,
             ),
         )
         conn.commit()

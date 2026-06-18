@@ -691,9 +691,24 @@ async def _finalize_payment_out(
     record = get_payment_by_id(settings.database_path, payment_id)
     if record is None:
         return
-    await message.reply_text(
-        _format_card_saved_reply(payment_id), parse_mode="Markdown"
-    )
+    reply = _format_card_saved_reply(payment_id)
+    try:
+        from handlers.credo import apply_credo_usage_from_payment_out
+
+        credo_note = apply_credo_usage_from_payment_out(
+            settings,
+            payment_id=payment_id,
+            card_last4=card_last4,
+            amount=pending.amount,
+            telegram_user_id=pending.finisher_user_id,
+            telegram_username=pending.finisher_username,
+            display_name=pending.finisher_display_name,
+        )
+        if credo_note:
+            reply = f"{reply}\n\n{credo_note}"
+    except Exception:
+        logger.exception("Credo auto-deduct failed for payment #%s", payment_id)
+    await message.reply_text(reply, parse_mode="Markdown")
     try:
         from quiet_wins import maybe_quiet_win_close_rate
 
