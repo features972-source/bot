@@ -11,15 +11,20 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 from config import Settings
 from database import (
-    PaymentRecord,
     clear_payment_notify_message_id,
     get_payment_notify_chat_id,
     get_payment_notify_message_id,
+    get_payment_totals,
     list_payments_since,
     set_payment_notify_chat_id,
     set_payment_notify_message_id,
 )
 from handlers.admin_access import require_admin
+from handlers.payment_table import (
+    format_payments_table,
+    payment_totals_table_row,
+    wrap_bold_table,
+)
 from handlers.stats_period import current_payment_week_start
 from instance_registry import get_instance, list_instances
 from payments_excel_export import (
@@ -27,8 +32,6 @@ from payments_excel_export import (
     FINISHER_PAY_PERCENT,
     STARTER_PAY_PERCENT,
     format_payment_sheet_updated_note,
-    payment_sheet_data_rows,
-    payment_sheet_totals_row,
     sorted_payment_records,
 )
 
@@ -36,9 +39,6 @@ logger = logging.getLogger(__name__)
 
 CALLBACK_PREFIX = "paynotify:"
 MAX_MESSAGE_LEN = 4096
-
-_ROW_DIVIDER = "────────────────────────"
-_STATUS_LEGEND = "🟩 Cleared   🟧 Pending   🟥 Not cleared"
 
 
 def build_payment_report_handlers() -> list:
@@ -50,68 +50,6 @@ def build_payment_report_handlers() -> list:
     ]
 
 
-def _status_banner(cleared: bool | None) -> str:
-    if cleared is None:
-        return "🟧 <b>PENDING</b>"
-    if cleared:
-        return "🟩 <b>CLEARED</b>"
-    return "🟥 <b>NOT CLEARED</b>"
-
-
-def _format_payment_block_html(record: PaymentRecord, row: list[str]) -> str:
-    amount, date, starter, finisher, card, _cleared, pay_starter, pay_finisher, pay_centre = row
-    lines = [
-        _status_banner(record.cleared),
-        f"💷 <b>{html.escape(amount)}</b>     📅 {html.escape(date)}",
-        (
-            f"👤 Starter: <b>{html.escape(starter or '—')}</b>"
-            f"     ➜ Finisher: <b>{html.escape(finisher)}</b>"
-        ),
-    ]
-    if card:
-        lines.append(f"💳 Card ····{html.escape(card)}")
-    lines.append(
-        f"Pay starter: <b>{html.escape(pay_starter or '—')}</b>"
-        f"     Pay finisher: <b>{html.escape(pay_finisher)}</b>"
-        f"     Pay centre: <b>{html.escape(pay_centre)}</b>"
-    )
-    return "\n".join(lines)
-
-
-def _format_totals_html(records: list[PaymentRecord]) -> str:
-    _total_label, amount, count, *_rest, pay_starter, pay_finisher, pay_centre = (
-        payment_sheet_totals_row(records)
-    )
-    return (
-        f"\n<b>━━━━━━━━  TOTAL  ━━━━━━━━</b>\n\n"
-        f"💷 <b>{html.escape(amount)}</b>     📋 {html.escape(count)}\n\n"
-        f"Pay starter: <b>{html.escape(pay_starter)}</b>\n"
-        f"Pay finisher: <b>{html.escape(pay_finisher)}</b>\n"
-        f"Pay centre: <b>{html.escape(pay_centre)}</b>\n\n"
-        f"<i>{html.escape(format_payment_sheet_updated_note())}</i>"
-    )
-
-
-def _format_report_body(
-    records: list[PaymentRecord],
-    *,
-    hidden_count: int = 0,
-) -> str:
-    data_rows = payment_sheet_data_rows(records)
-    blocks = [
-        _format_payment_block_html(record, row)
-        for record, row in zip(records, data_rows)
-    ]
-    body = f"\n\n{_ROW_DIVIDER}\n\n".join(blocks)
-    body += _format_totals_html(records)
-    if hidden_count > 0:
-        body += (
-            f"\n\n<i>… plus {hidden_count} older payment"
-            f"{'' if hidden_count == 1 else 's'} this week (see /payments)</i>"
-        )
-    return body
-
-
 def _week_records(settings: Settings) -> tuple:
     """Same week window and record set as /payments (newest first, like Excel)."""
     since, period_label = current_payment_week_start()
@@ -121,32 +59,53 @@ def _week_records(settings: Settings) -> tuple:
 
 
 def build_payment_report_text(settings: Settings) -> str:
-    _, period_label, all_records = _week_records(settings)
+    since, period_label, all_records = _week_records(settings)
 
     title = (
         f"📊 <b>{html.escape(settings.bot_display_name)}</b>\n"
-        f"<i>{html.escape(period_label)}</i>\n\n"
-        f"{_STATUS_LEGEND}"
+        f"<i>{html.escape(period_label)}</i>"
     )
     if not all_records:
         return (
             f"{title}\n\n"
-            "No payments logged this week yet.\n\n"
+            "<pre>No payments logged this week yet.</pre>\n\n"
             f"<i>Same data as /payments · resets every Sunday</i>"
         )
+
+    total_count, total_amount = get_payment_totals(settings.database_path, since=since)
+    totals_row = payment_totals_table_row(
+        total_amount=total_amount,
+        total_count=total_count,
+    )
 
     shown = list(all_records)
     hidden = 0
     while shown:
-        body = f"{title}{_format_report_body(shown, hidden_count=hidden)}"
-        if len(body) <= MAX_MESSAGE_LEN - 16:
-            return body
+        table = format_payments_table(
+            shown,
+            totals_row=totals_row,
+            hidden_count=hidden,
+            hidden_suffix="see /payments",
+        )
+        footer = format_payment_sheet_updated_note()
+        body = f"{table}\n\n{footer}"
+        message = f"{title}\n\n{wrap_bold_table(body)}"
+        if len(message) <= MAX_MESSAGE_LEN - 16:
+            return message
         if len(shown) == 1:
             break
         shown.pop()
         hidden += 1
 
-    return f"{title}{_format_report_body(shown, hidden_count=hidden)}"
+    table = format_payments_table(
+        shown,
+        totals_row=totals_row,
+        hidden_count=hidden,
+        hidden_suffix="see /payments",
+    )
+    footer = format_payment_sheet_updated_note()
+    body = f"{table}\n\n{footer}"
+    return f"{title}\n\n{wrap_bold_table(body)}"
 
 
 async def refresh_payment_report(bot, settings: Settings) -> None:
@@ -248,7 +207,7 @@ async def setnotifypayments_command(
         "💸 **Live payment list**\n\n"
         "Pick **Q1** or **Q2**. One message in this group will stay updated "
         "whenever payments are logged, edited, cleared, or removed.\n\n"
-        f"Same data as the Excel sheet · /payments (resets Sunday). "
+        f"Same table as /payments and Excel · resets Sunday. "
         f"Payouts: starter {STARTER_PAY_PERCENT}%, finisher {FINISHER_PAY_PERCENT}%, "
         f"owners {CENTRE_PAY_PERCENT}%.",
         parse_mode="Markdown",
@@ -284,7 +243,7 @@ async def setnotifypayments_callback(
         await query.edit_message_text(
             f"✅ **{target_settings.bot_display_name}** — live payment list enabled here.\n\n"
             f"Chat id: `{chat.id}`\n"
-            "The list below updates automatically when payments change.",
+            "The table below updates automatically when payments change.",
             parse_mode="Markdown",
         )
 

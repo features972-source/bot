@@ -28,7 +28,6 @@ from database import (
     get_payment_totals,
     list_links,
     list_payments_since,
-    list_all_payments,
     list_recent_payments,
     payment_message_exists,
     record_payment_out,
@@ -39,6 +38,11 @@ from database import (
     update_payment_cleared,
 )
 from handlers.admin_access import is_bot_admin, require_admin
+from handlers.payment_table import (
+    format_payments_table,
+    payment_totals_table_row,
+    wrap_bold_table,
+)
 from handlers.stats_period import (
     _parse_stats_period,
     current_payment_week_start,
@@ -47,11 +51,8 @@ from handlers.stats_period import (
 )
 from payments_excel_export import (
     SYNC_ESTIMATE_SECONDS,
-    centre_payout,
     excel_sync_with_timer,
-    finisher_payout,
     schedule_payments_excel_sync,
-    starter_payout,
 )
 
 logger = logging.getLogger(__name__)
@@ -202,30 +203,6 @@ def _cleared_status_label(cleared: bool | None) -> str:
 _PAYMENTS_SUMMARY_MAX_LEN = 4096
 _PAYMENTS_LIST_LIMIT = 25
 
-_PAYMENTS_TABLE_HEADERS = (
-    "Amount",
-    "Date",
-    "Starter",
-    "Finisher",
-    "Card",
-    "Clear",
-    "Pay Str",
-    "Pay Fin",
-    "Pay Ctr",
-)
-_PAYMENTS_TABLE_WIDTHS = (10, 11, 14, 14, 5, 7, 10, 10, 10)
-
-
-def _format_payment_date(iso_timestamp: str) -> str:
-    try:
-        text = iso_timestamp.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(text)
-    except ValueError:
-        return iso_timestamp
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(stats_timezone()).strftime("%d/%m/%Y")
-
 
 def _format_card_saved_reply() -> str:
     return "✅ Added to the system"
@@ -374,110 +351,6 @@ def _stored_user_label(
     if display_name:
         return display_name
     return str(user_id)
-
-
-def _stored_user_at_label(
-    username: str | None,
-    display_name: str | None,
-    user_id: int,
-) -> str:
-    """Compact @username for /payments list (falls back to name or id)."""
-    if username:
-        return f"@{username.lstrip('@')}"
-    if display_name:
-        return display_name
-    return str(user_id)
-
-
-def _cleared_table_cell(cleared: bool | None) -> str:
-    if cleared is None:
-        return "🟧Pend"
-    if cleared:
-        return "🟩 Yes"
-    return "🟥 No"
-
-
-def _fit_table_cell(value: str, width: int) -> str:
-    text = value or ""
-    if len(text) <= width:
-        return text.ljust(width)
-    if width <= 1:
-        return text[:width]
-    return text[: width - 1] + "…"
-
-
-def _format_table_row(cells: list[str]) -> str:
-    padded = [
-        _fit_table_cell(cells[i] if i < len(cells) else "", _PAYMENTS_TABLE_WIDTHS[i])
-        for i in range(len(_PAYMENTS_TABLE_WIDTHS))
-    ]
-    return "".join(padded).rstrip()
-
-
-def _payment_table_row(record: PaymentRecord) -> list[str]:
-    starter = ""
-    if record.starter_user_id is not None:
-        starter = _stored_user_at_label(
-            record.starter_username,
-            record.starter_display_name,
-            record.starter_user_id,
-        )
-    s_pay = starter_payout(record)
-    return [
-        format_amount(record.amount),
-        _format_payment_date(record.created_at),
-        starter,
-        _stored_user_at_label(
-            record.finisher_username,
-            record.finisher_display_name,
-            record.finisher_user_id,
-        ),
-        record.card_last4 or "",
-        _cleared_table_cell(record.cleared),
-        format_amount(s_pay) if s_pay else "",
-        format_amount(finisher_payout(record)),
-        format_amount(centre_payout(record)),
-    ]
-
-
-def _payment_totals_table_row(
-    *,
-    total_amount: float,
-    total_count: int,
-    all_records: list[PaymentRecord],
-) -> list[str]:
-    count_label = f"{total_count} pay" if total_count != 1 else "1 pay"
-    return [
-        "TOTAL",
-        format_amount(total_amount),
-        count_label,
-        "",
-        "",
-        "",
-        format_amount(sum(starter_payout(r) for r in all_records)),
-        format_amount(sum(finisher_payout(r) for r in all_records)),
-        format_amount(sum(centre_payout(r) for r in all_records)),
-    ]
-
-
-def _format_payments_table(
-    records: list[PaymentRecord],
-    *,
-    totals_row: list[str],
-    hidden_count: int = 0,
-) -> str:
-    header = _format_table_row(list(_PAYMENTS_TABLE_HEADERS))
-    divider = "─" * min(len(header), 100)
-    lines = [header, divider]
-    lines.extend(_format_table_row(_payment_table_row(record)) for record in records)
-    lines.append(divider)
-    lines.append(_format_table_row(totals_row))
-    if hidden_count > 0:
-        lines.append(
-            f"… +{hidden_count} more payment"
-            f"{'' if hidden_count == 1 else 's'} (live list has full detail)"
-        )
-    return "\n".join(lines)
 
 
 def _link_from_on_phone_label(database_path: str, label: str) -> ExtensionLink | None:
@@ -1065,15 +938,9 @@ def _build_payments_summary_message(
         settings.database_path, since=since, cleared=False
     )
 
-    if since is not None:
-        all_period_records = list_payments_since(settings.database_path, since=since)
-    else:
-        all_period_records = list_all_payments(settings.database_path)
-
-    totals_row = _payment_totals_table_row(
+    totals_row = payment_totals_table_row(
         total_amount=total_amount,
         total_count=total_count,
-        all_records=all_period_records,
     )
 
     hidden_from_limit = max(total_count - len(records), 0)
@@ -1089,7 +956,7 @@ def _build_payments_summary_message(
         elif hidden > 0:
             header += f" · <i>{len(shown_records)} shown</i>"
 
-        table = _format_payments_table(
+        table = format_payments_table(
             shown_records,
             totals_row=totals_row,
             hidden_count=hidden,
@@ -1109,7 +976,7 @@ def _build_payments_summary_message(
                 "\n<i>Admin: /setpayment # amount · /removepayment # · /syncpayments</i>"
             )
         body = f"{table}{summary}"
-        return f"{header}\n\n<pre>{html.escape(body)}</pre>{hints}"
+        return f"{header}\n\n{wrap_bold_table(body)}{hints}"
 
     while shown:
         message = _compose(shown, hidden_from_limit + hidden_extra)
