@@ -57,7 +57,7 @@ CREDO_ACTIVE_SESSIONS_KEY = "credo_active_sessions"
 CREDO_PICKER_COMMANDS = ("cc", "creditcard", "credo", "credos")
 CREDO_START_ARGS = frozenset(CREDO_PICKER_COMMANDS)
 CREDO_REMINDER_INTERVAL_SECONDS = 15 * 60
-CREDO_ACTIVE_ALLOWED_COMMANDS = frozenset({"mail", "finished"})
+CREDO_ACTIVE_ALLOWED_COMMANDS = frozenset({"mail", "finished", "addcredo", "cancel"})
 
 UNAUTHORIZED = (
     "You are not on the credo whitelist. Ask an admin to add you with /addcredouser."
@@ -86,19 +86,19 @@ def _end_conversation_by_name(
     context: ContextTypes.DEFAULT_TYPE, update: Update, name: str
 ) -> None:
     """End another ConversationHandler so it does not swallow plain-text replies."""
-    chat = update.effective_chat
-    user = update.effective_user
-    if not chat:
+    if not update.effective_chat:
         return
-    chat_id = chat.id
-    user_id = user.id if user else None
     for handlers in context.application.handlers.values():
         for handler in handlers:
             if getattr(handler, "name", None) != name:
                 continue
             if not isinstance(handler, ConversationHandler):
                 continue
-            handler.update_state(ConversationHandler.END, chat_id, user_id, context)
+            try:
+                key = handler._get_key(update)
+                handler._update_state(ConversationHandler.END, key)
+            except Exception:
+                logger.exception("Could not end conversation %s", name)
 
 
 def _clear_add_card_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -968,7 +968,7 @@ async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     message = update.effective_message
     if not message:
         return
-    if not await require_admin(update, settings):
+    if not await require_admin(update, settings, deny_message="Admin only."):
         return
 
     if message.chat.type != "private":
