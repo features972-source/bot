@@ -961,6 +961,15 @@ async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not await require_admin(update, settings):
         return ConversationHandler.END
 
+    if message.chat.type != "private":
+        await message.reply_text(
+            "💳 **Add credo card** must be done in a **private DM** with me "
+            "(Telegram blocks plain text replies in groups).\n\n"
+            "Open my profile → **Message**, then send **/addcredo** again.",
+            parse_mode="Markdown",
+        )
+        return ConversationHandler.END
+
     context.user_data.pop("add_card_name", None)
     context.user_data.pop("add_card_capacity", None)
     context.user_data["add_card_active"] = True

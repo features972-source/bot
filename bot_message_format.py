@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import wraps
+from io import BytesIO
 from typing import Any
 
 _PATCHED = False
@@ -33,15 +34,36 @@ def bold_text(text: str | None, parse_mode: str | None) -> tuple[str | None, str
     return f"<b>{raw}</b>", parse_mode or "HTML"
 
 
+def _copy_media_input(media_input):
+    """Return a fresh upload handle — BytesIO streams must not be reused after read."""
+    from telegram import InputFile
+
+    if isinstance(media_input, BytesIO):
+        data = media_input.getvalue()
+        name = getattr(media_input, "name", None) or "photo.png"
+        bio = BytesIO(data)
+        bio.seek(0)
+        return InputFile(bio, filename=name)
+    return media_input
+
+
 def _bold_caption_media(media: Any) -> Any:
     caption = getattr(media, "caption", None)
     if not caption:
+        media_input = _copy_media_input(getattr(media, "media", None))
+        if media_input is not getattr(media, "media", None):
+            media_type = type(media)
+            try:
+                return media_type(media=media_input)
+            except TypeError:
+                return media
         return media
     cap, pm = bold_text(caption, getattr(media, "parse_mode", None))
+    media_input = _copy_media_input(getattr(media, "media", None))
     media_type = type(media)
     try:
         return media_type(
-            media=media.media,
+            media=media_input,
             caption=cap,
             parse_mode=pm,
             **{
@@ -51,7 +73,7 @@ def _bold_caption_media(media: Any) -> Any:
             },
         )
     except TypeError:
-        return media_type(media=media.media, caption=cap, parse_mode=pm)
+        return media_type(media=media_input, caption=cap, parse_mode=pm)
 
 
 def apply_bot_bold_patch() -> None:

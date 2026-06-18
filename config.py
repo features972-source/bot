@@ -162,6 +162,20 @@ def load_settings(env_prefix: str = "", *, optional: bool = False) -> Settings |
             return os.getenv(f"{env_prefix}{key}", default).strip()
         return os.getenv(key, default).strip()
 
+    def parse_chat_id(key: str) -> int | None:
+        raw = getenv(key)
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError as exc:
+            env_key = f"{env_prefix}{key}" if env_prefix else key
+            raise RuntimeError(
+                f"{env_key} must be a numeric Telegram id on Render "
+                f"(copy the real value from .env.bot2, not placeholder text). "
+                f"Got: {raw!r}"
+            ) from exc
+
     token = getenv("BOT_TOKEN")
     if not token:
         if optional:
@@ -172,17 +186,13 @@ def load_settings(env_prefix: str = "", *, optional: bool = False) -> Settings |
             "Add BOT_TOKEN on Render (one token per Web Service)."
         )
 
-    admin_raw = getenv("ADMIN_CHAT_ID")
-    admin_chat_id = int(admin_raw) if admin_raw else None
+    admin_chat_id = parse_chat_id("ADMIN_CHAT_ID")
 
-    notify_raw = getenv("NOTIFY_CHAT_ID")
-    notify_chat_id = int(notify_raw) if notify_raw else None
+    notify_chat_id = parse_chat_id("NOTIFY_CHAT_ID")
 
-    copy_raw = getenv("COPY_TO_CHAT_ID")
-    copy_to_chat_id = int(copy_raw) if copy_raw else None
+    copy_to_chat_id = parse_chat_id("COPY_TO_CHAT_ID")
 
-    listen_raw = getenv("LISTEN_CHAT_ID")
-    listen_chat_id = int(listen_raw) if listen_raw else None
+    listen_chat_id = parse_chat_id("LISTEN_CHAT_ID")
 
     credo_ids: set[int] = set()
     credo_raw = getenv("CREDO_WHITELIST_USER_IDS")

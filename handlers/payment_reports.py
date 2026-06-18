@@ -6,7 +6,6 @@ import asyncio
 import html
 import logging
 from collections import defaultdict
-from io import BytesIO
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.error import BadRequest
@@ -28,7 +27,11 @@ from handlers.payment_table import (
     format_image_subtitle,
     status_summary_totals,
 )
-from handlers.payment_table_image import live_report_title, render_payments_table_png
+from handlers.payment_table_image import (
+    live_report_title,
+    payment_table_input_file,
+    render_payments_table_png,
+)
 from handlers.stats_period import current_payment_week_start
 from instance_registry import get_instance, list_instances
 from payments_excel_export import sorted_payment_records
@@ -51,11 +54,8 @@ def build_payment_report_handlers() -> list:
     ]
 
 
-def _photo_file(image_bytes: bytes) -> BytesIO:
-    bio = BytesIO(image_bytes)
-    bio.name = "payments.png"
-    bio.seek(0)
-    return bio
+def _photo_file(image_bytes: bytes):
+    return payment_table_input_file(image_bytes)
 
 
 async def _delete_notify_message(bot, chat_id: int, message_id: int) -> None:

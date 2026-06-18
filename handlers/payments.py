@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TimedOut
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -51,7 +51,11 @@ from database import (
 )
 from handlers.admin_access import is_bot_admin, iter_bot_admin_user_ids, require_admin
 from handlers.payment_table import format_image_subtitle, status_summary_totals, PAYMENTS_PAGE_SIZE
-from handlers.payment_table_image import live_report_title, render_payments_table_png
+from handlers.payment_table_image import (
+    live_report_title,
+    payment_table_input_file,
+    render_payments_table_png,
+)
 from handlers.stats_period import (
     _parse_stats_period,
     current_payment_week_start,
@@ -1112,6 +1116,115 @@ def _payments_summary_caption(
     return "\n".join(caption_parts)
 
 
+def _payments_summary_caption_html(
+    *,
+    since: datetime | None,
+    include_admin: bool,
+    total_pages: int = 1,
+    page_index: int = 0,
+    page_info: str = "",
+) -> str:
+    plain = _payments_summary_caption(
+        since=since,
+        include_admin=include_admin,
+        total_pages=total_pages,
+        page_index=page_index,
+        page_info=page_info,
+    )
+    if not plain:
+        return ""
+    return f"<b>{html.escape(plain)}</b>"
+
+
+def _edit_media_is_text_message(exc: BadRequest) -> bool:
+    err = str(exc).lower()
+    return any(
+        token in err
+        for token in (
+            "there is no media",
+            "message can't be edited",
+            "message to edit not found",
+            "wrong message type",
+        )
+    )
+
+
+async def _deliver_payment_table_image(
+    *,
+    bot,
+    chat_id: int,
+    png: bytes,
+    caption: str,
+    keyboard: InlineKeyboardMarkup | None,
+    edit_message=None,
+    reply_message=None,
+) -> None:
+    """Send or edit the payment table PNG; fall back to document upload if needed."""
+    photo = payment_table_input_file(png)
+    media = InputMediaPhoto(
+        media=payment_table_input_file(png),
+        caption=caption,
+        parse_mode="HTML",
+    )
+
+    if edit_message is not None:
+        try:
+            await bot.edit_message_media(
+                chat_id=edit_message.chat_id,
+                message_id=edit_message.message_id,
+                media=media,
+                reply_markup=keyboard,
+            )
+            return
+        except BadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            if not _edit_media_is_text_message(exc):
+                raise
+            logger.debug(
+                "Payment table edit failed for msg %s (%s); sending a new photo",
+                edit_message.message_id,
+                exc,
+            )
+
+    try:
+        if reply_message is not None:
+            await reply_message.reply_photo(
+                photo=photo,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        else:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=payment_table_input_file(png),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        return
+    except (BadRequest, TimedOut) as exc:
+        logger.warning("Payment table photo send failed: %s", exc)
+
+    doc = payment_table_input_file(png, filename="payments-table.png")
+    if reply_message is not None:
+        await reply_message.reply_document(
+            document=doc,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+    else:
+        await bot.send_document(
+            chat_id=chat_id,
+            document=payment_table_input_file(png, filename="payments-table.png"),
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+
+
 def _build_payments_summary_image(
     settings: Settings,
     *,
@@ -1214,7 +1327,7 @@ async def _send_payments_summary(
         )
         return
 
-    caption = _payments_summary_caption(
+    caption = _payments_summary_caption_html(
         since=since,
         include_admin=include_admin,
         total_pages=total_pages,
@@ -1225,30 +1338,21 @@ async def _send_payments_summary(
         scope=scope, page=page_index, total_pages=total_pages
     )
 
-    bio = BytesIO(png)
-    bio.name = "payments.png"
-    bio.seek(0)
+    if not png:
+        await (edit_message or message).reply_text(
+            "Could not build the payment table image. Try again in a moment."
+        )
+        return
+
     try:
-        if edit_message is not None:
-            try:
-                await context.bot.edit_message_media(
-                    chat_id=edit_message.chat_id,
-                    message_id=edit_message.message_id,
-                    media=InputMediaPhoto(media=bio, caption=caption),
-                    reply_markup=keyboard,
-                )
-            except BadRequest as exc:
-                if "message is not modified" in str(exc).lower():
-                    return
-                raise
-            return
-        reply_bio = BytesIO(png)
-        reply_bio.name = "payments.png"
-        reply_bio.seek(0)
-        await message.reply_photo(
-            photo=reply_bio,
+        await _deliver_payment_table_image(
+            bot=context.bot,
+            chat_id=message.chat_id,
+            png=png,
             caption=caption,
-            reply_markup=keyboard,
+            keyboard=keyboard,
+            edit_message=edit_message,
+            reply_message=message if edit_message is None else None,
         )
     except Exception:
         logger.exception("Failed to send payments summary image")

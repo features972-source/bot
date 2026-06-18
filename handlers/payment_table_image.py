@@ -6,6 +6,8 @@ from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 
+from telegram import InputFile
+
 from database import PaymentRecord
 from handlers.payment_table import (
     build_username_lookup,
@@ -53,6 +55,13 @@ _CARD_COL = 5
 _CLEARED_COL = 6
 _MIN_COL_WIDTHS_FULL = (52, 88, 72, 88, 88, 52, 60, 72, 80, 72)
 _MIN_COL_WIDTHS_COMPACT = (52, 88, 72, 88, 88, 52, 60)
+
+
+def payment_table_input_file(png: bytes, *, filename: str = "payments.png") -> InputFile:
+    """Fresh InputFile for each Telegram upload (BytesIO must not be reused)."""
+    bio = BytesIO(png)
+    bio.seek(0)
+    return InputFile(bio, filename=filename)
 
 
 def live_report_title(bot_display_name: str) -> str:

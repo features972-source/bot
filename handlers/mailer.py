@@ -6,7 +6,14 @@ import logging
 import re
 
 from telegram import ReplyKeyboardRemove, Update
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    ApplicationHandlerStop,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from config import Settings
 from handlers.admin_access import is_bot_admin
@@ -28,6 +35,7 @@ def build_mailer_handlers() -> list:
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             private_text_router,
+            block=False,
         ),
     ]
 
@@ -235,7 +243,7 @@ async def private_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             else:
                 await message.reply_text(detail or "Button click failed.")
-            return
+            raise ApplicationHandlerStop
 
         logger.info(
             "Forwarding mailer text from user %s: %r",
@@ -247,7 +255,7 @@ async def private_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
             await message.reply_text(f"↪️ Sent to {settings.mailer_display_name}")
         elif detail:
             await message.reply_text(detail)
-        return
+        raise ApplicationHandlerStop
 
     session = get_active_credo_session(context.application.bot_data, user.id)
     if session is not None and message.chat.type == "private":
@@ -259,7 +267,7 @@ async def private_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
             "or send **/finished** when you're done.",
             parse_mode="Markdown",
         )
-        return
+        raise ApplicationHandlerStop
 
     if "credo_cards" in context.user_data:
         return
