@@ -246,19 +246,20 @@ def _format_card_label(database_path: str, card_name: str) -> str:
 
 
 def _allocate_card_name(database_path: str, desired: str) -> str:
-    """Pick a unique DB name; append #2, #3… when the base name already exists."""
+    """Pick a unique DB name; append #2, #3… when the base name is already taken."""
     desired = desired.strip()
     if not desired:
         return desired
     base = _base_card_name(desired)
-    existing = list_credo_credit_cards(database_path)
-    for card in existing:
-        if card.name.lower() == desired.lower():
-            return card.name
-    same_base = [c for c in existing if _base_card_name(c.name).lower() == base.lower()]
-    if not same_base:
+    taken = {c.name.lower() for c in list_credo_credit_cards(database_path)}
+    if desired.lower() not in taken:
         return desired
-    return f"{base} #{len(same_base) + 1}"
+    n = 2
+    while True:
+        candidate = f"{base} #{n}"
+        if candidate.lower() not in taken:
+            return candidate
+        n += 1
 
 
 def _card_balance(settings: Settings, card_name: str) -> tuple[float, float, float]:
@@ -972,7 +973,7 @@ async def credo_reply_log_amount(update: Update, context: ContextTypes.DEFAULT_T
 
 
 def _photo_file_id(update: Update) -> str | None:
-    message = update.message
+    message = update.effective_message
     if not message:
         return None
     if message.photo:
@@ -1076,7 +1077,11 @@ async def addcredocard_route_photo(
     if not message or message.chat.type != "private":
         return
     if _normalize_add_card_step(context.user_data.get(ADD_CARD_STEP_KEY)) != ADD_CARD_STEP_PHOTO:
-        return
+        await message.reply_text(
+            "**Step 3 of 3** — Send a **photo** of the card to finish adding it.",
+            parse_mode="Markdown",
+        )
+        raise ApplicationHandlerStop
 
     result = await addcredocard_receive_photo(update, context)
     if result == ConversationHandler.END:
@@ -1162,12 +1167,22 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
 
     capacity = float(context.user_data.get("add_card_capacity") or 0)
     stored_name = _allocate_card_name(settings.database_path, name)
-    upsert_credo_credit_card(
-        settings.database_path,
-        stored_name,
-        file_id,
-        capacity=capacity,
-    )
+    try:
+        upsert_credo_credit_card(
+            settings.database_path,
+            stored_name,
+            file_id,
+            capacity=capacity,
+        )
+    except Exception:
+        logger.exception("Failed to save credo card %r", stored_name)
+        await message.reply_text(
+            "Could not save that card — please try again with **/addcredo**.",
+            parse_mode="Markdown",
+        )
+        return ADD_CARD_STEP_PHOTO
+
+    logger.info("Added credo card %r (requested %r)", stored_name, name)
     context.user_data.pop("add_card_name", None)
     context.user_data.pop("add_card_capacity", None)
     context.user_data.pop("add_card_active", None)
@@ -1178,7 +1193,7 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
         else "No limit set on this account."
     )
     display_label = _format_card_label(settings.database_path, stored_name)
-    name_note = f" (saved as **{stored_name}**)" if stored_name != name else ""
+    name_note = f" (saved as **{stored_name}**)" if stored_name.lower() != name.lower() else ""
     await message.reply_photo(
         photo=file_id,
         caption=f"✅ **{display_label}** added{name_note} · limit {cap_line}\n{limit_hint}",
