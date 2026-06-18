@@ -25,7 +25,6 @@ from mailer_bridge import init_mailer_bridge
 from notify import (
     active_calls_digest_loop,
     ensure_telegram_send_worker,
-    live_call_timers_loop,
 )
 from payments_excel_export import schedule_payments_excel_sync
 from threex_token import get_token_holder
@@ -81,10 +80,6 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         asyncio.create_task(
             start_call_control_listener(settings, app.bot, app.bot_data),
             name=f"call-control-{instance_id}",
-        )
-        asyncio.create_task(
-            live_call_timers_loop(app.bot, app.bot_data),
-            name=f"live-timers-{instance_id}",
         )
         asyncio.create_task(
             active_calls_digest_loop(app.bot, settings, app.bot_data),

@@ -307,14 +307,17 @@ def format_transfer_live_message(
     from_link: ExtensionLink | None,
     from_extension: str,
     to_link: ExtensionLink,
-    elapsed_seconds: int,
+    elapsed_seconds: int | None = None,
 ) -> str:
     lines = [
         "🔀 <b>ON CALL · TRANSFER</b>",
         f"👤 <b>To</b> · {format_bold_agent_label(to_link)}",
         f"👤 <b>From</b> · <b>{_extension_label(from_link, from_extension)}</b>",
-        f"⏱️ <b>Duration</b> · <b>{format_duration(elapsed_seconds)}</b>",
     ]
+    if elapsed_seconds is not None:
+        lines.append(
+            f"⏱️ <b>Duration</b> · <b>{format_duration(elapsed_seconds)}</b>"
+        )
     return "\n".join(lines)
 
 
@@ -1094,10 +1097,7 @@ async def announce_call_started(
 
             link=link,
 
-            initial_text=format_on_phone_message(
-                link,
-                elapsed_seconds=0,
-            ),
+            initial_text=format_on_phone_message(link),
 
             caller_name=caller_name,
 
@@ -1326,9 +1326,6 @@ async def announce_transfer_received(
             from_extension=from_extension,
 
             to_link=to_link,
-
-            elapsed_seconds=0,
-
         ),
 
         call_kind="transfer",
@@ -1348,48 +1345,12 @@ async def announce_transfer_received(
 
 
 async def live_call_timers_loop(bot, bot_data: dict) -> None:
-    """Update all on-phone message timers; edits are spaced to avoid Telegram rate limits."""
+    """No-op: ON CALL and CALL ENDED are separate new messages (no timer edits)."""
     try:
-        await asyncio.sleep(1.0)
         while True:
-            live_calls = _live_calls(bot_data)
-            pending = [
-                (extension, live_call)
-                for extension, live_call in live_calls.items()
-                if live_call.message_ids
-            ]
-            if not pending:
-                await asyncio.sleep(TIMER_UPDATE_SECONDS)
-                continue
-
-            for extension, live_call in pending:
-                if extension not in live_calls or not live_call.message_ids:
-                    continue
-                elapsed = int(time.monotonic() - live_call.started_at)
-                if elapsed == live_call.last_displayed_elapsed:
-                    continue
-                live_call.last_displayed_elapsed = elapsed
-                await _edit_live_messages(
-                    bot,
-                    bot_data,
-                    live_call.message_ids,
-                    _live_call_text(live_call, elapsed),
-                    reply_markup=None,
-                )
-                if elapsed <= 3 or elapsed % 15 == 0:
-                    logger.info(
-                        "Timer tick ext %s → %s",
-                        extension,
-                        format_duration(elapsed),
-                    )
-                await asyncio.sleep(TELEGRAM_EDIT_SPACING_SECONDS)
-
-            round_seconds = len(pending) * TELEGRAM_EDIT_SPACING_SECONDS
-            await asyncio.sleep(max(0.0, TIMER_UPDATE_SECONDS - round_seconds))
+            await asyncio.sleep(3600)
     except asyncio.CancelledError:
         raise
-    except Exception:
-        logger.exception("Live call timers loop stopped")
 
 
 
