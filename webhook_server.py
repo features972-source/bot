@@ -13,7 +13,7 @@ from flask import Flask, Response, jsonify, request
 from telegram import Bot
 
 from config import Settings
-from database import get_link_by_extension, get_payment_totals
+from database import get_link_by_extension, get_notify_chat_id, get_payment_totals
 from listen_stream import (
     get_listen_session,
     iter_session_audio,
@@ -48,34 +48,89 @@ END_EVENTS = {
 }
 
 
+def start_multi_webhook_server(runtimes, loop: asyncio.AbstractEventLoop) -> threading.Thread:
+    """One HTTP server for Q1 + Q2 (health, restore, listen, 3CX webhooks)."""
+    primary = runtimes[0].settings
+    return _start_webhook_app(
+        runtimes=runtimes,
+        primary_settings=primary,
+        loop=loop,
+    )
+
+
 def start_webhook_server(
     settings: Settings,
     bot: Bot,
     bot_data: dict,
     loop: asyncio.AbstractEventLoop,
 ) -> threading.Thread:
+    from bot_core import BotRuntime
+
+    runtime = BotRuntime(
+        instance_id="q1",
+        settings=settings,
+        application=type("_App", (), {"bot": bot, "bot_data": bot_data})(),
+        notify_chat_id=bot_data.get("notify_chat_id"),
+    )
+    return _start_webhook_app(runtimes=[runtime], primary_settings=settings, loop=loop)
+
+
+def _start_webhook_app(
+    *,
+    runtimes,
+    primary_settings: Settings,
+    loop: asyncio.AbstractEventLoop,
+) -> threading.Thread:
     app = Flask(__name__)
+
+    def _runtime_by_id(instance_id: str):
+        for runtime in runtimes:
+            if runtime.instance_id == instance_id:
+                return runtime
+        return None
+
+    def _runtime_for_secret(secret: str):
+        for runtime in runtimes:
+            if runtime.settings.webhook_secret == secret:
+                return runtime
+        return None
+
+    def _health_payload(runtime) -> dict:
+        settings = runtime.settings
+        bot_data = runtime.application.bot_data
+        notify_id = bot_data.get("notify_chat_id") or settings.notify_chat_id
+        if notify_id is None:
+            notify_id = get_notify_chat_id(settings.database_path)
+        payment_count, _ = get_payment_totals(settings.database_path, since=None)
+        return {
+            "id": runtime.instance_id,
+            "bot": settings.bot_display_name,
+            "database_path": settings.database_path,
+            "notify_chat_id": notify_id,
+            "payments_logged": payment_count,
+            "persistent_data": settings.persistent_data,
+        }
 
     @app.get("/health")
     def health():
-        notify_id = bot_data.get("notify_chat_id") or settings.notify_chat_id
-        payment_count, _ = get_payment_totals(settings.database_path, since=None)
+        instances = [_health_payload(runtime) for runtime in runtimes]
+        primary = instances[0]
         return jsonify(
             {
                 "ok": True,
-                "bot": settings.bot_display_name,
-                "database_path": settings.database_path,
-                "data_dir": settings.data_dir,
-                "persistent_data": settings.persistent_data,
-                "notify_chat_id": notify_id,
-                "payments_logged": payment_count,
+                "instances": instances,
+                **primary,
             }
         )
 
     @app.post("/admin/restore-db")
     def restore_db():
         secret = request.args.get("secret", "")
-        if not secret or secret != settings.webhook_secret:
+        instance_id = (request.args.get("instance") or "q1").strip().lower()
+        runtime = _runtime_by_id(instance_id)
+        if runtime is None:
+            return jsonify({"ok": False, "error": f"unknown instance {instance_id}"}), 400
+        if not secret or secret != runtime.settings.webhook_secret:
             return jsonify({"ok": False, "error": "unauthorized"}), 403
         upload = request.files.get("file")
         if upload is None:
@@ -83,19 +138,32 @@ def start_webhook_server(
         data = upload.read()
         if len(data) < 16 or not data.startswith(b"SQLite format 3"):
             return jsonify({"ok": False, "error": "not a sqlite database"}), 400
-        db_path = Path(settings.database_path)
+        db_path = Path(runtime.settings.database_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         if db_path.exists():
             backup = db_path.with_suffix(f"{db_path.suffix}.bak")
             shutil.copy2(db_path, backup)
         db_path.write_bytes(data)
-        logger.info("Restored database to %s (%d bytes)", db_path, len(data))
-        return jsonify({"ok": True, "path": str(db_path), "bytes": len(data)})
+        logger.info(
+            "Restored database for %s to %s (%d bytes)",
+            instance_id,
+            db_path,
+            len(data),
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "instance": instance_id,
+                "path": str(db_path),
+                "bytes": len(data),
+            }
+        )
 
     @app.post("/admin/restore-session")
     def restore_session():
         secret = request.args.get("secret", "")
-        if not secret or secret != settings.webhook_secret:
+        runtime = runtimes[0]
+        if not secret or secret != runtime.settings.webhook_secret:
             return jsonify({"ok": False, "error": "unauthorized"}), 403
         upload = request.files.get("file")
         if upload is None:
@@ -103,6 +171,7 @@ def start_webhook_server(
         data = upload.read()
         if not data:
             return jsonify({"ok": False, "error": "empty file"}), 400
+        settings = runtime.settings
         filename = (request.form.get("name") or upload.filename or "mailer-links.session").strip()
         if not filename.endswith(".session"):
             filename = f"{filename}.session"
@@ -123,6 +192,10 @@ def start_webhook_server(
         from onedrive_cloud_sync import exchange_oauth_code
         from database import set_ms_graph_refresh_token
 
+        runtime = runtimes[0]
+        settings = runtime.settings
+        bot = runtime.application.bot
+
         error = request.args.get("error_description") or request.args.get("error")
         if error:
             return (
@@ -138,9 +211,9 @@ def start_webhook_server(
         if not code:
             return "Missing authorization code.", 400
 
-        pending = bot_data.get("msgraph_oauth_states") or {}
+        pending = runtime.application.bot_data.get("msgraph_oauth_states") or {}
         chat_id = pending.pop(state, None)
-        bot_data["msgraph_oauth_states"] = pending
+        runtime.application.bot_data["msgraph_oauth_states"] = pending
         if chat_id is None:
             return (
                 "<html><body><h2>Link expired</h2>"
@@ -182,10 +255,17 @@ def start_webhook_server(
             "</body></html>"
         )
 
+    def _find_listen_runtime(session_id: str):
+        for runtime in runtimes:
+            session = get_listen_session(runtime.application.bot_data, session_id)
+            if session is not None:
+                return runtime, session
+        return None, None
+
     @app.get("/listen/<path:session_id>")
     def listen_page(session_id: str):
-        session = get_listen_session(bot_data, session_id)
-        if session is None:
+        runtime, session = _find_listen_runtime(session_id)
+        if session is None or runtime is None:
             return "Listen session not found or expired.", 404
         phone_ext = ""
         if os.getenv("LISTEN_USE_PHONE_FALLBACK", "").strip().lower() in {
@@ -193,12 +273,12 @@ def start_webhook_server(
             "true",
             "yes",
         }:
-            phone_ext = admin_extension(settings)
+            phone_ext = admin_extension(runtime.settings)
         return listen_page_html(session, phone_listen_ext=phone_ext)
 
     @app.get("/listen/stream/<path:session_id>")
     def listen_stream(session_id: str):
-        session = get_listen_session(bot_data, session_id)
+        _runtime, session = _find_listen_runtime(session_id)
         if session is None:
             return "Not found", 404
         if session.error:
@@ -216,8 +296,12 @@ def start_webhook_server(
 
     @app.route("/webhook/3cx/<secret>", methods=["GET", "POST"])
     def webhook(secret: str):
-        if secret != settings.webhook_secret:
+        runtime = _runtime_for_secret(secret)
+        if runtime is None:
             return "Forbidden", 403
+        settings = runtime.settings
+        bot = runtime.application.bot
+        bot_data = runtime.application.bot_data
 
         payload = _read_payload()
         extension = _extract_extension(payload)
@@ -272,8 +356,8 @@ def start_webhook_server(
         from werkzeug.serving import make_server
 
         httpd = make_server(
-            settings.webhook_host,
-            settings.webhook_port,
+            primary_settings.webhook_host,
+            primary_settings.webhook_port,
             app,
             threaded=True,
         )
@@ -282,6 +366,9 @@ def start_webhook_server(
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
     return thread
+
+
+# Legacy single-bot helpers removed below — _read_payload etc. unchanged
 
 
 def _read_payload() -> dict[str, Any]:

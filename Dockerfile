@@ -16,4 +16,4 @@ RUN mkdir -p /data/exports
 
 EXPOSE 10000
 
-CMD ["python", "bot.py"]
+CMD ["python", "bot_cloud.py"]

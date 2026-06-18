@@ -123,30 +123,42 @@ class Settings:
         return bool(self.telethon_api_id and self.telethon_api_hash)
 
 
-def load_settings() -> Settings:
+def load_settings(env_prefix: str = "", *, optional: bool = False) -> Settings | None:
+    if env_prefix and not env_prefix.endswith("_"):
+        env_prefix = f"{env_prefix}_"
+
     _ensure_env_loaded()
     env_path = _resolve_env_path()
-    token = os.getenv("BOT_TOKEN", "").strip()
+
+    def getenv(key: str, default: str = "", *, shared: bool = False) -> str:
+        if env_prefix and not shared:
+            return os.getenv(f"{env_prefix}{key}", default).strip()
+        return os.getenv(key, default).strip()
+
+    token = getenv("BOT_TOKEN")
     if not token:
+        if optional:
+            return None
+        label = env_prefix.rstrip("_") or "primary"
         raise RuntimeError(
-            f"BOT_TOKEN is not set in {env_path}. "
-            "Create a new bot via @BotFather and add the token."
+            f"BOT_TOKEN is not set for {label} bot ({env_path}). "
+            "Add BOT_TOKEN or BOT2_BOT_TOKEN on Render."
         )
 
-    admin_raw = os.getenv("ADMIN_CHAT_ID", "").strip()
+    admin_raw = getenv("ADMIN_CHAT_ID")
     admin_chat_id = int(admin_raw) if admin_raw else None
 
-    notify_raw = os.getenv("NOTIFY_CHAT_ID", "").strip()
+    notify_raw = getenv("NOTIFY_CHAT_ID")
     notify_chat_id = int(notify_raw) if notify_raw else None
 
-    copy_raw = os.getenv("COPY_TO_CHAT_ID", "").strip()
+    copy_raw = getenv("COPY_TO_CHAT_ID")
     copy_to_chat_id = int(copy_raw) if copy_raw else None
 
-    listen_raw = os.getenv("LISTEN_CHAT_ID", "").strip()
+    listen_raw = getenv("LISTEN_CHAT_ID")
     listen_chat_id = int(listen_raw) if listen_raw else None
 
     credo_ids: set[int] = set()
-    credo_raw = os.getenv("CREDO_WHITELIST_USER_IDS", "").strip()
+    credo_raw = getenv("CREDO_WHITELIST_USER_IDS")
     if credo_raw:
         for part in credo_raw.split(","):
             part = part.strip()
@@ -154,16 +166,18 @@ def load_settings() -> Settings:
                 credo_ids.add(int(part))
 
     card_names: list[str] = []
-    cards_raw = os.getenv("CREDO_CREDIT_CARDS", "").strip()
+    cards_raw = getenv("CREDO_CREDIT_CARDS")
     if cards_raw:
         for part in cards_raw.replace("|", ",").split(","):
             name = part.strip()
             if name:
                 card_names.append(name)
 
-    secret = os.getenv("WEBHOOK_SECRET", "").strip()
+    secret = getenv("WEBHOOK_SECRET")
     if not secret:
-        raise RuntimeError(f"WEBHOOK_SECRET is not set in {env_path}.")
+        if optional:
+            return None
+        raise RuntimeError(f"WEBHOOK_SECRET is not set for {env_prefix or 'primary'} bot.")
 
     requested_data_dir = _data_dir()
     data_dir_path: Path | None = None
@@ -171,7 +185,7 @@ def load_settings() -> Settings:
     cloud_deployed = _cloud_deployed()
     public_base_url = os.getenv("RENDER_EXTERNAL_URL", "").strip() or None
 
-    database_path_raw = os.getenv("DATABASE_PATH", "").strip()
+    database_path_raw = getenv("DATABASE_PATH")
     if requested_data_dir is None and database_path_raw.replace("\\", "/").startswith("/data/"):
         requested_data_dir = Path("/data")
 
@@ -179,35 +193,36 @@ def load_settings() -> Settings:
         data_dir_path = _prepare_data_directory(requested_data_dir)
         data_dir = str(data_dir_path)
 
-    onedrive_raw = os.getenv("PAYMENTS_ONEDRIVE_PATH", "").strip()
+    onedrive_raw = getenv("PAYMENTS_ONEDRIVE_PATH")
     payments_onedrive_path = None
     if onedrive_raw:
         payments_onedrive_path = str(Path(onedrive_raw).expanduser().resolve())
     elif data_dir_path is not None:
-        payments_onedrive_path = str(data_dir_path / "exports" / "q1.xlsx")
+        export_name = "q2.xlsx" if env_prefix.startswith("BOT2") else "q1.xlsx"
+        payments_onedrive_path = str(data_dir_path / "exports" / export_name)
 
-    worksheet = os.getenv("PAYMENTS_ONEDRIVE_WORKSHEET", "Payments Automatic").strip()
+    worksheet = getenv("PAYMENTS_ONEDRIVE_WORKSHEET", "Payments Automatic")
     payments_onedrive_worksheet = worksheet or "Payments Automatic"
 
-    excel_web_raw = os.getenv("EXCEL_WEB_URL", "").strip()
+    excel_web_raw = getenv("EXCEL_WEB_URL")
     excel_web_url = excel_web_raw or None
 
-    ms_graph_client_id = os.getenv("MS_GRAPH_CLIENT_ID", "").strip() or None
-    ms_graph_client_secret = os.getenv("MS_GRAPH_CLIENT_SECRET", "").strip() or None
+    ms_graph_client_id = getenv("MS_GRAPH_CLIENT_ID") or None
+    ms_graph_client_secret = getenv("MS_GRAPH_CLIENT_SECRET") or None
 
-    display_name = os.getenv("BOT_DISPLAY_NAME", "Call Manager").strip()
+    display_name = getenv("BOT_DISPLAY_NAME", "Call Manager")
     bot_display_name = display_name or "Call Manager"
 
     telethon_api_id: int | None = None
-    api_id_raw = os.getenv("TELETHON_API_ID", "").strip()
+    api_id_raw = getenv("TELETHON_API_ID")
     if api_id_raw.isdigit():
         telethon_api_id = int(api_id_raw)
 
-    telethon_api_hash = os.getenv("TELETHON_API_HASH", "").strip() or None
+    telethon_api_hash = getenv("TELETHON_API_HASH") or None
     db_default = (
-        str(data_dir_path / "links.db")
+        str(data_dir_path / ("links-bot2.db" if env_prefix.startswith("BOT2") else "links.db"))
         if data_dir_path is not None
-        else "links.db"
+        else ("links-bot2.db" if env_prefix.startswith("BOT2") else "links.db")
     )
     database_path = database_path_raw or db_default
     if (
@@ -227,21 +242,20 @@ def load_settings() -> Settings:
                 payments_onedrive_path, requested_data_dir, data_dir_path
             )
     if payments_onedrive_path is None and data_dir_path is not None:
-        payments_onedrive_path = str(data_dir_path / "exports" / "q1.xlsx")
+        export_name = "q2.xlsx" if env_prefix.startswith("BOT2") else "q1.xlsx"
+        payments_onedrive_path = str(data_dir_path / "exports" / export_name)
     db_stem = Path(database_path).stem
     if data_dir_path is not None:
         telethon_session_path = str(data_dir_path / f"mailer-{db_stem}")
     else:
         telethon_session_path = str(_ROOT / f"mailer-{db_stem}")
 
-    mailer_bot_username = (
-        os.getenv("MAILER_BOT_USERNAME", "RvssianMailBot").strip() or "RvssianMailBot"
-    )
-    mailer_display = os.getenv("MAILER_DISPLAY_NAME", "Q1 Mailer").strip()
+    mailer_bot_username = getenv("MAILER_BOT_USERNAME", "RvssianMailBot") or "RvssianMailBot"
+    mailer_display = getenv("MAILER_DISPLAY_NAME", "Q1 Mailer")
     mailer_display_name = mailer_display or "Q1 Mailer"
 
     premium_ids: set[int] = set()
-    premium_raw = os.getenv("Q1_PREMIUM_USER_IDS", "").strip()
+    premium_raw = getenv("Q1_PREMIUM_USER_IDS")
     if premium_raw:
         for part in premium_raw.split(","):
             part = part.strip()
@@ -249,32 +263,32 @@ def load_settings() -> Settings:
                 premium_ids.add(int(part))
 
     ready_check_hour: int | None = None
-    ready_hour_raw = os.getenv("READY_CHECK_HOUR", "9").strip()
+    ready_hour_raw = getenv("READY_CHECK_HOUR", "9")
     if ready_hour_raw.lower() not in {"", "off", "none", "disabled"}:
         if ready_hour_raw.isdigit():
             hour = int(ready_hour_raw)
             if 0 <= hour <= 23:
                 ready_check_hour = hour
-    ready_check_enabled = os.getenv("READY_CHECK_ENABLED", "true").strip().lower() in {
+    ready_check_enabled = getenv("READY_CHECK_ENABLED", "true").lower() in {
         "1",
         "true",
         "yes",
     }
 
-    currency_raw = os.getenv("PAYMENT_CURRENCY_SYMBOL", "£").strip()
+    currency_raw = getenv("PAYMENT_CURRENCY_SYMBOL", "£")
     currency_symbol = currency_raw or "£"
 
-    ms_graph_redirect_uri = os.getenv("MS_GRAPH_REDIRECT_URI", "").strip()
+    ms_graph_redirect_uri = getenv("MS_GRAPH_REDIRECT_URI")
     if not ms_graph_redirect_uri and public_base_url:
         ms_graph_redirect_uri = f"{public_base_url.rstrip('/')}/oauth/msgraph/callback"
     elif not ms_graph_redirect_uri:
         ms_graph_redirect_uri = "http://localhost:53682/"
 
-    listen_public_url = os.getenv("LISTEN_PUBLIC_URL", "").strip()
+    listen_public_url = getenv("LISTEN_PUBLIC_URL")
     if not listen_public_url and public_base_url:
         listen_public_url = public_base_url.rstrip("/")
 
-    skip_instance_lock = os.getenv("SKIP_INSTANCE_LOCK", "").strip().lower() in {
+    skip_instance_lock = getenv("SKIP_INSTANCE_LOCK").lower() in {
         "1",
         "true",
         "yes",
@@ -282,26 +296,24 @@ def load_settings() -> Settings:
 
     persistent_data = database_path.replace("\\", "/").startswith("/data/")
 
-    webhook_port_raw = os.getenv("PORT", "").strip() or os.getenv(
-        "WEBHOOK_PORT", "8080"
-    )
+    webhook_port_raw = os.getenv("PORT", "").strip() or getenv("WEBHOOK_PORT", "8080")
 
     return Settings(
         bot_token=token,
         admin_chat_id=admin_chat_id,
         notify_chat_id=notify_chat_id,
         copy_to_chat_id=copy_to_chat_id,
-        webhook_host=os.getenv("WEBHOOK_HOST", "0.0.0.0"),
+        webhook_host=getenv("WEBHOOK_HOST", "0.0.0.0", shared=True) or "0.0.0.0",
         webhook_port=int(webhook_port_raw),
         webhook_secret=secret,
         database_path=database_path,
-        threex_fqdn=os.getenv("THREECX_FQDN", "").strip(),
-        threex_client_id=os.getenv("THREECX_CLIENT_ID", "").strip(),
-        threex_api_key=os.getenv("THREECX_API_KEY", "").strip(),
-        threex_admin_ext=os.getenv("THREECX_ADMIN_EXT", "").strip(),
+        threex_fqdn=getenv("THREECX_FQDN"),
+        threex_client_id=getenv("THREECX_CLIENT_ID"),
+        threex_api_key=getenv("THREECX_API_KEY"),
+        threex_admin_ext=getenv("THREECX_ADMIN_EXT"),
         listen_public_url=listen_public_url,
         listen_chat_id=listen_chat_id,
-        transcript_enabled=os.getenv("TRANSCRIPT_ENABLED", "true").strip().lower()
+        transcript_enabled=getenv("TRANSCRIPT_ENABLED", "true").lower()
         in {"1", "true", "yes"},
         credo_whitelist_user_ids=frozenset(credo_ids),
         credo_credit_card_names=tuple(card_names),
