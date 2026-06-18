@@ -433,6 +433,21 @@ def init_db(path: str) -> None:
 PAIDSIDE_EPOCH_KEY = "paidside_export_epoch"
 MS_GRAPH_REFRESH_TOKEN_KEY = "ms_graph_refresh_token"
 EXCEL_WEB_URL_KEY = "excel_web_url"
+NOTIFY_CHAT_ID_KEY = "notify_chat_id"
+
+
+def get_notify_chat_id(path: str) -> int | None:
+    raw = _get_bot_setting(path, NOTIFY_CHAT_ID_KEY)
+    if not raw:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return None
+
+
+def set_notify_chat_id(path: str, chat_id: int) -> None:
+    _set_bot_setting(path, NOTIFY_CHAT_ID_KEY, str(chat_id))
 
 
 def _get_bot_setting(path: str, key: str) -> str | None:

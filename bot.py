@@ -8,7 +8,7 @@ from telegram.error import Conflict
 from telegram.ext import Application
 
 from config import load_settings
-from database import init_db
+from database import get_notify_chat_id, init_db, set_notify_chat_id
 from call_control_listener import start_call_control_listener
 from notify import (
     active_calls_digest_loop,
@@ -142,6 +142,14 @@ def main() -> None:
     elif settings.persistent_data:
         logger.info("Using persistent database at %s", settings.database_path)
     init_db(settings.database_path)
+    stored_notify_chat_id = get_notify_chat_id(settings.database_path)
+    if stored_notify_chat_id is not None:
+        runtime_notify_chat_id = stored_notify_chat_id
+    elif settings.notify_chat_id is not None:
+        runtime_notify_chat_id = settings.notify_chat_id
+        set_notify_chat_id(settings.database_path, settings.notify_chat_id)
+    else:
+        runtime_notify_chat_id = None
     if not settings.skip_instance_lock:
         _instance_lock = _acquire_single_instance_lock(settings.database_path)
 
@@ -203,8 +211,8 @@ def main() -> None:
     )
     tg_app.add_error_handler(on_error)
     tg_app.bot_data["settings"] = settings
-    if settings.notify_chat_id is not None:
-        tg_app.bot_data["notify_chat_id"] = settings.notify_chat_id
+    if runtime_notify_chat_id is not None:
+        tg_app.bot_data["notify_chat_id"] = runtime_notify_chat_id
 
     for handler in build_mailer_handlers():
         tg_app.add_handler(handler, group=-1)

@@ -84,12 +84,20 @@ services:
         value: /data/links-bot2.db
       - key: PAYMENTS_ONEDRIVE_PATH
         value: /data/exports/q2.xlsx
+      - key: PAYMENTS_ONEDRIVE_WORKSHEET
+        value: Sheet1
       - key: WEBHOOK_HOST
         value: 0.0.0.0
       - key: BOT_DISPLAY_NAME
         value: Q2 Call Manager
       - key: STATS_TIMEZONE
         value: Europe/London
+      - key: READY_CHECK_ENABLED
+        value: "true"
+      - key: READY_CHECK_HOUR
+        value: "9"
+      - key: TRANSCRIPT_ENABLED
+        value: "false"
       - key: BOT_TOKEN
         sync: false
       - key: WEBHOOK_SECRET

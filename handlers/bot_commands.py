@@ -6,6 +6,7 @@ from database import (
     ExtensionLink,
     link_extension,
     list_links,
+    set_notify_chat_id,
     unlink_by_telegram_user_id,
     unlink_extension,
 )
@@ -304,10 +305,12 @@ async def set_notify_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.effective_message.reply_text("Run this command inside your announcement group.")
         return
 
+    set_notify_chat_id(settings.database_path, chat.id)
     context.bot_data["notify_chat_id"] = chat.id
     await update.effective_message.reply_text(
-        f"Announcements will be sent to this group.\nChat id: `{chat.id}`\n\n"
-        "Add this to .env as NOTIFY_CHAT_ID to keep it after a restart.",
+        f"Announcements and **payment logging** will use this group.\n"
+        f"Chat id: `{chat.id}`\n\n"
+        "Saved to the database — survives restarts and redeploys.",
         parse_mode="Markdown",
     )
 

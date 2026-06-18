@@ -13,7 +13,7 @@ from flask import Flask, Response, jsonify, request
 from telegram import Bot
 
 from config import Settings
-from database import get_link_by_extension
+from database import get_link_by_extension, get_payment_totals
 from listen_stream import (
     get_listen_session,
     iter_session_audio,
@@ -58,12 +58,17 @@ def start_webhook_server(
 
     @app.get("/health")
     def health():
+        notify_id = bot_data.get("notify_chat_id") or settings.notify_chat_id
+        payment_count, _ = get_payment_totals(settings.database_path, since=None)
         return jsonify(
             {
                 "ok": True,
+                "bot": settings.bot_display_name,
                 "database_path": settings.database_path,
                 "data_dir": settings.data_dir,
                 "persistent_data": settings.persistent_data,
+                "notify_chat_id": notify_id,
+                "payments_logged": payment_count,
             }
         )
 

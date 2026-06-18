@@ -838,6 +838,22 @@ async def payment_out_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not message or not user or not chat or not message.text:
         return
     if not _payment_chat_allowed(settings, context.bot_data, chat):
+        text = _strip_leading_bot_mention(
+            message.text, getattr(context.bot, "username", None)
+        )
+        if find_payment_out_in_text(_strip_explicit_starter(text)) is not None:
+            allowed = _payment_chat_ids(settings, context.bot_data)
+            hint = (
+                f"Allowed chat id(s): {', '.join(str(i) for i in sorted(allowed))}"
+                if allowed
+                else "No notify group set — admin: run /setnotify in your payment group."
+            )
+            await message.reply_text(
+                "Payments can only be logged in the **notify group** "
+                f"(this chat is `{chat.id}`).\n\n{hint}\n\n"
+                "Admin: run **/setnotify** in the group where you log payments.",
+                parse_mode="Markdown",
+            )
         return
 
     if await _try_complete_pending_card(update, context):

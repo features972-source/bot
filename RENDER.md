@@ -47,6 +47,44 @@ Render sets automatically: `PORT`, `RENDER_EXTERNAL_URL`, `RENDER=true`.
 
 `LISTEN_PUBLIC_URL` defaults to your Render HTTPS URL (for live listen in Telegram).
 
+## Q2 Call Manager (second bot, 24/7)
+
+Q1 and Q2 share **one GitHub repo** — every push to `main` deploys the same code to each service. Q2 is **not** included in a single-service deploy; you need a **second Render Web Service**.
+
+### Create Q2 on Render (one time)
+
+1. **New → Web Service** → same GitHub repo (`features972-source/bot`).
+2. **Name:** e.g. `q2-telegram-bot` · **Runtime:** Docker · **Branch:** `main`
+3. **Health check:** `/health` · **Plan:** Starter (required for 24/7)
+4. **Disk:** mount `/data`, 1 GB
+5. **Environment:** copy from `.env.render.q2.example`, then paste values from your local `.env.bot2`:
+   - `BOT_TOKEN` — **Q2 token only** (never reuse Q1's)
+   - `NOTIFY_CHAT_ID` — **Q2 Telegram group**
+   - `THREECX_*` — Q2 PBX credentials
+   - `DATA_DIR=/data`, `DATABASE_PATH=/data/links-bot2.db`, `CLOUD_DEPLOYED=true`
+6. Deploy. Open `https://YOUR-Q2-APP.onrender.com/health` — expect:
+   ```json
+   {"ok":true,"bot":"Q2 Call Manager","persistent_data":true,"payments_logged":...}
+   ```
+7. In the **Q2 payment group**, admin runs **`/setnotify`** once (saved to disk — survives redeploys).
+
+### Restore Q2 database (if empty)
+
+```powershell
+curl.exe -X POST "https://YOUR-Q2-APP.onrender.com/admin/restore-db?secret=WEBHOOK_SECRET" -F "file=@C:\Users\User\3cx-telegram-bot\links-bot2.db"
+```
+
+---
+
+## Payments not logging?
+
+1. **Check `/health`** — `payments_logged` and `notify_chat_id` must look right.
+2. **Payments only work in the notify group** — admin run **`/setnotify`** in that group (now saved to DB).
+3. If you post `500 out` in the wrong group, the bot now **replies** telling you which group to use.
+4. You must **reply** to the starter's notes or the bot's **ON CALL** post, then send the amount.
+5. **Empty database?** Restore `links.db` / `links-bot2.db` via `/admin/restore-db` (see above).
+6. **Bot down?** Render → Logs — look for crashes; confirm Starter plan (not free tier sleep).
+
 ## One-time setup after deploy
 
 ### Excel / payments
