@@ -82,13 +82,26 @@ class State(IntEnum):
     CHOOSE = auto()
 
 
-class AddCardState(IntEnum):
-    NAME = auto()
-    CAPACITY = auto()
-    PHOTO = auto()
-
-
+ADD_CARD_STEP_NAME = "name"
+ADD_CARD_STEP_CAPACITY = "capacity"
+ADD_CARD_STEP_PHOTO = "photo"
 ADD_CARD_STEP_KEY = "add_card_step"
+
+
+def _normalize_add_card_step(step: object) -> str | None:
+    """Map stored step values (legacy int enum / int) to string steps."""
+    if step in (ADD_CARD_STEP_NAME, "name"):
+        return ADD_CARD_STEP_NAME
+    if step in (ADD_CARD_STEP_CAPACITY, "capacity"):
+        return ADD_CARD_STEP_CAPACITY
+    if step in (ADD_CARD_STEP_PHOTO, "photo"):
+        return ADD_CARD_STEP_PHOTO
+    # Legacy IntEnum values: NAME=1, CAPACITY=2, PHOTO=3
+    if step in (1, 2, 3):
+        return (ADD_CARD_STEP_NAME, ADD_CARD_STEP_CAPACITY, ADD_CARD_STEP_PHOTO)[
+            int(step) - 1
+        ]
+    return None
 
 
 def _end_conversation_by_name(
@@ -718,6 +731,24 @@ async def credo_reminder_loop(bot, settings: Settings, bot_data: dict) -> None:
             logger.exception("credo reminder loop error")
 
 
+def build_add_card_handlers() -> list:
+    """Register in group -1 so add-card replies beat the mailer text router."""
+    return [
+        CommandHandler("addcredo", addcredocard_start),
+        CommandHandler("cancel", addcredocard_cancel_if_active, block=False),
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
+            addcredocard_route_text,
+            block=False,
+        ),
+        MessageHandler(
+            PHOTO_FILTER & filters.ChatType.PRIVATE,
+            addcredocard_route_photo,
+            block=False,
+        ),
+    ]
+
+
 def build_credo_handlers() -> list:
     from handlers.bot_commands import help_conversation_fallback
     from handlers.payments import (
@@ -751,19 +782,6 @@ def build_credo_handlers() -> list:
         name="credo_user",
     )
     return [
-        # Add-card routes before credo_user — an open /credos picker blocks text otherwise.
-        CommandHandler("addcredo", addcredocard_start),
-        CommandHandler("cancel", addcredocard_cancel_if_active, block=False),
-        MessageHandler(
-            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
-            addcredocard_route_text,
-            block=False,
-        ),
-        MessageHandler(
-            PHOTO_FILTER & filters.ChatType.PRIVATE,
-            addcredocard_route_photo,
-            block=False,
-        ),
         user_conversation,
         MessageHandler(
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
@@ -993,7 +1011,7 @@ async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data.pop("credo_cards", None)
     _clear_add_card_flow(context)
     context.user_data["add_card_active"] = True
-    context.user_data[ADD_CARD_STEP_KEY] = AddCardState.NAME
+    context.user_data[ADD_CARD_STEP_KEY] = ADD_CARD_STEP_NAME
 
     await message.reply_text(
         "💳 **Add credo card** (3 steps)\n\n"
@@ -1020,19 +1038,29 @@ async def addcredocard_route_text(
     if not message or message.chat.type != "private":
         return
 
-    step = context.user_data.get(ADD_CARD_STEP_KEY)
-    if step == AddCardState.NAME:
+    step = _normalize_add_card_step(context.user_data.get(ADD_CARD_STEP_KEY))
+    if step == ADD_CARD_STEP_NAME:
         context.user_data[ADD_CARD_STEP_KEY] = await addcredocard_receive_name(
             update, context
         )
-    elif step == AddCardState.CAPACITY:
+    elif step == ADD_CARD_STEP_CAPACITY:
         context.user_data[ADD_CARD_STEP_KEY] = await addcredocard_receive_capacity(
             update, context
         )
-    elif step == AddCardState.PHOTO:
+    elif step == ADD_CARD_STEP_PHOTO:
         await addcredocard_receive_photo_text(update, context)
     else:
-        return
+        logger.warning(
+            "Add-card active with unknown step %r for user %s — restarting at name",
+            context.user_data.get(ADD_CARD_STEP_KEY),
+            update.effective_user.id if update.effective_user else "?",
+        )
+        context.user_data[ADD_CARD_STEP_KEY] = ADD_CARD_STEP_NAME
+        await message.reply_text(
+            "💳 **Add credo card** (3 steps)\n\n"
+            "**Step 1 of 3** — Send the **credit card name** (e.g. Lloyds).",
+            parse_mode="Markdown",
+        )
 
     if context.user_data.get(ADD_CARD_STEP_KEY) == ConversationHandler.END:
         _clear_add_card_flow(context)
@@ -1047,72 +1075,82 @@ async def addcredocard_route_photo(
     message = update.effective_message
     if not message or message.chat.type != "private":
         return
-    if context.user_data.get(ADD_CARD_STEP_KEY) != AddCardState.PHOTO:
+    if _normalize_add_card_step(context.user_data.get(ADD_CARD_STEP_KEY)) != ADD_CARD_STEP_PHOTO:
         return
 
     result = await addcredocard_receive_photo(update, context)
     if result == ConversationHandler.END:
         _clear_add_card_flow(context)
+    elif isinstance(result, str):
+        context.user_data[ADD_CARD_STEP_KEY] = result
     raise ApplicationHandlerStop
 
 
-async def addcredocard_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    name = (update.message.text or "").strip()
+async def addcredocard_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    message = update.effective_message
+    if not message:
+        return ADD_CARD_STEP_NAME
+    name = (message.text or "").strip()
     if len(name) < 2:
-        await update.message.reply_text(
+        await message.reply_text(
             "**Step 1 of 3** — Please send a valid name (at least 2 characters).",
             parse_mode="Markdown",
         )
-        return AddCardState.NAME
+        return ADD_CARD_STEP_NAME
 
     context.user_data["add_card_name"] = name
-    await update.message.reply_text(
+    await message.reply_text(
         f"✅ Name: **{name}**\n\n"
         "**Step 2 of 3** — Send the **£ limit** for this card (e.g. `5000` or `5k`).",
         parse_mode="Markdown",
     )
-    return AddCardState.CAPACITY
+    return ADD_CARD_STEP_CAPACITY
 
 
 async def addcredocard_receive_capacity(
     update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    amount = _parse_usage_amount(update.message.text or "")
+) -> str:
+    message = update.effective_message
+    if not message:
+        return ADD_CARD_STEP_CAPACITY
+    amount = _parse_usage_amount(message.text or "")
     if amount is None:
-        await update.message.reply_text(
+        await message.reply_text(
             "**Step 2 of 3** — Send a valid limit like `5000`, `£5000`, or `5k`.",
             parse_mode="Markdown",
         )
-        return AddCardState.CAPACITY
+        return ADD_CARD_STEP_CAPACITY
 
     context.user_data["add_card_capacity"] = amount
     name = context.user_data.get("add_card_name", "")
-    await update.message.reply_text(
+    await message.reply_text(
         f"✅ Limit: **{format_amount(amount)}** for **{name}**\n\n"
         "**Step 3 of 3** — Send a **photo** of the card (sent privately to users).",
         parse_mode="Markdown",
     )
-    return AddCardState.PHOTO
+    return ADD_CARD_STEP_PHOTO
 
 
-async def addcredocard_receive_photo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        "**Step 3 of 3** — Please send a **photo** of the card (not text).",
-        parse_mode="Markdown",
-    )
-    return AddCardState.PHOTO
+async def addcredocard_receive_photo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    message = update.effective_message
+    if message:
+        await message.reply_text(
+            "**Step 3 of 3** — Please send a **photo** of the card (not text).",
+            parse_mode="Markdown",
+        )
+    return ADD_CARD_STEP_PHOTO
 
 
-async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | int:
     settings: Settings = context.bot_data["settings"]
-    message = update.message
+    message = update.effective_message
     if not message:
         return ConversationHandler.END
 
     file_id = _photo_file_id(update)
     if not file_id:
         await message.reply_text("Could not read that image. Try sending a photo again.")
-        return AddCardState.PHOTO
+        return ADD_CARD_STEP_PHOTO
 
     name = context.user_data.get("add_card_name", "").strip()
     if not name:
@@ -1120,7 +1158,7 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
             "**Step 1 of 3** — Send the **credit card name** first.",
             parse_mode="Markdown",
         )
-        return AddCardState.NAME
+        return ADD_CARD_STEP_NAME
 
     capacity = float(context.user_data.get("add_card_capacity") or 0)
     stored_name = _allocate_card_name(settings.database_path, name)

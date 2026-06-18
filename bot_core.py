@@ -19,6 +19,7 @@ from config import Settings
 from database import get_notify_chat_id, init_db, set_notify_chat_id
 from handlers.admin_access import sync_bot_command_menu
 from handlers.bot_commands import build_bot_handlers
+from handlers.credo import build_add_card_handlers
 from handlers.mailer import build_mailer_handlers
 from mailer_bridge import init_mailer_bridge
 from notify import (
@@ -141,6 +142,8 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
     if runtime_notify_chat_id is not None:
         tg_app.bot_data["notify_chat_id"] = runtime_notify_chat_id
 
+    for handler in build_add_card_handlers():
+        tg_app.add_handler(handler, group=-1)
     for handler in build_mailer_handlers():
         tg_app.add_handler(handler, group=-1)
     for handler in build_bot_handlers():
