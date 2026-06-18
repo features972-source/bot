@@ -23,7 +23,10 @@ from database import (
     set_payment_notify_message_id,
 )
 from handlers.admin_access import require_admin
-from handlers.payment_table import format_image_subtitle, format_status_summary
+from handlers.payment_table import (
+    format_image_subtitle,
+    status_summary_totals,
+)
 from handlers.payment_table_image import live_report_title, render_payments_table_png
 from handlers.stats_period import current_payment_week_start
 from instance_registry import get_instance, list_instances
@@ -60,7 +63,7 @@ def _week_records(settings: Settings) -> tuple:
     return since, period_label, sorted_payment_records(all_records)
 
 
-def _status_summary(settings: Settings, since) -> str:
+def _status_totals(settings: Settings, since) -> tuple[float, int, float, int, float, int]:
     pending_count, pending_amount = get_payment_totals(
         settings.database_path, since=since, pending=True
     )
@@ -70,7 +73,7 @@ def _status_summary(settings: Settings, since) -> str:
     not_cleared_count, not_cleared_amount = get_payment_totals(
         settings.database_path, since=since, cleared=False
     )
-    return format_status_summary(
+    return status_summary_totals(
         pending_amount=pending_amount,
         pending_count=pending_count,
         cleared_amount=cleared_amount,
@@ -95,9 +98,10 @@ def build_payment_report_image(settings: Settings) -> bytes | None:
         lookup_records=all_records,
         title=live_report_title(settings.bot_display_name),
         subtitle=format_image_subtitle(period_label),
-        status_summary=_status_summary(settings, since),
+        status_totals=_status_totals(settings, since),
         hidden_count=hidden,
         live=True,
+        full_excel=True,
     )
 
 

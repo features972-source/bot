@@ -9,7 +9,7 @@ from database import PaymentRecord, list_links
 from handlers.stats_period import stats_timezone
 from money_format import format_amount
 
-TABLE_HEADERS = (
+TABLE_HEADERS_COMPACT = (
     "Amount",
     "Date",
     "Starter",
@@ -17,6 +17,24 @@ TABLE_HEADERS = (
     "Card",
     "Status",
 )
+
+TABLE_HEADERS_FULL = (
+    "Amount",
+    "Date",
+    "Starter",
+    "Finisher",
+    "Card",
+    "Cleared",
+    "Paying Starter (5%)",
+    "Paying Finisher (15%)",
+    "Paying Centre (20%)",
+)
+
+TABLE_HEADERS = TABLE_HEADERS_FULL
+
+
+def table_headers(*, full_excel: bool = True) -> tuple[str, ...]:
+    return TABLE_HEADERS_FULL if full_excel else TABLE_HEADERS_COMPACT
 
 
 def build_username_lookup(
@@ -53,12 +71,21 @@ def user_at_label(
 
 
 def format_status_label(cleared: bool | None) -> str:
-    """Plain status text for tables and images."""
+    """Plain status text for compact tables and footer summaries."""
     if cleared is None:
         return "Waiting"
     if cleared:
         return "Cleared"
     return "Not cleared"
+
+
+def format_cleared_label(cleared: bool | None) -> str:
+    """Excel Cleared column: Yes / Pending / No."""
+    if cleared is None:
+        return "Pending"
+    if cleared:
+        return "Yes"
+    return "No"
 
 
 def cleared_table_cell(cleared: bool | None) -> str:
@@ -92,6 +119,25 @@ def format_status_summary(
     )
 
 
+def status_summary_totals(
+    *,
+    pending_amount: float,
+    pending_count: int,
+    cleared_amount: float,
+    cleared_count: int,
+    not_cleared_amount: float,
+    not_cleared_count: int,
+) -> tuple[float, int, float, int, float, int]:
+    return (
+        pending_amount,
+        pending_count,
+        cleared_amount,
+        cleared_count,
+        not_cleared_amount,
+        not_cleared_count,
+    )
+
+
 def format_image_footer(*, live: bool = False) -> str:
     from payments_excel_export import format_payment_sheet_updated_note
 
@@ -116,6 +162,7 @@ def payment_table_row(
     record: PaymentRecord,
     *,
     username_lookup: dict[int, str],
+    full_excel: bool = True,
 ) -> list[str]:
     starter = ""
     if record.starter_user_id is not None:
@@ -125,7 +172,7 @@ def payment_table_row(
             record.starter_user_id,
             username_lookup=username_lookup,
         )
-    return [
+    row = [
         format_amount(record.amount),
         format_payment_date(record.created_at),
         starter,
@@ -136,7 +183,18 @@ def payment_table_row(
             username_lookup=username_lookup,
         ),
         record.card_last4 or "—",
-        format_status_label(record.cleared),
+    ]
+    if not full_excel:
+        return row + [format_status_label(record.cleared)]
+
+    from payments_excel_export import centre_payout, finisher_payout, starter_payout
+
+    starter_pay = starter_payout(record)
+    return row + [
+        format_cleared_label(record.cleared),
+        format_amount(starter_pay) if starter_pay else "",
+        format_amount(finisher_payout(record)),
+        format_amount(centre_payout(record)),
     ]
 
 
@@ -144,15 +202,33 @@ def payment_totals_table_row(
     *,
     total_amount: float,
     total_count: int,
+    records: list[PaymentRecord] | None = None,
+    full_excel: bool = True,
 ) -> list[str]:
     count_label = f"{total_count} payment" + ("" if total_count == 1 else "s")
+    if not full_excel:
+        return [
+            "WEEK TOTAL",
+            format_amount(total_amount),
+            count_label,
+            "",
+            "",
+            "",
+        ]
+
+    from payments_excel_export import centre_payout, finisher_payout, starter_payout
+
+    recs = records or []
     return [
-        "WEEK TOTAL",
+        "TOTAL",
         format_amount(total_amount),
         count_label,
         "",
         "",
         "",
+        format_amount(sum(starter_payout(record) for record in recs)),
+        format_amount(sum(finisher_payout(record) for record in recs)),
+        format_amount(sum(centre_payout(record) for record in recs)),
     ]
 
 

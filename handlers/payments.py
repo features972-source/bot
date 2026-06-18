@@ -40,7 +40,7 @@ from database import (
     update_payment_cleared,
 )
 from handlers.admin_access import is_bot_admin, require_admin
-from handlers.payment_table import format_image_subtitle, format_status_summary
+from handlers.payment_table import format_image_subtitle, status_summary_totals
 from handlers.payment_table_image import live_report_title, render_payments_table_png
 from handlers.stats_period import (
     _parse_stats_period,
@@ -941,7 +941,7 @@ def _build_payments_summary_image(
         lookup_records = list_all_payments(settings.database_path)
 
     hidden = max(total_count - len(records), 0)
-    status = format_status_summary(
+    status_totals = status_summary_totals(
         pending_amount=pending_amount,
         pending_count=pending_count,
         cleared_amount=cleared_amount,
@@ -960,9 +960,10 @@ def _build_payments_summary_image(
         lookup_records=lookup_records,
         title=title,
         subtitle=format_image_subtitle(period_label) if since is not None else "Every payment on record",
-        status_summary=status,
+        status_totals=status_totals,
         hidden_count=hidden,
         live=False,
+        full_excel=False,
     )
 
 
