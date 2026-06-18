@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, send_file
 from telegram import Bot
 
 from config import Settings
@@ -157,6 +157,25 @@ def _start_webhook_app(
                 "path": str(db_path),
                 "bytes": len(data),
             }
+        )
+
+    @app.get("/admin/export-db")
+    def export_db():
+        secret = request.args.get("secret", "")
+        instance_id = (request.args.get("instance") or runtimes[0].instance_id).strip().lower()
+        runtime = _runtime_by_id(instance_id)
+        if runtime is None:
+            return jsonify({"ok": False, "error": f"unknown instance {instance_id}"}), 400
+        if not secret or secret != runtime.settings.webhook_secret:
+            return jsonify({"ok": False, "error": "unauthorized"}), 403
+        db_path = Path(runtime.settings.database_path)
+        if not db_path.is_file():
+            return jsonify({"ok": False, "error": "database not found"}), 404
+        return send_file(
+            db_path,
+            mimetype="application/octet-stream",
+            as_attachment=True,
+            download_name=db_path.name,
         )
 
     @app.post("/admin/restore-session")
