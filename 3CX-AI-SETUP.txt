@@ -1,0 +1,54 @@
+Link 3CX AI (Hosted) to Telegram Phone Bot
+==========================================
+
+No paid addon or ngrok needed. The bot connects OUT to your 3CX using the
+Call Control API (included with 3CX AI).
+
+STEP 1 — Create API app in 3CX
+------------------------------
+1. Open https://q1paym.my3cx.co.uk (your 3CX web client)
+2. Log in as admin
+3. Go to: Admin → Integrations → API
+4. Click Add
+5. Fill in:
+   - Client ID: pick an unused extension number (e.g. 999) — this is the API route DN
+   - Check: "3CX Call Control API Access"
+   - Extensions to monitor: add every agent extension (101, 102, …)
+6. Save — copy the API key (shown ONCE)
+
+STEP 2 — Configure the bot (.env)
+---------------------------------
+Edit C:\Users\User\3cx-telegram-bot\.env and add:
+
+THREECX_FQDN=paymcleared.3cx.uk
+THREECX_CLIENT_ID=999
+THREECX_API_KEY=paste-your-api-key-here
+
+(Use the same Client ID number you chose in step 1.)
+
+STEP 3 — Link agents in Telegram
+--------------------------------
+Reply to each agent's Telegram message with:
+  /link 101
+  /link 102
+(Use their real 3CX extension numbers.)
+
+STEP 4 — Start the bot
+----------------------
+cd C:\Users\User\3cx-telegram-bot
+.\.venv\Scripts\pip install -r requirements.txt
+.\.venv\Scripts\python bot.py
+
+You should see: "3CX AI Call Control enabled for paymcleared.3cx.uk"
+
+STEP 5 — Test
+-------------
+Have agent 101 answer a call. Telegram group should automatically show:
+  @username is on the phone
+(no manual /onphone or /offphone commands — announcements are automatic)
+
+TROUBLESHOOTING
+---------------
+- No announcement → check /link matches the 3CX extension
+- Token errors → verify Client ID + API key in .env
+- No WebSocket events → add extensions under "monitor" in the API app settings

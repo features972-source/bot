@@ -1,0 +1,31 @@
+3CX Telegram bot — run on the SAME server as Q1 Centre
+=========================================================
+
+Your Q1 Centre VPS is at 185.227.109.177
+
+Primary setup: 3CX Call Control (automatic phone status announcements).
+See 3CX-AI-SETUP.txt for API app + .env configuration.
+
+Steps on the VPS:
+
+1. Copy this entire folder to the VPS:
+   C:\Users\User\3cx-telegram-bot
+
+2. Make sure .env exists with BOT_TOKEN, NOTIFY_CHAT_ID, and 3CX Call Control settings
+   (THREECX_FQDN, THREECX_CLIENT_ID, THREECX_API_KEY).
+
+3. Double-click run-on-vps.bat (or run in PowerShell):
+   cd C:\path\to\3cx-telegram-bot
+   .\run-on-vps.bat
+
+4. In Telegram, reply to each agent's message with:
+   /link 101
+   /link 102
+   (Use their real 3CX extension numbers.)
+
+5. Have an agent answer a test call — the notify group should show an automatic
+   on-the-phone announcement (no manual buttons or commands needed).
+
+Optional legacy webhook (only if Call Control is not configured):
+   http://127.0.0.1:8080/webhook/3cx/YOUR_WEBHOOK_SECRET
+   When Call Control is enabled, webhook announcements are ignored automatically.
