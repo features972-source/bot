@@ -40,7 +40,8 @@ from database import (
     update_payment_cleared,
 )
 from handlers.admin_access import is_bot_admin, require_admin
-from handlers.payment_table_image import render_payments_table_png
+from handlers.payment_table import format_image_subtitle, format_status_summary
+from handlers.payment_table_image import live_report_title, render_payments_table_png
 from handlers.stats_period import (
     _parse_stats_period,
     current_payment_week_start,
@@ -584,9 +585,9 @@ async def _finalize_payment_out(
         )
     await _pm_admin_today_payments(context.bot, settings)
     try:
-        from handlers.payment_reports import refresh_payment_report
+        from handlers.payment_reports import schedule_payment_report_refresh
 
-        await refresh_payment_report(context.bot, settings)
+        schedule_payment_report_refresh(context.bot, settings)
     except Exception:
         logger.exception("Payment report refresh failed")
     if settings.payments_onedrive_path:
@@ -686,9 +687,9 @@ async def _try_complete_pending_clearpayments(
     )
     schedule_payments_excel_sync(settings)
     try:
-        from handlers.payment_reports import refresh_payment_report
+        from handlers.payment_reports import schedule_payment_report_refresh
 
-        await refresh_payment_report(context.bot, settings)
+        schedule_payment_report_refresh(context.bot, settings)
     except Exception:
         logger.exception("Payment report refresh failed")
     return True
@@ -940,21 +941,28 @@ def _build_payments_summary_image(
         lookup_records = list_all_payments(settings.database_path)
 
     hidden = max(total_count - len(records), 0)
-    status = (
-        f"Pending {format_amount(pending_amount)} ({pending_count}) · "
-        f"Cleared {format_amount(cleared_amount)} ({cleared_count}) · "
-        f"Not cleared {format_amount(not_cleared_amount)} ({not_cleared_count})"
+    status = format_status_summary(
+        pending_amount=pending_amount,
+        pending_count=pending_count,
+        cleared_amount=cleared_amount,
+        cleared_count=cleared_count,
+        not_cleared_amount=not_cleared_amount,
+        not_cleared_count=not_cleared_count,
     )
+    title = live_report_title(settings.bot_display_name)
+    if since is None:
+        title = "All-time payments"
     return render_payments_table_png(
         records,
         database_path=settings.database_path,
         total_amount=total_amount,
         total_count=total_count,
         lookup_records=lookup_records,
-        title="💸 Payments",
-        subtitle=period_label,
+        title=title,
+        subtitle=format_image_subtitle(period_label) if since is not None else "Every payment on record",
         status_summary=status,
         hidden_count=hidden,
+        live=False,
     )
 
 
@@ -980,7 +988,8 @@ async def _send_payments_summary(
     include_admin = bool(
         user and is_bot_admin(settings, settings.database_path, user.id)
     )
-    png = _build_payments_summary_image(
+    png = await asyncio.to_thread(
+        _build_payments_summary_image,
         settings,
         since=since,
         period_label=period_label,
@@ -989,16 +998,19 @@ async def _send_payments_summary(
     caption_parts = []
     if since is not None:
         caption_parts.append(
-            "<i>/payments resets Sunday · /alltimepayments for all-time</i>"
+            "<i>This week’s payments · new week every Sunday</i>\n"
+            "<i>/alltimepayments — full history</i>"
         )
+    else:
+        caption_parts.append("<i>All payments on record</i>")
     if include_admin:
         caption_parts.append(
-            "<i>Admin: /setpayment # amount · /removepayment # · /syncpayments</i>"
+            "<i>Admin: /setpayment # amount · /removepayment # · /cleared #</i>"
         )
     caption = "\n".join(caption_parts) if caption_parts else None
 
     bio = BytesIO(png)
-    bio.name = "payments.png"
+    bio.name = "payments.jpg"
     bio.seek(0)
     await update.effective_message.reply_photo(
         photo=bio,
@@ -1015,10 +1027,10 @@ async def payments_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         since=since,
         period_label=period_label,
         empty_text=(
-            "No payments logged **this week** yet.\n\n"
-            "/payments resets every **Sunday**. "
-            "Use `/alltimepayments` for all-time totals.\n\n"
-            "Reply to the starter's notes, then send e.g. `5182 out`."
+            "**No payments this week yet.**\n\n"
+            "New week starts every **Sunday**.\n"
+            "Use `/alltimepayments` to see everything on record.\n\n"
+            "To log an out: reply to the starter’s notes, then send e.g. `5182 out`."
         ),
     )
 
@@ -1032,8 +1044,8 @@ async def alltimepayments_command(
         since=None,
         period_label="all time",
         empty_text=(
-            "No payments logged yet.\n\n"
-            "Reply to the starter's notes, then send e.g. `5182 out`."
+            "**No payments on record yet.**\n\n"
+            "Reply to the starter’s notes, then send e.g. `5182 out`."
         ),
     )
 
@@ -1236,9 +1248,9 @@ async def _set_payment_cleared_command(
     await _pm_admin_today_payments(context.bot, settings)
     schedule_payments_excel_sync(settings)
     try:
-        from handlers.payment_reports import refresh_payment_report
+        from handlers.payment_reports import schedule_payment_report_refresh
 
-        await refresh_payment_report(context.bot, settings)
+        schedule_payment_report_refresh(context.bot, settings)
     except Exception:
         logger.exception("Payment report refresh failed")
 
@@ -1317,9 +1329,9 @@ async def setpayment_command(
     await _pm_admin_today_payments(context.bot, settings)
     schedule_payments_excel_sync(settings)
     try:
-        from handlers.payment_reports import refresh_payment_report
+        from handlers.payment_reports import schedule_payment_report_refresh
 
-        await refresh_payment_report(context.bot, settings)
+        schedule_payment_report_refresh(context.bot, settings)
     except Exception:
         logger.exception("Payment report refresh failed")
 
@@ -1378,9 +1390,9 @@ async def removepayment_command(
     await _pm_admin_today_payments(context.bot, settings)
     schedule_payments_excel_sync(settings)
     try:
-        from handlers.payment_reports import refresh_payment_report
+        from handlers.payment_reports import schedule_payment_report_refresh
 
-        await refresh_payment_report(context.bot, settings)
+        schedule_payment_report_refresh(context.bot, settings)
     except Exception:
         logger.exception("Payment report refresh failed")
 

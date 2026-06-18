@@ -1,8 +1,8 @@
-"""Render payment tables as PNG images (Telegram dark theme + Excel row colours)."""
+"""Render payment tables as PNG/JPEG images (Telegram dark theme + Excel row colours)."""
 
 from __future__ import annotations
 
-import logging
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 
@@ -10,44 +10,49 @@ from database import PaymentRecord
 from handlers.payment_table import (
     TABLE_HEADERS,
     build_username_lookup,
+    format_image_footer,
+    format_status_label,
     payment_table_row,
     payment_totals_table_row,
 )
-from payments_excel_export import format_payment_sheet_updated_note
 
-logger = logging.getLogger(__name__)
-
-# Render at 2× for sharp text on phone screens (Telegram compresses photos).
 _SCALE = 2
 
-# Telegram dark theme
 _BG = "#17212b"
 _HEADER_BG = "#232e3c"
 _HEADER_TEXT = "#ffffff"
-_BODY_TEXT = "#f0f4f8"
+_BODY_TEXT = "#f5f7fa"
 _GRID = "#3d4f5f"
 _TOTAL_BG = "#232e3c"
-_FOOTER_TEXT = "#9db0c0"
+_FOOTER_TEXT = "#b0bec9"
 _TITLE_COLOR = "#ffffff"
+_LEGEND_TEXT = "#c8d4de"
 
 _ROW_CLEARED = "#1b4332"
 _ROW_PENDING = "#4a3f1a"
 _ROW_NOT_CLEARED = "#4a1f1f"
-_TEXT_CLEARED = "#6ee7a0"
+_TEXT_CLEARED = "#86efac"
 _TEXT_PENDING = "#fde047"
 _TEXT_NOT_CLEARED = "#fca5a5"
 
-_COL_WIDTHS = (108, 112, 168, 168, 58, 88)
-_ROW_H = 36
-_PAD = 18
-_TITLE_SIZE = 26
-_BODY_SIZE = 15
-_SMALL_SIZE = 13
+_COL_WIDTHS = (112, 116, 172, 172, 56, 118)
+_ROW_H = 38
+_PAD = 20
+_TITLE_SIZE = 28
+_BODY_SIZE = 16
+_SMALL_SIZE = 14
+_LEGEND = "Green row = Cleared   ·   Amber row = Waiting   ·   Red row = Not cleared"
 _MAX_ROWS = 40
+
+_FONT_DIR_CANDIDATES = (
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+    Path("C:/Windows/Fonts/segoeui.ttf"),
+    Path("C:/Windows/Fonts/segoeuib.ttf"),
+)
 
 
 def live_report_title(bot_display_name: str) -> str:
-    """Top-left label for /setnotifypayments live image."""
     label = (bot_display_name or "").lower()
     if "q2" in label:
         return "Q2 Payments"
@@ -69,46 +74,43 @@ def _row_style(cleared: bool | None) -> tuple[str, str, str]:
     return _ROW_NOT_CLEARED, _BODY_TEXT, _TEXT_NOT_CLEARED
 
 
-def _load_font(size: int, *, bold: bool = False):
+@lru_cache(maxsize=8)
+def _cached_font(size: int, bold: bool):
     from PIL import ImageFont
 
-    regular = [
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-        Path("C:/Windows/Fonts/consola.ttf"),
-        Path("C:/Windows/Fonts/segoeui.ttf"),
-    ]
-    bold_paths = [
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-        Path("C:/Windows/Fonts/segoeuib.ttf"),
-        Path("C:/Windows/Fonts/consolab.ttf"),
-    ]
-    paths = bold_paths + regular if bold else regular
-    scaled = _s(size)
+    paths: list[Path] = []
+    if bold:
+        paths.extend(
+            [
+                Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+                Path("C:/Windows/Fonts/segoeuib.ttf"),
+            ]
+        )
+    paths.extend(list(_FONT_DIR_CANDIDATES))
     for path in paths:
         if path.is_file():
             try:
-                return ImageFont.truetype(str(path), scaled)
+                return ImageFont.truetype(str(path), size)
             except OSError:
                 continue
     return ImageFont.load_default()
 
 
-def _truncate(text: str, font, max_w: int, draw) -> str:
-    if not text:
-        return ""
-    if draw.textlength(text, font=font) <= max_w:
-        return text
-    trimmed = text
-    while len(trimmed) > 1 and draw.textlength(trimmed + "…", font=font) > max_w:
-        trimmed = trimmed[:-1]
-    return trimmed + "…" if trimmed else "…"
+def _fonts():
+    return (
+        _cached_font(_s(_TITLE_SIZE), True),
+        _cached_font(_s(_BODY_SIZE), False),
+        _cached_font(_s(_BODY_SIZE), True),
+        _cached_font(_s(_SMALL_SIZE), False),
+    )
 
 
-def _cleared_plain(cleared: bool | None) -> str:
-    if cleared is None:
-        return "Pending"
-    return "Yes" if cleared else "No"
+def _fit_text(text: str, max_chars: int) -> str:
+    if not text or len(text) <= max_chars:
+        return text or ""
+    if max_chars <= 1:
+        return text[:max_chars]
+    return text[: max_chars - 1] + "…"
 
 
 def render_payments_table_png(
@@ -122,6 +124,7 @@ def render_payments_table_png(
     subtitle: str = "",
     status_summary: str = "",
     hidden_count: int = 0,
+    live: bool = False,
 ) -> bytes:
     from PIL import Image, ImageDraw
 
@@ -140,21 +143,27 @@ def render_payments_table_png(
     pad = _s(_PAD)
     table_w = sum(col_w) + pad * 2
 
-    title_block = _s(34)
-    subtitle_block = _s(22) if subtitle else 0
+    title_block = _s(38)
+    subtitle_block = _s(24) if subtitle else 0
+    legend_block = _s(22)
     footer_lines = 1 + (1 if status_summary else 0) + (1 if hidden_count > 0 else 0)
-    footer_block = _s(24) * footer_lines + _s(8)
+    footer_block = _s(26) * footer_lines + _s(10)
 
     n_rows = len(shown) + 2
-    table_h = pad + title_block + subtitle_block + (n_rows * row_h) + footer_block + pad
+    table_h = (
+        pad
+        + title_block
+        + subtitle_block
+        + legend_block
+        + (n_rows * row_h)
+        + footer_block
+        + pad
+    )
 
     img = Image.new("RGB", (table_w, table_h), _BG)
     draw = ImageDraw.Draw(img)
 
-    font_title = _load_font(_TITLE_SIZE, bold=True)
-    font_body = _load_font(_BODY_SIZE)
-    font_header = _load_font(_BODY_SIZE, bold=True)
-    font_sm = _load_font(_SMALL_SIZE)
+    font_title, font_body, font_header, font_sm = _fonts()
 
     y = pad
     draw.text((pad, y), title, fill=_TITLE_COLOR, font=font_title)
@@ -162,6 +171,8 @@ def render_payments_table_png(
     if subtitle:
         draw.text((pad, y), subtitle, fill=_FOOTER_TEXT, font=font_sm)
         y += subtitle_block
+    draw.text((pad, y), _LEGEND, fill=_LEGEND_TEXT, font=font_sm)
+    y += legend_block
 
     x0 = pad
     col_x = [x0]
@@ -169,13 +180,14 @@ def render_payments_table_png(
         col_x.append(col_x[-1] + w)
 
     grid_w = max(_s(1), _SCALE)
+    char_limits = [max(4, w // _s(9)) for w in col_w]
 
     def draw_row(
         cells: list[str],
         *,
         bg: str,
         text_color: str,
-        cleared_col_color: str | None = None,
+        status_col_color: str | None = None,
         header: bool = False,
     ) -> None:
         nonlocal y
@@ -183,11 +195,9 @@ def render_payments_table_png(
         draw.rectangle((x0, y, x0 + sum(col_w), y + row_h), fill=bg)
         for i, (cell, w) in enumerate(zip(cells, col_w)):
             cx = col_x[i] + _s(10)
-            cy = y + _s(9)
-            color = text_color
-            if i == 5 and cleared_col_color:
-                color = cleared_col_color
-            label = _truncate(cell, f, w - _s(14), draw)
+            cy = y + _s(10)
+            color = status_col_color if i == 5 and status_col_color else text_color
+            label = _fit_text(cell, char_limits[i])
             draw.text((cx, cy), label, fill=color, font=f)
             if i < len(col_w) - 1:
                 gx = col_x[i] + w
@@ -203,24 +213,25 @@ def render_payments_table_png(
 
     for record in shown:
         cells = payment_table_row(record, username_lookup=username_lookup)
-        cells[5] = _cleared_plain(record.cleared)
-        bg, txt, clr_txt = _row_style(record.cleared)
-        draw_row(cells, bg=bg, text_color=txt, cleared_col_color=clr_txt)
+        cells[5] = format_status_label(record.cleared)
+        bg, txt, status_txt = _row_style(record.cleared)
+        draw_row(cells, bg=bg, text_color=txt, status_col_color=status_txt)
 
     draw_row(totals, bg=_TOTAL_BG, text_color=_BODY_TEXT, header=True)
 
     if status_summary:
-        draw.text((pad, y + _s(6)), status_summary, fill=_FOOTER_TEXT, font=font_sm)
-        y += _s(24)
+        draw.text((pad, y + _s(8)), status_summary, fill=_FOOTER_TEXT, font=font_sm)
+        y += _s(26)
 
     if hidden_count > 0:
-        note = f"+{hidden_count} more not shown"
-        draw.text((pad, y + _s(6)), note, fill=_FOOTER_TEXT, font=font_sm)
-        y += _s(24)
+        note = f"{hidden_count} more payment{'s' if hidden_count != 1 else ''} not shown in this image"
+        draw.text((pad, y + _s(8)), note, fill=_FOOTER_TEXT, font=font_sm)
+        y += _s(26)
 
-    footer = f"{format_payment_sheet_updated_note()} · live"
-    draw.text((pad, y + _s(6)), footer, fill=_FOOTER_TEXT, font=font_sm)
+    footer = format_image_footer(live=live)
+    draw.text((pad, y + _s(8)), footer, fill=_FOOTER_TEXT, font=font_sm)
 
     buf = BytesIO()
-    img.save(buf, format="PNG", compress_level=3)
+    # JPEG encodes much faster and uploads quicker; sharp enough at 2× scale.
+    img.save(buf, format="JPEG", quality=90, optimize=False, subsampling=0)
     return buf.getvalue()

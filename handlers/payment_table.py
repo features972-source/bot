@@ -15,10 +15,8 @@ TABLE_HEADERS = (
     "Starter",
     "Finisher",
     "Card",
-    "Cleared",
+    "Status",
 )
-TABLE_WIDTHS = (12, 12, 18, 18, 6, 9)
-_COLUMN_SEP = " │ "
 
 
 def build_username_lookup(
@@ -54,12 +52,53 @@ def user_at_label(
     return str(user_id)
 
 
+def format_status_label(cleared: bool | None) -> str:
+    """Plain status text for tables and images."""
+    if cleared is None:
+        return "Waiting"
+    if cleared:
+        return "Cleared"
+    return "Not cleared"
+
+
 def cleared_table_cell(cleared: bool | None) -> str:
     if cleared is None:
-        return "🟧 Pending"
+        return "🟧 Waiting"
     if cleared:
-        return "🟩 Yes"
-    return "🟥 No"
+        return "🟩 Cleared"
+    return "🟥 Not cleared"
+
+
+def format_image_subtitle(period_label: str) -> str:
+    text = period_label.strip()
+    if text:
+        text = text[0].upper() + text[1:]
+    return f"{text} · new week every Sunday"
+
+
+def format_status_summary(
+    *,
+    pending_amount: float,
+    pending_count: int,
+    cleared_amount: float,
+    cleared_count: int,
+    not_cleared_amount: float,
+    not_cleared_count: int,
+) -> str:
+    return (
+        f"Waiting: {format_amount(pending_amount)} ({pending_count})   "
+        f"Cleared: {format_amount(cleared_amount)} ({cleared_count})   "
+        f"Not cleared: {format_amount(not_cleared_amount)} ({not_cleared_count})"
+    )
+
+
+def format_image_footer(*, live: bool = False) -> str:
+    from payments_excel_export import format_payment_sheet_updated_note
+
+    stamp = format_payment_sheet_updated_note()
+    if live:
+        return f"{stamp} · updates automatically when payments change"
+    return stamp
 
 
 def format_payment_date(iso_timestamp: str) -> str:
@@ -71,28 +110,6 @@ def format_payment_date(iso_timestamp: str) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(stats_timezone()).strftime("%d/%m/%Y")
-
-
-def _fit_cell(value: str, width: int) -> str:
-    text = value or ""
-    if len(text) <= width:
-        return text.ljust(width)
-    if width <= 1:
-        return text[:width]
-    return text[: width - 1] + "…"
-
-
-def format_table_row(cells: list[str]) -> str:
-    padded = [
-        _fit_cell(cells[i] if i < len(cells) else "", TABLE_WIDTHS[i])
-        for i in range(len(TABLE_WIDTHS))
-    ]
-    return _COLUMN_SEP.join(padded).rstrip()
-
-
-def format_table_divider() -> str:
-    segments = ["─" * width for width in TABLE_WIDTHS]
-    return "─┼─".join(segments)
 
 
 def payment_table_row(
@@ -118,8 +135,8 @@ def payment_table_row(
             record.finisher_user_id,
             username_lookup=username_lookup,
         ),
-        record.card_last4 or "",
-        cleared_table_cell(record.cleared),
+        record.card_last4 or "—",
+        format_status_label(record.cleared),
     ]
 
 
@@ -130,44 +147,13 @@ def payment_totals_table_row(
 ) -> list[str]:
     count_label = f"{total_count} payment" + ("" if total_count == 1 else "s")
     return [
-        "TOTAL",
+        "WEEK TOTAL",
         format_amount(total_amount),
         count_label,
         "",
         "",
         "",
     ]
-
-
-def format_payments_table(
-    records: list[PaymentRecord],
-    *,
-    totals_row: list[str],
-    database_path: str,
-    lookup_records: list[PaymentRecord] | None = None,
-    hidden_count: int = 0,
-    hidden_suffix: str = "live list has full detail",
-) -> str:
-    username_lookup = build_username_lookup(
-        database_path,
-        lookup_records if lookup_records is not None else records,
-    )
-    lines = [
-        format_table_row(list(TABLE_HEADERS)),
-        format_table_divider(),
-    ]
-    lines.extend(
-        format_table_row(payment_table_row(record, username_lookup=username_lookup))
-        for record in records
-    )
-    lines.append(format_table_divider())
-    lines.append(format_table_row(totals_row))
-    if hidden_count > 0:
-        lines.append(
-            f"… +{hidden_count} more payment"
-            f"{'' if hidden_count == 1 else 's'} ({hidden_suffix})"
-        )
-    return "\n".join(lines)
 
 
 def wrap_bold_table(table: str) -> str:

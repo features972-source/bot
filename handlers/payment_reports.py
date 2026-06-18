@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
+from collections import defaultdict
 from io import BytesIO
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
@@ -21,20 +23,19 @@ from database import (
     set_payment_notify_message_id,
 )
 from handlers.admin_access import require_admin
+from handlers.payment_table import format_image_subtitle, format_status_summary
 from handlers.payment_table_image import live_report_title, render_payments_table_png
 from handlers.stats_period import current_payment_week_start
 from instance_registry import get_instance, list_instances
-from money_format import format_amount
-from payments_excel_export import (
-    CENTRE_PAY_PERCENT,
-    FINISHER_PAY_PERCENT,
-    STARTER_PAY_PERCENT,
-    sorted_payment_records,
-)
+from payments_excel_export import sorted_payment_records
 
 logger = logging.getLogger(__name__)
 
 CALLBACK_PREFIX = "paynotify:"
+_REFRESH_LOCKS: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+_PENDING_REFRESH: dict[str, tuple] = {}
+_DEBOUNCE_HANDLES: dict[str, asyncio.TimerHandle] = {}
+_REFRESH_DEBOUNCE_SEC = 0.35
 
 
 def build_payment_report_handlers() -> list:
@@ -46,9 +47,9 @@ def build_payment_report_handlers() -> list:
     ]
 
 
-def _photo_file(png_bytes: bytes) -> BytesIO:
-    bio = BytesIO(png_bytes)
-    bio.name = "payments.png"
+def _photo_file(image_bytes: bytes) -> BytesIO:
+    bio = BytesIO(image_bytes)
+    bio.name = "payments.jpg"
     bio.seek(0)
     return bio
 
@@ -69,10 +70,13 @@ def _status_summary(settings: Settings, since) -> str:
     not_cleared_count, not_cleared_amount = get_payment_totals(
         settings.database_path, since=since, cleared=False
     )
-    return (
-        f"Pending {format_amount(pending_amount)} ({pending_count}) · "
-        f"Cleared {format_amount(cleared_amount)} ({cleared_count}) · "
-        f"Not cleared {format_amount(not_cleared_amount)} ({not_cleared_count})"
+    return format_status_summary(
+        pending_amount=pending_amount,
+        pending_count=pending_count,
+        cleared_amount=cleared_amount,
+        cleared_count=cleared_count,
+        not_cleared_amount=not_cleared_amount,
+        not_cleared_count=not_cleared_count,
     )
 
 
@@ -90,23 +94,48 @@ def build_payment_report_image(settings: Settings) -> bytes | None:
         total_count=total_count,
         lookup_records=all_records,
         title=live_report_title(settings.bot_display_name),
-        subtitle=period_label,
+        subtitle=format_image_subtitle(period_label),
         status_summary=_status_summary(settings, since),
         hidden_count=hidden,
+        live=True,
     )
 
 
 def build_payment_report_empty_text(settings: Settings) -> str:
     _, period_label, _ = _week_records(settings)
-    title = (
-        f"📊 <b>{html.escape(settings.bot_display_name)}</b>\n"
-        f"<i>{html.escape(period_label)}</i>"
-    )
+    title = live_report_title(settings.bot_display_name)
     return (
-        f"{title}\n\n"
+        f"<b>{html.escape(title)}</b>\n"
+        f"<i>{html.escape(format_image_subtitle(period_label))}</i>\n\n"
         "No payments logged this week yet.\n\n"
-        f"<i>Same data as /payments · resets every Sunday</i>"
+        "<i>When outs are logged, the live table here updates automatically.</i>\n"
+        "<i>New week every Sunday.</i>"
     )
+
+
+def schedule_payment_report_refresh(bot, settings: Settings) -> None:
+    """Refresh the live table in the background (never blocks payment replies)."""
+    key = settings.database_path
+    _PENDING_REFRESH[key] = (bot, settings)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    handle = _DEBOUNCE_HANDLES.get(key)
+    if handle is not None:
+        handle.cancel()
+    _DEBOUNCE_HANDLES[key] = loop.call_later(
+        _REFRESH_DEBOUNCE_SEC,
+        lambda k=key: asyncio.create_task(_run_pending_refresh(k)),
+    )
+
+
+async def _run_pending_refresh(key: str) -> None:
+    _DEBOUNCE_HANDLES.pop(key, None)
+    bot, settings = _PENDING_REFRESH.pop(key, (None, None))
+    if bot is None or settings is None:
+        return
+    await refresh_payment_report(bot, settings)
 
 
 async def refresh_payment_report(bot, settings: Settings) -> None:
@@ -115,66 +144,70 @@ async def refresh_payment_report(bot, settings: Settings) -> None:
     if chat_id is None:
         return
 
-    message_id = get_payment_notify_message_id(settings.database_path)
-    png = build_payment_report_image(settings)
+    lock = _REFRESH_LOCKS[settings.database_path]
+    async with lock:
+        message_id = get_payment_notify_message_id(settings.database_path)
+        image_bytes = await asyncio.to_thread(build_payment_report_image, settings)
 
-    if png is None:
-        text = build_payment_report_empty_text(settings)
+        if image_bytes is None:
+            text = build_payment_report_empty_text(settings)
+            try:
+                if message_id is not None:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=text,
+                        parse_mode="HTML",
+                    )
+                    return
+            except BadRequest as exc:
+                err = str(exc).lower()
+                if "message is not modified" in err:
+                    return
+                logger.warning("Could not edit empty payment report: %s", exc)
+            except Exception:
+                logger.exception("Failed to edit empty payment report")
+            try:
+                sent = await bot.send_message(
+                    chat_id=chat_id, text=text, parse_mode="HTML"
+                )
+                set_payment_notify_message_id(settings.database_path, sent.message_id)
+            except Exception:
+                logger.exception("Failed to post empty payment report")
+            return
+
+        media = InputMediaPhoto(media=_photo_file(image_bytes))
         try:
             if message_id is not None:
-                await bot.edit_message_text(
+                await bot.edit_message_media(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text=text,
-                    parse_mode="HTML",
+                    media=media,
                 )
                 return
         except BadRequest as exc:
             err = str(exc).lower()
             if "message is not modified" in err:
                 return
-            logger.warning("Could not edit empty payment report: %s", exc)
+            logger.warning(
+                "Could not edit payment report image msg %s: %s — posting new",
+                message_id,
+                exc,
+            )
         except Exception:
-            logger.exception("Failed to edit empty payment report")
+            logger.exception("Failed to edit payment report image")
+
         try:
-            sent = await bot.send_message(
-                chat_id=chat_id, text=text, parse_mode="HTML"
+            sent = await bot.send_photo(
+                chat_id=chat_id, photo=_photo_file(image_bytes)
             )
             set_payment_notify_message_id(settings.database_path, sent.message_id)
         except Exception:
-            logger.exception("Failed to post empty payment report")
-        return
-
-    media = InputMediaPhoto(media=_photo_file(png))
-    try:
-        if message_id is not None:
-            await bot.edit_message_media(
-                chat_id=chat_id,
-                message_id=message_id,
-                media=media,
+            logger.exception(
+                "Failed to post payment report image for %s to chat %s",
+                settings.bot_display_name,
+                chat_id,
             )
-            return
-    except BadRequest as exc:
-        err = str(exc).lower()
-        if "message is not modified" in err:
-            return
-        logger.warning(
-            "Could not edit payment report image msg %s: %s — posting new",
-            message_id,
-            exc,
-        )
-    except Exception:
-        logger.exception("Failed to edit payment report image")
-
-    try:
-        sent = await bot.send_photo(chat_id=chat_id, photo=_photo_file(png))
-        set_payment_notify_message_id(settings.database_path, sent.message_id)
-    except Exception:
-        logger.exception(
-            "Failed to post payment report image for %s to chat %s",
-            settings.bot_display_name,
-            chat_id,
-        )
 
 
 def _instance_picker_keyboard(current_instance_id: str) -> InlineKeyboardMarkup:
@@ -220,19 +253,17 @@ async def setnotifypayments_command(
         return
     if chat.type not in ("group", "supergroup"):
         await message.reply_text(
-            "Run **/setnotifypayments** inside the group where you want the live payment list.",
+            "Run **/setnotifypayments** in the group where you want the live payment table.",
             parse_mode="Markdown",
         )
         return
 
     instance_id = context.bot_data.get("instance_id", "q1")
     await message.reply_text(
-        "💸 **Live payment list**\n\n"
-        "Pick **Q1** or **Q2**. One coloured table image in this group will stay "
-        "updated whenever payments are logged, edited, cleared, or removed.\n\n"
-        f"Same data as /payments and Excel · resets Sunday. "
-        f"Payouts: starter {STARTER_PAY_PERCENT}%, finisher {FINISHER_PAY_PERCENT}%, "
-        f"owners {CENTRE_PAY_PERCENT}%.",
+        "💸 **Live payment table**\n\n"
+        "Choose **Q1** or **Q2**. The bot posts **one table** in this group and "
+        "**updates the same image** whenever a payment is logged, changed, or removed.\n\n"
+        "Same data as **/payments** · new week every **Sunday**.",
         parse_mode="Markdown",
         reply_markup=_instance_picker_keyboard(instance_id),
     )
@@ -264,10 +295,10 @@ async def setnotifypayments_callback(
 
     if query.message:
         await query.edit_message_text(
-            f"✅ **{target_settings.bot_display_name}** — live payment list enabled here.\n\n"
-            f"Chat id: `{chat.id}`\n"
-            "The table image below updates automatically when payments change.",
+            f"✅ **{live_report_title(target_settings.bot_display_name)}** is live in this group.\n\n"
+            f"Chat id: `{chat.id}`\n\n"
+            "The table below updates automatically when payments change.",
             parse_mode="Markdown",
         )
 
-    await refresh_payment_report(context.bot, target_settings)
+    schedule_payment_report_refresh(context.bot, target_settings)
