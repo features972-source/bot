@@ -195,11 +195,14 @@ def _cleared_status_label(cleared: bool | None) -> str:
     return "🟢 Cleared" if cleared else "🔴 Not cleared"
 
 
-def _format_payment_reply(record: PaymentRecord) -> str:
-    return _format_payment_celebration(record)
+def _format_card_saved_reply(settings: Settings) -> str:
+    sheet = (settings.payments_onedrive_worksheet or "").strip()
+    if sheet:
+        return f"✅ Added to {sheet}"
+    return "✅ Added to the tab"
 
 
-def _format_card_prompt(
+async def _finalize_payment_out(
     amount: float,
     *,
     finisher_user_id: int,
@@ -280,37 +283,6 @@ def _format_payment_block(record: PaymentRecord) -> str:
         lines.append(html.escape(finisher))
     if record.card_last4:
         lines.append(f"💳 ····{html.escape(record.card_last4)}")
-    return "\n".join(lines)
-
-
-def _format_payment_celebration(record: PaymentRecord) -> str:
-    amount = format_amount(record.amount)
-    finisher = _stored_user_label(
-        record.finisher_username,
-        record.finisher_display_name,
-        record.finisher_user_id,
-    )
-    when = _format_when(record.created_at)
-    if record.starter_user_id is not None:
-        starter = _stored_user_label(
-            record.starter_username,
-            record.starter_display_name,
-            record.starter_user_id,
-        )
-        if record.starter_user_id == record.finisher_user_id:
-            team = f"{starter} · starter & finisher"
-        else:
-            team = f"Starter {starter} → Finisher {finisher}"
-    else:
-        team = f"Finisher {finisher}"
-    status = _cleared_status_label(record.cleared)
-    if record.cleared:
-        header = f"🔥 {amount} OUT 🔥"
-    else:
-        header = f"🟠 {amount} OUT"
-    lines = [header, "", f"💸 {team}", f"⏱ {when}", status]
-    if record.card_last4:
-        lines.insert(3, f"💳 Card ····{record.card_last4}")
     return "\n".join(lines)
 
 
@@ -578,7 +550,7 @@ async def _finalize_payment_out(
     record = get_payment_by_id(settings.database_path, payment_id)
     if record is None:
         return
-    await message.reply_text(_format_payment_reply(record))
+    await message.reply_text(_format_card_saved_reply(settings))
     try:
         from quiet_wins import maybe_quiet_win_close_rate
 
