@@ -273,6 +273,50 @@ def wrap_bold_table(table: str) -> str:
     return f"<b><pre>{html.escape(table)}</pre></b>"
 
 
+def _align_table_rows(
+    headers: tuple[str, ...],
+    rows: list[list[str]],
+    *,
+    min_widths: tuple[int, ...] | None = None,
+    max_widths: tuple[int, ...] | None = None,
+    right_align: frozenset[int] | None = None,
+) -> str:
+    """Fixed-width monospace rows so columns line up in Telegram <pre> blocks."""
+    col_count = len(headers)
+    min_widths = min_widths or (0,) * col_count
+    max_widths = max_widths or (999,) * col_count
+    right_align = right_align or frozenset()
+
+    def _cells(row: list[str]) -> list[str]:
+        return [(row[i] if i < len(row) else "") for i in range(col_count)]
+
+    all_rows = [_cells(list(headers)), *[_cells(row) for row in rows]]
+    widths = [0] * col_count
+    for row in all_rows:
+        for i, cell in enumerate(row):
+            clipped = cell[: max_widths[i]]
+            widths[i] = max(widths[i], len(clipped))
+
+    for i in range(col_count):
+        cap = max_widths[i] if max_widths[i] < 999 else widths[i]
+        widths[i] = max(min_widths[i], min(widths[i], cap))
+
+    def _format_line(cells: list[str]) -> str:
+        parts: list[str] = []
+        for i, cell in enumerate(cells):
+            clipped = cell[: widths[i]]
+            if i in right_align:
+                parts.append(clipped.rjust(widths[i]))
+            else:
+                parts.append(clipped.ljust(widths[i]))
+        return " | ".join(parts)
+
+    header = _format_line(all_rows[0])
+    rule = "-+-".join("-" * widths[i] for i in range(col_count))
+    body = [_format_line(row) for row in all_rows[1:]]
+    return "\n".join([header, rule, *body])
+
+
 def render_payments_table_text(
     records: list[PaymentRecord],
     *,
@@ -284,7 +328,7 @@ def render_payments_table_text(
     full_excel: bool = False,
     total_label: str = "TOTAL",
 ) -> str:
-    """Plain-text table fallback when image upload fails."""
+    """Plain-text table for /payments and /alltimepayments."""
     username_lookup = build_username_lookup(
         database_path,
         lookup_records if lookup_records is not None else records,
@@ -307,8 +351,19 @@ def render_payments_table_text(
         total_label=total_label,
     )
 
-    def _line(cells: list[str]) -> str:
-        return " | ".join(cells[i] if i < len(cells) else "" for i in range(len(headers)))
+    if full_excel:
+        min_widths = (4, 10, 8, 14, 14, 4, 7, 10, 10, 10)
+        max_widths = (5, 14, 8, 16, 16, 4, 9, 12, 12, 12)
+        right_align = frozenset({1, 7, 8, 9})
+    else:
+        min_widths = (4, 9, 8, 12, 12, 4, 7)
+        max_widths = (5, 13, 8, 15, 15, 4, 9)
+        right_align = frozenset({1})
 
-    lines = [_line(list(headers)), *[_line(row) for row in body], _line(totals)]
-    return "\n".join(lines)
+    return _align_table_rows(
+        headers,
+        [*body, totals],
+        min_widths=min_widths,
+        max_widths=max_widths,
+        right_align=right_align,
+    )
