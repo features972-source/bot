@@ -1273,6 +1273,41 @@ async def _deliver_payment_table_image(
     raise RuntimeError("Payment table upload failed with no error detail")
 
 
+def _payments_text_html(caption: str, table: str) -> str:
+    text = f"<b>{html.escape(caption)}</b>\n\n<pre>{html.escape(table)}</pre>"
+    if len(text) <= 4096:
+        return text
+    budget = max(500, 4096 - len(caption) - 30)
+    clipped = table[:budget].rstrip() + "\n…"
+    return f"<b>{html.escape(caption)}</b>\n\n<pre>{html.escape(clipped)}</pre>"
+
+
+async def _deliver_payments_text_table(
+    *,
+    bot,
+    message,
+    text: str,
+    keyboard: InlineKeyboardMarkup | None,
+    edit_message=None,
+) -> None:
+    if edit_message is not None:
+        try:
+            await bot.edit_message_text(
+                chat_id=edit_message.chat_id,
+                message_id=edit_message.message_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+            return
+        except BadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            if "there is no text" not in str(exc).lower():
+                logger.debug("Payment table text edit failed: %s", exc)
+    await message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+
 async def _send_payments_text_fallback(
     *,
     message,
@@ -1307,10 +1342,12 @@ async def _send_payments_text_fallback(
         page_index=page_index,
         page_info=page_info,
     )
-    await message.reply_text(
-        f"{caption}\n\n<pre>{html.escape(table)}</pre>",
-        parse_mode="HTML",
-        reply_markup=keyboard,
+    text = _payments_text_html(caption, table)
+    await _deliver_payments_text_table(
+        bot=message.get_bot(),
+        message=message,
+        text=text,
+        keyboard=keyboard,
     )
 
 
@@ -1399,25 +1436,8 @@ async def _send_payments_summary(
         user and is_bot_admin(settings, settings.database_path, user.id)
     )
     scope = "week" if since is not None else "all"
-    try:
-        png, page_index, total_pages, page_info = await asyncio.to_thread(
-            _build_payments_summary_image,
-            settings,
-            since=since,
-            period_label=period_label,
-            all_records=records,
-            page=page,
-        )
-    except Exception:
-        logger.exception("Failed to build payments summary image")
-        target = edit_message or message
-        await target.reply_text(
-            "Could not build the payment table image. Try again in a moment."
-        )
-        return
-
     page_records, page_index, total_pages, page_info = _payment_page_slice(
-        all_records, page
+        records, page
     )
     caption = _payments_summary_caption(
         since=since,
@@ -1430,41 +1450,36 @@ async def _send_payments_summary(
         scope=scope, page=page_index, total_pages=total_pages
     )
 
-    if not png:
-        await (edit_message or message).reply_text(
-            "Could not build the payment table image. Try again in a moment."
-        )
-        return
+    total_count, total_amount = get_payment_totals(settings.database_path, since=since)
+    if since is not None:
+        lookup_records = list_payments_since(settings.database_path, since=since)
+    else:
+        lookup_records = list_all_payments(settings.database_path)
+
+    table = render_payments_table_text(
+        page_records,
+        database_path=settings.database_path,
+        total_amount=total_amount,
+        total_count=total_count,
+        lookup_records=lookup_records,
+        totals_records=records,
+        full_excel=False,
+    )
+    text = _payments_text_html(caption, table)
 
     try:
-        await _deliver_payment_table_image(
+        await _deliver_payments_text_table(
             bot=context.bot,
-            chat_id=message.chat_id,
-            png=png,
-            caption=caption,
+            message=message,
+            text=text,
             keyboard=keyboard,
             edit_message=edit_message,
-            reply_message=message if edit_message is None else None,
         )
     except Exception:
-        logger.exception("Failed to send payments summary image")
-        try:
-            await _send_payments_text_fallback(
-                message=message,
-                settings=settings,
-                records=records,
-                since=since,
-                page_index=page_index,
-                page_info=page_info,
-                include_admin=include_admin,
-                keyboard=keyboard,
-                page_records=page_records,
-            )
-        except Exception:
-            logger.exception("Failed text fallback for payments summary")
-            await message.reply_text(
-                "Could not send the payment table image. Try again in a moment."
-            )
+        logger.exception("Failed to send payments text table")
+        await message.reply_text(
+            "Could not load the payment table. Try again in a moment."
+        )
 
 
 async def payments_page_callback(

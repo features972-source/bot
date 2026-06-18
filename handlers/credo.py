@@ -57,7 +57,16 @@ CREDO_ACTIVE_SESSIONS_KEY = "credo_active_sessions"
 CREDO_PICKER_COMMANDS = ("cc", "creditcard", "credo", "credos")
 CREDO_START_ARGS = frozenset(CREDO_PICKER_COMMANDS)
 CREDO_REMINDER_INTERVAL_SECONDS = 15 * 60
-CREDO_ACTIVE_ALLOWED_COMMANDS = frozenset({"mail", "finished", "addcredo", "cancel"})
+CREDO_ACTIVE_ALLOWED_COMMANDS = frozenset({
+    "mail",
+    "finished",
+    "addcredo",
+    "cancel",
+    "payments",
+    "sent",
+    "alltimepayments",
+    "alltime",
+})
 
 UNAUTHORIZED = (
     "You are not on the credo whitelist. Ask an admin to add you with /addcredouser."
