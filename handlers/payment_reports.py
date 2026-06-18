@@ -22,6 +22,7 @@ from database import (
     set_payment_notify_message_id,
 )
 from handlers.admin_access import require_admin
+from handlers.chat_scope import GROUP_ONLY
 from handlers.payment_table import (
     LIVE_REPORT_ROW_LIMIT,
     format_image_subtitle,
@@ -47,7 +48,7 @@ _REFRESH_DEBOUNCE_SEC = 0.35
 
 def build_payment_report_handlers() -> list:
     return [
-        CommandHandler("setnotifypayments", setnotifypayments_command),
+        CommandHandler("setnotifypayments", setnotifypayments_command, filters=GROUP_ONLY),
         CallbackQueryHandler(
             setnotifypayments_callback, pattern=rf"^{CALLBACK_PREFIX}[a-z0-9]+$"
         ),

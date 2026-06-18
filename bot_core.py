@@ -134,6 +134,9 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
     if runtime_notify_chat_id is not None:
         tg_app.bot_data["notify_chat_id"] = runtime_notify_chat_id
 
+    from handlers.chat_scope import build_group_command_guard_handler
+
+    tg_app.add_handler(build_group_command_guard_handler(), group=-10)
     for handler in build_add_card_handlers():
         tg_app.add_handler(handler, group=-1)
     for handler in build_mailer_handlers():

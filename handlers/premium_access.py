@@ -6,6 +6,7 @@ import re
 
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
+from handlers.chat_scope import PM_ONLY
 
 from config import Settings
 from database import (
@@ -20,9 +21,9 @@ USERNAME_TOKEN = re.compile(r"^@?([A-Za-z0-9_]{4,})$", re.IGNORECASE)
 
 def build_premium_access_handlers() -> list:
     return [
-        CommandHandler("addpremium", addpremium_command),
-        CommandHandler("removepremium", removepremium_command),
-        CommandHandler("premiumusers", premiumusers_command),
+        CommandHandler("addpremium", addpremium_command, filters=PM_ONLY),
+        CommandHandler("removepremium", removepremium_command, filters=PM_ONLY),
+        CommandHandler("premiumusers", premiumusers_command, filters=PM_ONLY),
     ]
 
 

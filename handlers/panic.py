@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from telegram import Bot, Update
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import CommandHandler, ContextTypes
+from handlers.chat_scope import PM_ONLY
 
 from config import Settings
 from database import (
@@ -33,7 +34,7 @@ class PendingPanic:
 
 def build_panic_handlers() -> list:
     return [
-        CommandHandler("panic", panic_command),
+        CommandHandler("panic", panic_command, filters=PM_ONLY),
     ]
 
 

@@ -45,6 +45,7 @@ from database import (
     update_payment_cleared,
 )
 from handlers.admin_access import is_bot_admin, iter_bot_admin_user_ids, require_admin
+from handlers.chat_scope import PM_ONLY
 from handlers.payment_table import (
     format_image_subtitle,
     render_payments_mobile_html,
@@ -134,24 +135,24 @@ def _normalize_payment_text(text: str) -> str:
 
 def build_payment_command_handlers() -> list:
     return [
-        CommandHandler("out", out_command),
-        CommandHandler("payments", payments_command),
-        CommandHandler("sent", payments_command),
-        CommandHandler("alltimepayments", alltimepayments_command),
-        CommandHandler("alltime", alltimepayments_command),
-        CommandHandler("clearpayments", clearpayments_command),
-        CommandHandler("todaypayments", todaypayments_command),
-        CommandHandler("cleared", cleared_command),
-        CommandHandler("setcleared", cleared_command),
-        CommandHandler("notcleared", notcleared_command),
-        CommandHandler("setnotcleared", notcleared_command),
-        CommandHandler("setpayment", setpayment_command),
-        CommandHandler("updatepayment", setpayment_command),
-        CommandHandler("editpayment", setpayment_command),
-        CommandHandler("removepayment", removepayment_command),
-        CommandHandler("syncpayments", syncpayments_command),
-        CommandHandler("paidside", paidside_command),
-        CommandHandler("myid", myid_command),
+        CommandHandler("out", out_command, filters=PM_ONLY),
+        CommandHandler("payments", payments_command, filters=PM_ONLY),
+        CommandHandler("sent", payments_command, filters=PM_ONLY),
+        CommandHandler("alltimepayments", alltimepayments_command, filters=PM_ONLY),
+        CommandHandler("alltime", alltimepayments_command, filters=PM_ONLY),
+        CommandHandler("clearpayments", clearpayments_command, filters=PM_ONLY),
+        CommandHandler("todaypayments", todaypayments_command, filters=PM_ONLY),
+        CommandHandler("cleared", cleared_command, filters=PM_ONLY),
+        CommandHandler("setcleared", cleared_command, filters=PM_ONLY),
+        CommandHandler("notcleared", notcleared_command, filters=PM_ONLY),
+        CommandHandler("setnotcleared", notcleared_command, filters=PM_ONLY),
+        CommandHandler("setpayment", setpayment_command, filters=PM_ONLY),
+        CommandHandler("updatepayment", setpayment_command, filters=PM_ONLY),
+        CommandHandler("editpayment", setpayment_command, filters=PM_ONLY),
+        CommandHandler("removepayment", removepayment_command, filters=PM_ONLY),
+        CommandHandler("syncpayments", syncpayments_command, filters=PM_ONLY),
+        CommandHandler("paidside", paidside_command, filters=PM_ONLY),
+        CommandHandler("myid", myid_command, filters=PM_ONLY),
         CallbackQueryHandler(payments_page_callback, pattern=r"^paypage:"),
     ]
 
@@ -610,7 +611,10 @@ def _can_view_payments(
     user = update.effective_user
     if user and is_bot_admin(settings, settings.database_path, user.id):
         return True
-    return _payment_chat_allowed(settings, bot_data, update.effective_chat)
+    chat = update.effective_chat
+    if chat is not None and chat.type == "private":
+        return True
+    return _payment_chat_allowed(settings, bot_data, chat)
 
 
 async def _require_payment_view(
@@ -622,16 +626,8 @@ async def _require_payment_view(
     chat = update.effective_chat
     if message is None:
         return False
-    allowed = _payment_chat_ids(settings, bot_data)
-    hint = (
-        f"Allowed chat id(s): {', '.join(str(i) for i in sorted(allowed))}"
-        if allowed
-        else "No notify group set — admin: run /setnotify in your payment group."
-    )
-    chat_id = chat.id if chat is not None else "unknown"
     await message.reply_text(
-        "Payment commands only work in the **notify / payment group** "
-        f"(this chat is `{chat_id}`).\n\n{hint}",
+        "Payment commands only work in a **private chat** with the bot.",
         parse_mode="Markdown",
     )
     return False
@@ -938,16 +934,16 @@ async def out_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat = update.effective_chat
     if not message or not user or not chat:
         return
-    if not _payment_chat_allowed(settings, context.bot_data, chat):
-        allowed = sorted(_payment_chat_ids(settings, context.bot_data))
+    if chat.type != "private" and not _payment_chat_allowed(
+        settings, context.bot_data, chat
+    ):
         logger.info(
-            "Ignored /out in chat %s (allowed: %s)",
+            "Ignored /out in chat %s (use DM or plain-text out in notify group)",
             chat.id,
-            allowed,
         )
         await message.reply_text(
-            "Payments only work in the announcement group for this bot.\n"
-            f"This chat: `{chat.id}`",
+            "Use /out in a **private chat** with the bot, "
+            "or reply in the group with `5182 out` (no slash command).",
             parse_mode="Markdown",
         )
         return
@@ -1893,12 +1889,7 @@ async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if chat:
         lines.append(f"This chat id: <code>{chat.id}</code>")
     if chat and chat.type in ("group", "supergroup"):
-        me = context.bot
-        username = getattr(me, "username", None) or "Q1CallManagerBot"
-        lines.append(
-            f"In groups, try: <code>/setpayment@{username} 67</code> "
-            "(or disable privacy in @BotFather → /setprivacy)."
-        )
+        lines.append("Bot commands in groups are limited to /cc when blast mode is on.")
     await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 

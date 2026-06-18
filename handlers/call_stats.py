@@ -7,6 +7,7 @@ from io import BytesIO
 
 from telegram import InputFile, Update
 from telegram.ext import CommandHandler, ContextTypes
+from handlers.chat_scope import PM_ONLY
 
 from config import Settings
 from database import (
@@ -23,8 +24,8 @@ from notify import format_duration
 
 def build_call_stats_handlers() -> list:
     return [
-        CommandHandler("stats", stats_command),
-        CommandHandler("missedcalls", missedcalls_command),
+        CommandHandler("stats", stats_command, filters=PM_ONLY),
+        CommandHandler("missedcalls", missedcalls_command, filters=PM_ONLY),
     ]
 
 

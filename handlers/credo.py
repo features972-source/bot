@@ -46,6 +46,7 @@ from handlers.admin_access import (
     is_bot_admin,
     require_admin,
 )
+from handlers.chat_scope import PM_ONLY
 from handlers.payments import parse_payment_amount
 from money_format import format_amount
 from telegram.error import Forbidden
@@ -804,25 +805,25 @@ async def _apply_blastmode(
 
     if active:
         await message.reply_text(
-            "🔥 **Blast mode ON** — agents can use /cc to pick cards.",
+            "🔥 **Blast mode on** — agents can use /cc to pick cards.",
             parse_mode="Markdown",
         )
         await send_to_notify_chats(
             context.bot,
             settings,
             bot_data,
-            text="🔥 <b>Blast mode is ON</b> — use /cc to pick a card.",
+            text="🔥 <b>Blast mode on</b> — use /cc to pick a card.",
         )
     else:
         await message.reply_text(
-            "⏸️ **BLASTMODE OFF** — /cc is locked.",
+            "⏸️ **Blast mode off** — /cc is locked.",
             parse_mode="Markdown",
         )
         await send_to_notify_chats(
             context.bot,
             settings,
             bot_data,
-            text="⏸️ <b>BLASTMODE OFF</b> — /cc is locked.",
+            text="⏸️ <b>Blast mode off</b> — /cc is locked.",
         )
 
 
@@ -864,8 +865,8 @@ async def blastmodeoff_command(update: Update, context: ContextTypes.DEFAULT_TYP
 def build_add_card_handlers() -> list:
     """Register in group -1 so add-card replies beat the mailer text router."""
     return [
-        CommandHandler("addcredo", addcredocard_start),
-        CommandHandler("cancel", addcredocard_cancel_if_active, block=False),
+        CommandHandler("addcredo", addcredocard_start, filters=PM_ONLY),
+        CommandHandler("cancel", addcredocard_cancel_if_active, block=False, filters=PM_ONLY),
         MessageHandler(
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
             addcredocard_route_text,
@@ -889,12 +890,12 @@ def build_credo_handlers() -> list:
 
     menu_fallbacks = [
         CommandHandler("cancel", credo_cancel),
-        CommandHandler("start", help_conversation_fallback),
-        CommandHandler("help", help_conversation_fallback),
-        CommandHandler("out", out_conversation_fallback),
-        CommandHandler("payments", payments_conversation_fallback),
-        CommandHandler("alltimepayments", alltimepayments_conversation_fallback),
-        CommandHandler("alltime", alltimepayments_conversation_fallback),
+        CommandHandler("start", help_conversation_fallback, filters=PM_ONLY),
+        CommandHandler("help", help_conversation_fallback, filters=PM_ONLY),
+        CommandHandler("out", out_conversation_fallback, filters=PM_ONLY),
+        CommandHandler("payments", payments_conversation_fallback, filters=PM_ONLY),
+        CommandHandler("alltimepayments", alltimepayments_conversation_fallback, filters=PM_ONLY),
+        CommandHandler("alltime", alltimepayments_conversation_fallback, filters=PM_ONLY),
     ]
     user_conversation = ConversationHandler(
         entry_points=[
@@ -912,15 +913,15 @@ def build_credo_handlers() -> list:
     )
     return [
         user_conversation,
-        CommandHandler("blastmode", blastmode_command),
-        CommandHandler("blastmodeoff", blastmodeoff_command),
-        CommandHandler("finished", credo_finished_command),
+        CommandHandler("blastmode", blastmode_command, filters=PM_ONLY),
+        CommandHandler("blastmodeoff", blastmodeoff_command, filters=PM_ONLY),
+        CommandHandler("finished", credo_finished_command, filters=PM_ONLY),
         CallbackQueryHandler(credos_standalone_callback, pattern=r"^credocard:\d+$"),
-        CommandHandler("addcredouser", addcredouser_command),
-        CommandHandler("removecredouser", removecredouser_command),
-        CommandHandler("credousers", credousers_command),
-        CommandHandler("removecredo", removecredocard_command),
-        CommandHandler("listcredocards", listcredocards_command),
+        CommandHandler("addcredouser", addcredouser_command, filters=PM_ONLY),
+        CommandHandler("removecredouser", removecredouser_command, filters=PM_ONLY),
+        CommandHandler("credousers", credousers_command, filters=PM_ONLY),
+        CommandHandler("removecredo", removecredocard_command, filters=PM_ONLY),
+        CommandHandler("listcredocards", listcredocards_command, filters=PM_ONLY),
     ]
 
 

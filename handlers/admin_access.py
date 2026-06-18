@@ -18,6 +18,7 @@ from telegram.error import BadRequest
 from telegram.ext import CommandHandler, ContextTypes
 
 from config import Settings
+from handlers.chat_scope import PM_ONLY
 from database import (
     add_bot_admin,
     list_bot_admins,
@@ -42,11 +43,9 @@ CREDO_USER_COMMANDS = MENU_BOT_COMMANDS + [
     BotCommand("finished", "End active credo session"),
 ]
 
-NOTIFY_GROUP_COMMANDS = [
-    BotCommand("out", "Log payment (reply + /out 5182)"),
-    BotCommand("payments", "This week's payments (resets Sunday)"),
-    BotCommand("alltimepayments", "All-time payment totals"),
-    BotCommand("alltime", "All-time payment totals (short)"),
+CREDO_GROUP_COMMANDS = [
+    BotCommand("cc", "Pick a credo card (when blast mode is on)"),
+    BotCommand("credos", "Pick a credo card (when blast mode is on)"),
 ]
 
 
@@ -66,10 +65,10 @@ def _payment_group_chat_ids(settings: Settings) -> set[int]:
 
 def build_admin_access_handlers() -> list:
     return [
-        CommandHandler("admin", admin_command),
-        CommandHandler("admins", admins_command),
-        CommandHandler("addadmin", addadmin_command),
-        CommandHandler("removeadmin", removeadmin_command),
+        CommandHandler("admin", admin_command, filters=PM_ONLY),
+        CommandHandler("admins", admins_command, filters=PM_ONLY),
+        CommandHandler("addadmin", addadmin_command, filters=PM_ONLY),
+        CommandHandler("removeadmin", removeadmin_command, filters=PM_ONLY),
     ]
 
 
@@ -107,7 +106,7 @@ async def _clear_command_scope(bot: Bot, scope) -> None:
 
 
 async def sync_bot_command_menu(bot: Bot, settings: Settings) -> None:
-    """Hide admin commands in groups; expose payment commands in the notify group."""
+    """Private chats get full menus; groups only show credo picker commands."""
     scopes_to_clear = [
         BotCommandScopeDefault(),
         BotCommandScopeAllPrivateChats(),
@@ -134,27 +133,23 @@ async def sync_bot_command_menu(bot: Bot, settings: Settings) -> None:
         scope=BotCommandScopeAllPrivateChats(),
     )
 
-    group_admin_extras = [
-        BotCommand("stats", "Call stats leaderboard (group admins)"),
-        BotCommand("missedcalls", "Download missed calls CSV (group admins)"),
-        BotCommand("setpayment", "Change payment # amount (group admins)"),
-        BotCommand("removepayment", "Remove payment # (group admins)"),
-        BotCommand("syncpayments", "Refresh payments CSV (group admins)"),
-        BotCommand("myid", "Show your Telegram user id"),
-    ]
+    await bot.set_my_commands(
+        CREDO_GROUP_COMMANDS,
+        scope=BotCommandScopeAllGroupChats(),
+    )
 
     for chat_id in _payment_group_chat_ids(settings):
         await bot.set_my_commands(
-            NOTIFY_GROUP_COMMANDS,
+            CREDO_GROUP_COMMANDS,
             scope=BotCommandScopeChat(chat_id=chat_id),
         )
     try:
         await bot.set_my_commands(
-            NOTIFY_GROUP_COMMANDS + group_admin_extras,
+            CREDO_GROUP_COMMANDS,
             scope=BotCommandScopeAllChatAdministrators(),
         )
     except BadRequest:
-        logger.warning("Could not set group-admin payment commands")
+        logger.warning("Could not set group command menu")
 
     for user_id in iter_bot_admin_user_ids(settings, settings.database_path):
         scope = BotCommandScopeChat(chat_id=user_id)
