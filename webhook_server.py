@@ -4,7 +4,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
+from pathlib import Path
 from typing import Any
 
 from flask import Flask, Response, jsonify, request
@@ -57,6 +59,52 @@ def start_webhook_server(
     @app.get("/health")
     def health():
         return jsonify({"ok": True})
+
+    @app.post("/admin/restore-db")
+    def restore_db():
+        secret = request.args.get("secret", "")
+        if not secret or secret != settings.webhook_secret:
+            return jsonify({"ok": False, "error": "unauthorized"}), 403
+        upload = request.files.get("file")
+        if upload is None:
+            return jsonify({"ok": False, "error": "missing file field"}), 400
+        data = upload.read()
+        if len(data) < 16 or not data.startswith(b"SQLite format 3"):
+            return jsonify({"ok": False, "error": "not a sqlite database"}), 400
+        db_path = Path(settings.database_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        if db_path.exists():
+            backup = db_path.with_suffix(f"{db_path.suffix}.bak")
+            shutil.copy2(db_path, backup)
+        db_path.write_bytes(data)
+        logger.info("Restored database to %s (%d bytes)", db_path, len(data))
+        return jsonify({"ok": True, "path": str(db_path), "bytes": len(data)})
+
+    @app.post("/admin/restore-session")
+    def restore_session():
+        secret = request.args.get("secret", "")
+        if not secret or secret != settings.webhook_secret:
+            return jsonify({"ok": False, "error": "unauthorized"}), 403
+        upload = request.files.get("file")
+        if upload is None:
+            return jsonify({"ok": False, "error": "missing file field"}), 400
+        data = upload.read()
+        if not data:
+            return jsonify({"ok": False, "error": "empty file"}), 400
+        filename = (request.form.get("name") or upload.filename or "mailer-links.session").strip()
+        if not filename.endswith(".session"):
+            filename = f"{filename}.session"
+        if settings.data_dir:
+            dest = Path(settings.data_dir) / filename
+        else:
+            dest = Path(settings.telethon_session_path).with_suffix(".session")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            backup = dest.with_suffix(dest.suffix + ".bak")
+            shutil.copy2(dest, backup)
+        dest.write_bytes(data)
+        logger.info("Restored session to %s (%d bytes)", dest, len(data))
+        return jsonify({"ok": True, "path": str(dest), "bytes": len(data)})
 
     @app.get("/oauth/msgraph/callback")
     def msgraph_oauth_callback():
