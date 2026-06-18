@@ -275,9 +275,9 @@ def _format_dm_photo_caption(card_name: str, limit_block: str) -> str:
         f"{limit_block}\n\n"
         "⚠️ **If you do not log how much you have sent, you will not be paid.**\n\n"
         "If you have sent a payment, **MAKE SURE** to type the amount **in this chat** "
-        "(e.g. `500` or `£500`) — **not in the group chat**. No need to reply to a message.\n\n"
-        "When you're finished with this card, send **/finished**.\n"
-        "While a card is active, only **/mail** and **/finished** work."
+        "(e.g. `500` or `£500`) — **not in the group chat**.\n\n"
+        "While a card is active, only **/mail** and **/finished** work.\n\n"
+        "**WHEN YOU ARE FINISHED WITH THE CC DO /finished**"
     )
 
 
