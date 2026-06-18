@@ -93,6 +93,7 @@ def _format_help_text(
         return (
             f"💳 <b>Credo & {mailer_name}</b>\n\n"
             "/credos — view cards & capacity, pick one (DM)\n"
+            "Reply to the bot's message with how much you've sent\n"
             f"/mail — open {mailer_name} via the bot (DM only)\n"
             "/maildone — end mailer session\n"
             "/cancel — cancel an in-progress flow"

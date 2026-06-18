@@ -194,7 +194,6 @@ def _credo_conversation_active(context: ContextTypes.DEFAULT_TYPE) -> bool:
         data.get("add_card_active")
         or data.get("add_card_name")
         or data.get("add_card_capacity")
-        or data.get("credo_selected_card")
         or data.get("credo_cards")
     )
 

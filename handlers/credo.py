@@ -6,6 +6,7 @@ from enum import IntEnum, auto
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -20,6 +21,7 @@ from database import (
     get_credo_credit_card,
     is_on_credo_whitelist,
     list_credo_credit_cards,
+    list_credo_card_usage,
     list_credo_whitelist,
     record_credo_card_usage,
     remove_credo_credit_card,
@@ -42,6 +44,7 @@ from telegram.error import Forbidden
 
 PHOTO_FILTER = filters.PHOTO | filters.Document.IMAGE
 CALLBACK_CARD_PREFIX = "credocard:"
+CREDO_LOG_PROMPT_KEY = "credo_log_prompts"
 
 UNAUTHORIZED = (
     "You are not on the credo whitelist. Ask an admin to add you with /addcredouser."
@@ -55,7 +58,6 @@ NO_CARDS = (
 
 class State(IntEnum):
     CHOOSE = auto()
-    LOG_AMOUNT = auto()
 
 
 class AddCardState(IntEnum):
@@ -98,13 +100,67 @@ def _card_balance(settings: Settings, card_name: str) -> tuple[float, float, flo
     return used, capacity, remaining
 
 
+def _credo_log_prompts(bot_data: dict) -> dict[tuple[int, int], str]:
+    return bot_data.setdefault(CREDO_LOG_PROMPT_KEY, {})
+
+
+def _register_credo_log_prompt(
+    bot_data: dict, *, chat_id: int, message_id: int, card_name: str
+) -> None:
+    _credo_log_prompts(bot_data)[(chat_id, message_id)] = card_name
+
+
+def _lookup_credo_log_prompt(bot_data: dict, *, chat_id: int, message_id: int) -> str | None:
+    return _credo_log_prompts(bot_data).get((chat_id, message_id))
+
+
+def _format_usage_by_users(database_path: str, card_name: str) -> str:
+    usages = list_credo_card_usage(database_path, card_name, limit=200)
+    if not usages:
+        return f"Used: {format_amount(0)}"
+
+    totals: dict[int, tuple[float, str | None, str | None]] = {}
+    for entry in usages:
+        prev = totals.get(entry.telegram_user_id, (0.0, entry.telegram_username, entry.display_name))
+        totals[entry.telegram_user_id] = (
+            prev[0] + entry.amount,
+            entry.telegram_username or prev[1],
+            entry.display_name or prev[2],
+        )
+
+    parts: list[str] = []
+    for user_id, (amount, username, display_name) in sorted(
+        totals.items(), key=lambda item: item[1][0], reverse=True
+    ):
+        if username:
+            label = f"@{username}"
+        elif display_name:
+            label = display_name
+        else:
+            label = str(user_id)
+        parts.append(f"{format_amount(amount)} by {label}")
+    return "Used: " + ", ".join(parts)
+
+
+def _format_card_limit_block(settings: Settings, card_name: str) -> str:
+    used, capacity, remaining = _card_balance(settings, card_name)
+    usage_line = _format_usage_by_users(settings.database_path, card_name)
+    if capacity <= 0:
+        return f"{usage_line}\n(No limit set on this account.)"
+    return (
+        f"Don't send more than {format_amount(remaining)} in payments into this account.\n"
+        f"{usage_line}"
+    )
+
+
 def _format_card_capacity(settings: Settings, card_name: str) -> str:
     used, capacity, remaining = _card_balance(settings, card_name)
     if capacity <= 0:
         return f"{card_name} — no limit set"
+    usage_line = _format_usage_by_users(settings.database_path, card_name)
     return (
-        f"{card_name} — {format_amount(remaining)} left "
-        f"({format_amount(used)} used · {format_amount(capacity)} limit)"
+        f"{card_name} — don't send more than {format_amount(remaining)}. "
+        f"{usage_line.lower()}"
     )
 
 
@@ -146,7 +202,7 @@ async def _prompt_choose_card(
     await message.reply_text(
         f"💳 **Credo cards**\n\n{_format_cards_list(settings, cards)}\n\n"
         "Pick one — the **photo** goes **only to your DMs**.\n"
-        "After that, reply with how much you've sent so everyone sees what's left.\n\n"
+        "After that, **reply to the bot's message** with how much you've sent.\n\n"
         "Tap a button or reply with a **number** (e.g. `1`).",
         parse_mode="Markdown",
         reply_markup=_card_keyboard(cards),
@@ -200,8 +256,8 @@ async def _deliver_credo_card(
         return ConversationHandler.END
 
     used, capacity, remaining = _card_balance(settings, card_name)
-    balance_line = _format_card_capacity(settings, card_name)
-    dm_caption = f"💳 **{card.name}**\n{balance_line}"
+    limit_block = _format_card_limit_block(settings, card_name)
+    dm_caption = f"💳 **{card.name}**\n\n{limit_block}"
     sent_to_dm = False
 
     try:
@@ -215,7 +271,13 @@ async def _deliver_credo_card(
     except (Forbidden, Exception):
         sent_to_dm = False
 
-    context.user_data["credo_selected_card"] = card.name
+    context.user_data.pop("credo_selected_card", None)
+
+    prompt_text = (
+        f"✅ Sent **{card.name}** to your DMs.\n\n"
+        f"{limit_block}\n\n"
+        "**Reply to this message** with how much you've sent (e.g. `500` or `£500`)."
+    )
 
     if sent_to_dm:
         save_credo_profile(
@@ -225,12 +287,7 @@ async def _deliver_credo_card(
             created_by_user_id=sender_user.id,
             created_by_username=sender_user.username,
         )
-        await reply_target.reply_text(
-            f"✅ Sent **{card.name}** to your DMs.\n\n"
-            f"{balance_line}\n\n"
-            "Reply with **how much you've sent** (e.g. `500` or `£500`), or /skip.",
-            parse_mode="Markdown",
-        )
+        prompt = await reply_target.reply_text(prompt_text, parse_mode="Markdown")
     else:
         pending = context.application.bot_data.setdefault("credo_pending", {})
         pending[sender_user.id] = card.name
@@ -251,35 +308,42 @@ async def _deliver_credo_card(
                 )
         except Exception:
             pass
-        await reply_target.reply_text(
+        prompt = await reply_target.reply_text(
             f"Could not DM **{card.name}** — the card is **not** posted in this chat.\n\n"
-            f"{balance_line}\n\n"
+            f"{limit_block}\n\n"
             "Tap the button below, press **Start**, then send /credos again.\n"
-            "After you get the card, reply here with how much you've sent.",
+            "**Reply to this message** after you get the card with how much you've sent.",
             parse_mode="Markdown",
             reply_markup=keyboard,
         )
 
-    return State.LOG_AMOUNT
+    if prompt:
+        _register_credo_log_prompt(
+            context.application.bot_data,
+            chat_id=prompt.chat_id,
+            message_id=prompt.message_id,
+            card_name=card.name,
+        )
+
+    return ConversationHandler.END
 
 
 async def _log_card_usage(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     *,
+    card_name: str,
     amount: float,
-) -> int:
+) -> None:
     settings: Settings = context.bot_data["settings"]
     message = update.effective_message
     user = update.effective_user
     if not message or not user:
-        return ConversationHandler.END
+        return
 
-    card_name = context.user_data.get("credo_selected_card")
-    if not card_name:
-        await message.reply_text("No card selected. Send /credos to start again.")
-        context.user_data.clear()
-        return ConversationHandler.END
+    if not is_credo_allowed(settings, settings.database_path, user.id):
+        await message.reply_text(UNAUTHORIZED)
+        return
 
     used_before, capacity, remaining_before = _card_balance(settings, card_name)
     if capacity > 0 and amount > remaining_before:
@@ -289,7 +353,7 @@ async def _log_card_usage(
             f"Send a lower amount or ask an admin.",
             parse_mode="Markdown",
         )
-        return State.LOG_AMOUNT
+        return
 
     record_credo_card_usage(
         settings.database_path,
@@ -299,18 +363,13 @@ async def _log_card_usage(
         display_name=_display_name(user),
         amount=amount,
     )
-    used_after, _, remaining_after = _card_balance(settings, card_name)
     user_label = _user_label(user)
+    limit_block = _format_card_limit_block(settings, card_name)
     await message.reply_text(
         f"📊 **{card_name}** — {user_label} logged {format_amount(amount)}.\n\n"
-        f"**{format_amount(remaining_after)} left** "
-        f"({format_amount(used_after)} used"
-        + (f" of {format_amount(capacity)}" if capacity > 0 else "")
-        + ").",
+        f"{limit_block}",
         parse_mode="Markdown",
     )
-    context.user_data.clear()
-    return ConversationHandler.END
 
 
 def build_credo_handlers() -> list:
@@ -318,7 +377,6 @@ def build_credo_handlers() -> list:
 
     menu_fallbacks = [
         CommandHandler("cancel", credo_cancel),
-        CommandHandler("skip", credo_skip),
         CommandHandler("start", help_conversation_fallback),
         CommandHandler("help", help_conversation_fallback),
     ]
@@ -331,9 +389,6 @@ def build_credo_handlers() -> list:
             State.CHOOSE: [
                 CallbackQueryHandler(credos_choose_callback, pattern=r"^credocard:\d+$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, credos_choose_text),
-            ],
-            State.LOG_AMOUNT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, credos_log_amount_text),
             ],
         },
         fallbacks=menu_fallbacks,
@@ -367,6 +422,11 @@ def build_credo_handlers() -> list:
         name="credo_add_card",
     )
     return [
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.REPLY,
+            credo_reply_log_amount,
+            block=False,
+        ),
         user_conversation,
         add_card_conversation,
         CallbackQueryHandler(credos_standalone_callback, pattern=r"^credocard:\d+$"),
@@ -473,9 +533,9 @@ async def credos_choose_callback(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
     card_name = cards[index]
-    balance_line = _format_card_capacity(settings, card_name)
+    limit_block = _format_card_limit_block(settings, card_name)
     await query.edit_message_text(
-        f"Selected: **{card_name}**\n{balance_line}",
+        f"Selected: **{card_name}**\n\n{limit_block}",
         parse_mode="Markdown",
     )
     target = query.message
@@ -514,21 +574,35 @@ async def credos_choose_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-async def credos_log_amount_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    amount = _parse_usage_amount(update.message.text or "")
+async def credo_reply_log_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not message.text or not message.reply_to_message:
+        return
+
+    reply = message.reply_to_message
+    if not reply.from_user or not reply.from_user.is_bot:
+        return
+    if reply.from_user.id != context.bot.id:
+        return
+
+    card_name = _lookup_credo_log_prompt(
+        context.application.bot_data,
+        chat_id=reply.chat_id,
+        message_id=reply.message_id,
+    )
+    if not card_name:
+        return
+
+    amount = _parse_usage_amount(message.text)
     if amount is None:
-        await update.message.reply_text(
-            "Send an amount like `500`, `£500`, or `5k`, or /skip.",
+        await message.reply_text(
+            "Reply with an amount like `500`, `£500`, or `5k`.",
             parse_mode="Markdown",
         )
-        return State.LOG_AMOUNT
-    return await _log_card_usage(update, context, amount=amount)
+        raise ApplicationHandlerStop
 
-
-async def credo_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data.clear()
-    await update.effective_message.reply_text("Skipped logging. Send /credos anytime to check balances.")
-    return ConversationHandler.END
+    await _log_card_usage(update, context, card_name=card_name, amount=amount)
+    raise ApplicationHandlerStop
 
 
 def _photo_file_id(update: Update) -> str | None:
@@ -644,9 +718,14 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
     context.user_data.pop("add_card_capacity", None)
     context.user_data.pop("add_card_active", None)
     cap_line = format_amount(capacity) if capacity > 0 else "no limit"
+    limit_hint = (
+        f"Don't send more than {format_amount(capacity)} in payments into this account."
+        if capacity > 0
+        else "No limit set on this account."
+    )
     await message.reply_photo(
         photo=file_id,
-        caption=f"✅ **{name}** added · limit {cap_line}",
+        caption=f"✅ **{name}** added · limit {cap_line}\n{limit_hint}",
         parse_mode="Markdown",
     )
     return ConversationHandler.END
