@@ -18,8 +18,11 @@ GROUP_ALLOWED_COMMANDS = frozenset(
         "credos",
         "activeccs",
         "usingccs",
+        "usingcc",
+        "finished",
         "setnotify",
         "setnotifypayments",
+        "setexpenses",
     }
 )
 
@@ -30,8 +33,9 @@ GROUP_ONLY = filters.ChatType.GROUPS
 
 GROUP_DM_HINT = (
     "Use bot commands in a **private chat** with me.\n\n"
-    "In this group you can still use **/cc** (when blast mode is on) "
-    "and log outs by replying with amounts (e.g. `5182 out`)."
+    "In this group you can still use **/cc** (when blast mode is on), "
+    "**/finished**, **/usingcc**, and log outs by replying with amounts "
+    "(e.g. `5182 out`)."
 )
 
 

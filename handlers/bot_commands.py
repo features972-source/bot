@@ -19,6 +19,8 @@ from handlers.admin_access import (
 from handlers.call_stats import build_call_stats_handlers
 from handlers.chat_blacklist import build_chat_blacklist_handlers
 from handlers.credo import build_credo_handlers
+from handlers.expense_reports import build_expense_report_handlers
+from handlers.expenses import build_expense_message_handlers
 from handlers.payments import (
     build_payment_command_handlers,
     build_payment_message_handlers,
@@ -32,9 +34,11 @@ def build_bot_handlers() -> list:
     return [
         *build_panic_handlers(),
         *build_payment_command_handlers(),
+        *build_expense_message_handlers(),
         # Payment text outs before credo — credo reply guard must not block ON CALL replies.
         *build_payment_message_handlers(),
         *build_credo_handlers(),
+        *build_expense_report_handlers(),
         *build_payment_report_handlers(),
         *build_call_stats_handlers(),
         *build_chat_blacklist_handlers(),
@@ -85,7 +89,8 @@ def _format_help_text(
             "<b>🔗 Extensions</b>\n"
             "/link — link extension (reply to user) · /unlink · /links · /users\n"
             "/setnotify — set announcement group\n"
-            "/setnotifypayments — live payment list in a group (pick Q1/Q2, auto-updates)\n\n"
+            "/setnotifypayments — live payment list in a group (pick Q1/Q2, auto-updates)\n"
+            "/setexpenses — live expense table in a group (pick Q1/Q2, auto-updates)\n\n"
             "<b>👑 Admins</b>\n"
             "/admin · /addadmin · /removeadmin — manage bot admins\n\n"
             "<b>🚫 Blacklist</b>\n"
@@ -94,7 +99,7 @@ def _format_help_text(
             "/blastmode — turn card picking on/off for the team\n"
             "/blastmode off · /blastmodeoff — lock /cc\n"
             "/cc · /creditcard · /credo · /credos — only when blast mode is on\n"
-            "/activeccs — see which cards are currently in use\n"
+            "/activeccs · /usingcc — see which cards are currently in use\n"
             "/addcredouser · /removecredouser · /credousers\n"
             "/addcredo · /removecredo · /listcredocards\n"
             "/addpremium · /removepremium · /premiumusers\n"
@@ -109,8 +114,8 @@ def _format_help_text(
             f"💳 <b>Credo & {mailer_name}</b>\n\n"
             "/cc — view cards & pick one when blast mode is on (group or DM)\n"
             "(also /creditcard, /credo, /credos)\n"
-            "/activeccs — see which cards are in use (also /usingccs)\n"
-            "/finished — when done · /mail still works\n"
+            "/activeccs · /usingcc — see which cards are in use\n"
+            "/finished — when done (works in group or DM)\n"
             f"/mail — open {mailer_name} via the bot (DM only)\n"
             "/maildone — end mailer session\n"
             "/cancel — cancel an in-progress flow"

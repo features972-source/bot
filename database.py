@@ -123,6 +123,18 @@ class PaymentRecord:
 
 
 @dataclass
+class ExpenseRecord:
+    id: int
+    amount: float
+    raw_text: str
+    reason: str
+    created_at: str
+    telegram_user_id: int
+    telegram_username: str | None
+    display_name: str | None
+
+
+@dataclass
 class PaymentLeaderboardEntry:
     user_id: int
     telegram_username: str | None
@@ -245,6 +257,35 @@ def init_db(path: str) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_payment_outs_user
             ON payment_outs (telegram_user_id, created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_user_id INTEGER NOT NULL,
+                telegram_username TEXT,
+                display_name TEXT,
+                amount REAL NOT NULL,
+                raw_text TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                telegram_message_id INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_chat_message
+            ON expenses (chat_id, telegram_message_id)
+            WHERE telegram_message_id IS NOT NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_expenses_created
+            ON expenses (created_at ASC, id ASC)
             """
         )
         _ensure_payment_out_columns(conn)
@@ -492,6 +533,47 @@ def clear_payment_notify_message_id(path: str) -> None:
         conn.execute(
             "DELETE FROM bot_settings WHERE key = ?",
             (PAYMENT_NOTIFY_MESSAGE_ID_KEY,),
+        )
+        conn.commit()
+
+
+EXPENSE_NOTIFY_CHAT_ID_KEY = "expense_notify_chat_id"
+EXPENSE_NOTIFY_MESSAGE_ID_KEY = "expense_notify_message_id"
+
+
+def get_expense_notify_chat_id(path: str) -> int | None:
+    raw = _get_bot_setting(path, EXPENSE_NOTIFY_CHAT_ID_KEY)
+    if not raw:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return None
+
+
+def set_expense_notify_chat_id(path: str, chat_id: int) -> None:
+    _set_bot_setting(path, EXPENSE_NOTIFY_CHAT_ID_KEY, str(chat_id))
+
+
+def get_expense_notify_message_id(path: str) -> int | None:
+    raw = _get_bot_setting(path, EXPENSE_NOTIFY_MESSAGE_ID_KEY)
+    if not raw:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return None
+
+
+def set_expense_notify_message_id(path: str, message_id: int) -> None:
+    _set_bot_setting(path, EXPENSE_NOTIFY_MESSAGE_ID_KEY, str(message_id))
+
+
+def clear_expense_notify_message_id(path: str) -> None:
+    with _connect(path) as conn:
+        conn.execute(
+            "DELETE FROM bot_settings WHERE key = ?",
+            (EXPENSE_NOTIFY_MESSAGE_ID_KEY,),
         )
         conn.commit()
 
@@ -1292,6 +1374,132 @@ def get_payment_totals(
     with _connect(path) as conn:
         row = conn.execute(
             f"SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM payment_outs {where}",
+            params,
+        ).fetchone()
+    if row is None:
+        return 0, 0.0
+    return int(row[0]), float(row[1])
+
+
+_EXPENSE_SELECT = """
+    SELECT
+        id,
+        amount,
+        raw_text,
+        reason,
+        created_at,
+        telegram_user_id,
+        telegram_username,
+        display_name
+    FROM expenses
+"""
+
+
+def _expense_record_from_row(row: tuple) -> ExpenseRecord:
+    return ExpenseRecord(
+        id=row[0],
+        amount=float(row[1]),
+        raw_text=row[2],
+        reason=row[3],
+        created_at=row[4],
+        telegram_user_id=row[5],
+        telegram_username=row[6],
+        display_name=row[7],
+    )
+
+
+def expense_message_exists(
+    path: str, *, chat_id: int, telegram_message_id: int
+) -> bool:
+    with _connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM expenses
+            WHERE chat_id = ? AND telegram_message_id = ?
+            LIMIT 1
+            """,
+            (chat_id, telegram_message_id),
+        ).fetchone()
+    return row is not None
+
+
+def record_expense(
+    path: str,
+    *,
+    telegram_user_id: int,
+    telegram_username: str | None,
+    display_name: str | None,
+    amount: float,
+    raw_text: str,
+    reason: str,
+    chat_id: int,
+    telegram_message_id: int | None = None,
+    created_at: str | None = None,
+) -> int | None:
+    if telegram_message_id is not None and expense_message_exists(
+        path, chat_id=chat_id, telegram_message_id=telegram_message_id
+    ):
+        return None
+    if created_at is None:
+        created_at = datetime.now(timezone.utc).isoformat()
+    with _connect(path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO expenses (
+                telegram_user_id,
+                telegram_username,
+                display_name,
+                amount,
+                raw_text,
+                reason,
+                chat_id,
+                created_at,
+                telegram_message_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                telegram_user_id,
+                telegram_username,
+                display_name,
+                amount,
+                raw_text,
+                reason.strip(),
+                chat_id,
+                created_at,
+                telegram_message_id,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid) if cursor.lastrowid else None
+
+
+def list_expenses_since(path: str, *, since: datetime) -> list[ExpenseRecord]:
+    with _connect(path) as conn:
+        rows = conn.execute(
+            f"""
+            {_EXPENSE_SELECT}
+            WHERE created_at >= ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (since.isoformat(),),
+        ).fetchall()
+    return [_expense_record_from_row(row) for row in rows]
+
+
+def get_expense_totals(
+    path: str,
+    *,
+    since: datetime | None = None,
+) -> tuple[int, float]:
+    clauses: list[str] = []
+    params: list[str] = []
+    if since is not None:
+        clauses.append("created_at >= ?")
+        params.append(since.isoformat())
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with _connect(path) as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM expenses {where}",
             params,
         ).fetchone()
     if row is None:
