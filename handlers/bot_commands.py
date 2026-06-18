@@ -96,9 +96,7 @@ def _format_help_text(
             "<b>🚫 Blacklist</b>\n"
             "/blacklist @user reason · /unblacklist @user · /blacklisted\n\n"
             "<b>💳 Credos</b>\n"
-            "/blastmode — turn card picking on/off for the team\n"
-            "/blastmode off · /blastmodeoff — lock /cc\n"
-            "/cc · /creditcard · /credo · /credos — only when blast mode is on\n"
+            "/cc · /creditcard · /credo · /credos\n"
             "/activeccs · /usingcc — see which cards are currently in use\n"
             "/addcredouser · /removecredouser · /credousers\n"
             "/addcredo · /removecredo · /listcredocards\n"
@@ -112,7 +110,7 @@ def _format_help_text(
     if credo:
         return (
             f"💳 <b>Credo & {mailer_name}</b>\n\n"
-            "/cc — view cards & pick one when blast mode is on (group or DM)\n"
+            "/cc — view cards & pick one (group or DM)\n"
             "(also /creditcard, /credo, /credos)\n"
             "/activeccs · /usingcc — see which cards are in use\n"
             "/finished — when done (works in group or DM)\n"
@@ -124,7 +122,7 @@ def _format_help_text(
     return (
         f"📱 <b>{bot_name}</b>\n\n"
         "Call announcements run in your team group. Bot commands are DM-only "
-        f"(except /cc when blast mode is on).\n\n"
+        "(except /cc and related credo commands).\n\n"
         f"<b>📧 {mailer_name}</b>\n"
         f"/mail — open {mailer_name} in this DM (joins queue if busy)\n"
         "/maildone — end session or leave queue"

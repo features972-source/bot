@@ -1889,7 +1889,7 @@ async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if chat:
         lines.append(f"This chat id: <code>{chat.id}</code>")
     if chat and chat.type in ("group", "supergroup"):
-        lines.append("Bot commands in groups are limited to /cc when blast mode is on.")
+        lines.append("Bot commands in groups are limited to /cc and related credo commands.")
     await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
