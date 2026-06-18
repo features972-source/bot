@@ -991,12 +991,11 @@ async def _stop_live_call(
 
     settings = bot_data.get("settings")
     if settings is not None:
-        await _finalize_call_ended_messages(
+        await send_to_notify_chats(
             bot,
-            bot_data,
             settings,
-            live_call,
-            final_text,
+            bot_data,
+            text=final_text,
         )
 
     return live_call
@@ -1428,57 +1427,6 @@ async def _delete_live_messages(
             for chat_id, message_id in message_ids.items()
         )
     )
-
-
-async def _finalize_call_ended_messages(
-    bot,
-    bot_data: dict,
-    settings,
-    live_call: LiveCall,
-    final_text: str,
-) -> None:
-    """Edit ON CALL posts to CALL ENDED; send a fresh message if edit fails."""
-    if not live_call.message_ids:
-        await send_to_notify_chats(
-            bot,
-            settings,
-            bot_data,
-            text=final_text,
-        )
-        return
-
-    failed_chats: list[int] = []
-    for chat_id, message_id in live_call.message_ids.items():
-        edited = await _edit_one_live_message(
-            bot,
-            bot_data,
-            chat_id=chat_id,
-            message_id=message_id,
-            text=final_text,
-            reply_markup=None,
-        )
-        if not edited:
-            failed_chats.append(chat_id)
-
-    if not failed_chats:
-        return
-
-    logger.warning(
-        "CALL ENDED edit failed for ext %s chats %s — sending new message",
-        live_call.extension,
-        failed_chats,
-    )
-
-    async def _send_off(chat_id: int) -> None:
-        await _telegram_send_message(
-            bot,
-            bot_data,
-            chat_id=chat_id,
-            text=final_text,
-            inline=True,
-        )
-
-    await asyncio.gather(*(_send_off(cid) for cid in failed_chats))
 
 
 async def _edit_one_live_message(
