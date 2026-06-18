@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+from telegram.error import BadRequest
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -256,13 +257,13 @@ def _format_card_prompt(
         starter_username, starter_display_name, starter_user_id
     )
     if starter_user_id == finisher_user_id:
-        team = f"{finisher} · started and finished"
+        team = f"{finisher} · starter and finisher"
     else:
         team = f"Starter {starter} → Finisher {finisher}"
     return (
         f"🔥 {amount_str} OUT 🔥\n\n"
         f"💸 {team}\n\n"
-        "💳 Reply to this message and add the last 4 digits of the card — "
+        "💳 Reply to this message and add the last 4 digits of the cc — "
         "⚠️If you fail to do so you will not be paid⚠️"
     )
 
@@ -1229,13 +1230,23 @@ async def _send_payments_summary(
     bio.seek(0)
     try:
         if edit_message is not None:
-            await edit_message.edit_media(
-                media=InputMediaPhoto(media=bio, caption=caption),
-                reply_markup=keyboard,
-            )
+            try:
+                await context.bot.edit_message_media(
+                    chat_id=edit_message.chat_id,
+                    message_id=edit_message.message_id,
+                    media=InputMediaPhoto(media=bio, caption=caption),
+                    reply_markup=keyboard,
+                )
+            except BadRequest as exc:
+                if "message is not modified" in str(exc).lower():
+                    return
+                raise
             return
+        reply_bio = BytesIO(png)
+        reply_bio.name = "payments.png"
+        reply_bio.seek(0)
         await message.reply_photo(
-            photo=bio,
+            photo=reply_bio,
             caption=caption,
             reply_markup=keyboard,
         )

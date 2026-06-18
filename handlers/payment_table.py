@@ -230,8 +230,8 @@ def payment_totals_table_row(
     if not full_excel:
         return [
             "",
-            total_label,
-            format_amount(total_amount),
+            f"{total_label}  {format_amount(total_amount)}",
+            "",
             count_label,
             "",
             "",

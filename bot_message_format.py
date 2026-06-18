@@ -142,3 +142,12 @@ def apply_bot_bold_patch() -> None:
         )
 
     Bot.edit_message_media = edit_message_media_bold
+
+    orig_edit_media = Message.edit_media
+
+    @wraps(orig_edit_media)
+    async def edit_media_bold(self, media, *args, **kwargs):
+        media = _bold_caption_media(media)
+        return await orig_edit_media(self, media, *args, **kwargs)
+
+    Message.edit_media = edit_media_bold

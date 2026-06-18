@@ -48,9 +48,10 @@ _STAMP_SIZE = 16
 _CELL_PAD = 16
 
 _ID_COL = 0
+_CARD_COL = 5
 _CLEARED_COL = 6
-_MIN_COL_WIDTHS_FULL = (72, 104, 92, 120, 120, 56, 72, 96, 104, 96)
-_MIN_COL_WIDTHS_COMPACT = (72, 104, 92, 132, 132, 56, 72)
+_MIN_COL_WIDTHS_FULL = (72, 120, 96, 140, 140, 80, 88, 96, 104, 96)
+_MIN_COL_WIDTHS_COMPACT = (72, 120, 96, 140, 140, 80, 88)
 
 
 def live_report_title(bot_display_name: str) -> str:
@@ -114,36 +115,47 @@ def _cleared_cell_color(value: str) -> str:
     return _BODY_TEXT
 
 
-def _fit_text(draw, text: str, font, max_width: int) -> str:
-    if not text:
-        return ""
-    if draw.textlength(text, font=font) <= max_width:
-        return text
-    trimmed = text
-    while trimmed and draw.textlength(trimmed + "…", font=font) > max_width:
-        trimmed = trimmed[:-1]
-    return (trimmed + "…") if trimmed else "…"
+def _cell_draw_font(
+    col_index: int,
+    *,
+    header: bool,
+    total: bool,
+    stamp: bool,
+    is_id_value: bool,
+    is_cleared_value: bool,
+):
+    if stamp:
+        return _cached_font(_s(_STAMP_SIZE), False)
+    if header or total or is_id_value or is_cleared_value:
+        return _cached_font(_s(_BODY_SIZE), True)
+    return _cached_font(_s(_BODY_SIZE), False)
 
 
 def _measure_col_widths(
     draw,
-    rows: list[tuple[list[str], bool]],
+    rows: list[tuple[list[str], bool, bool, bool]],
     *,
     min_widths: tuple[int, ...],
 ) -> list[int]:
     widths = [_s(w) for w in min_widths]
-    font_body = _cached_font(_s(_BODY_SIZE), False)
-    font_header = _cached_font(_s(_BODY_SIZE), True)
     pad = _s(_CELL_PAD)
 
-    for cells, is_header in rows:
-        font = font_header if is_header else font_body
+    for cells, header, total, stamp in rows:
         for i in range(min(len(widths), len(cells))):
             cell = cells[i]
             if not cell:
                 continue
-            cell_font = font_header if i == _ID_COL else font
-            need = int(draw.textlength(cell, font=cell_font)) + pad
+            is_id = i == _ID_COL and not header and not total
+            is_cleared = i == _CLEARED_COL and not header and not total
+            font = _cell_draw_font(
+                i,
+                header=header,
+                total=total,
+                stamp=stamp,
+                is_id_value=is_id,
+                is_cleared_value=is_cleared,
+            )
+            need = int(draw.textlength(cell, font=font)) + pad
             widths[i] = max(widths[i], need)
     return widths
 
@@ -157,6 +169,16 @@ def _fit_id_column(draw, col_w: list[int], body_rows: list[list[str]]) -> None:
             longest = row[0] if len(row[0]) > len(longest) else longest
     need = int(draw.textlength(longest, font=font_id)) + pad
     col_w[_ID_COL] = max(col_w[_ID_COL], need)
+
+
+def _fit_header_columns(draw, col_w: list[int], header_cells: list[str]) -> None:
+    font = _cached_font(_s(_BODY_SIZE), True)
+    pad = _s(_CELL_PAD) + _s(4)
+    for i, label in enumerate(header_cells):
+        if i >= len(col_w) or not label:
+            continue
+        need = int(draw.textlength(label, font=font)) + pad
+        col_w[i] = max(col_w[i], need)
 
 
 def render_payments_table_png(
@@ -199,14 +221,12 @@ def render_payments_table_png(
         for record in shown
     ]
 
-    stamp_cells = [""] * len(header_cells)
-    stamp_cells[-1] = format_image_footer(live=live)
+    stamp_text = format_image_footer(live=live)
 
-    measure_rows: list[tuple[list[str], bool]] = [
-        (header_cells, True),
-        *[(row, False) for row in body_rows],
-        (totals, True),
-        (stamp_cells, False),
+    measure_rows: list[tuple[list[str], bool, bool, bool]] = [
+        (header_cells, True, False, False),
+        *[(row, False, False, False) for row in body_rows],
+        (totals, False, True, False),
     ]
 
     probe = Image.new("RGB", (4, 4), _BG)
@@ -214,6 +234,7 @@ def render_payments_table_png(
     min_widths = _MIN_COL_WIDTHS_FULL if full_excel else _MIN_COL_WIDTHS_COMPACT
     col_w = _measure_col_widths(probe_draw, measure_rows, min_widths=min_widths)
     _fit_id_column(probe_draw, col_w, body_rows)
+    _fit_header_columns(probe_draw, col_w, header_cells)
 
     pad = _s(_PAD)
     table_inner_w = sum(col_w)
@@ -222,15 +243,14 @@ def render_payments_table_png(
     has_title = bool(title)
     title_block = _s(34) if has_title else 0
     row_h = _s(_ROW_H)
-    n_rows = len(shown) + 3
-    table_h = pad + title_block + n_rows * row_h + pad
+    footer_h = _s(30)
+    n_rows = len(shown) + 2
+    table_h = pad + title_block + n_rows * row_h + footer_h + pad
 
     img = Image.new("RGB", (table_w, table_h), _BG)
     draw = ImageDraw.Draw(img)
 
     font_title = _cached_font(_s(_TITLE_SIZE), True)
-    font_body = _cached_font(_s(_BODY_SIZE), False)
-    font_header = _cached_font(_s(_BODY_SIZE), True)
     font_stamp = _cached_font(_s(_STAMP_SIZE), False)
 
     x0 = pad
@@ -261,40 +281,33 @@ def render_payments_table_png(
         text_color: str,
         header: bool = False,
         total: bool = False,
-        stamp: bool = False,
     ) -> None:
         nonlocal y
-        f = font_header if header or total else font_stamp if stamp else font_body
         draw.rectangle((x0, y, x0 + table_inner_w, y + row_h), fill=bg)
         for i, w in enumerate(col_w):
             cell = cells[i] if i < len(cells) else ""
-            inner_w = max(_s(10), w - _s(_CELL_PAD))
-            if i == _ID_COL and cell and not header and not total:
+            is_id = i == _ID_COL and cell and not header and not total
+            is_cleared = i == _CLEARED_COL and cell and not header and not total
+            f_cell = _cell_draw_font(
+                i,
+                header=header,
+                total=total,
+                stamp=False,
+                is_id_value=is_id,
+                is_cleared_value=is_cleared,
+            )
+            if is_id:
                 color = _ID_TEXT
-                f_cell = font_header
-            elif i == _CLEARED_COL and cell and not header and not total:
+            elif is_cleared:
                 color = _cleared_cell_color(cell)
-                f_cell = font_header
-            elif stamp and i == len(col_w) - 1:
-                color = _STAMP_TEXT
-                f_cell = font_stamp
             elif total:
                 color = _TOTAL_TEXT
-                f_cell = font_header
             elif header:
                 color = _HEADER_TEXT
-                f_cell = font_header
             else:
                 color = text_color
-                f_cell = f
-            if i == _ID_COL and cell and not header and not total:
-                label = cell
-            else:
-                label = _fit_text(draw, cell, f_cell, inner_w)
+            label = cell
             cx = col_x[i] + _s(8)
-            if stamp and i == len(col_w) - 1:
-                text_w = int(draw.textlength(label, font=f_cell))
-                cx = col_x[i] + w - text_w - _s(8)
             draw.text((cx, y + text_y_off), label, fill=color, font=f_cell)
             draw.line((col_x[i] + w, y, col_x[i] + w, y + row_h), fill=_GRID, width=grid_w)
         draw.line((x0, y + row_h, x0 + table_inner_w, y + row_h), fill=_GRID, width=grid_w)
@@ -305,7 +318,11 @@ def render_payments_table_png(
         bg, txt = _row_style(record.cleared)
         draw_row(cells, bg=bg, text_color=txt)
     draw_row(totals, bg=_TOTAL_BG, text_color=_TOTAL_TEXT, total=True)
-    draw_row(stamp_cells, bg=_SHEET_BG, text_color=_STAMP_TEXT, stamp=True)
+
+    footer_y = y + _s(6)
+    footer_w = int(draw.textlength(stamp_text, font=font_stamp))
+    footer_x = x0 + max(_s(8), table_inner_w - footer_w - _s(8))
+    draw.text((footer_x, footer_y), stamp_text, fill=_STAMP_TEXT, font=font_stamp)
 
     buf = BytesIO()
     img.save(buf, format="PNG", optimize=False)
