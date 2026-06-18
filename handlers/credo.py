@@ -45,6 +45,7 @@ from telegram.error import Forbidden
 PHOTO_FILTER = filters.PHOTO | filters.Document.IMAGE
 CALLBACK_CARD_PREFIX = "credocard:"
 CREDO_LOG_PROMPT_KEY = "credo_log_prompts"
+CREDO_LOG_ORIGIN_KEY = "credo_log_origins"
 
 UNAUTHORIZED = (
     "You are not on the credo whitelist. Ask an admin to add you with /addcredouser."
@@ -114,6 +115,30 @@ def _lookup_credo_log_prompt(bot_data: dict, *, chat_id: int, message_id: int) -
     return _credo_log_prompts(bot_data).get((chat_id, message_id))
 
 
+def _credo_log_origins(bot_data: dict) -> dict[tuple[int, str], int]:
+    return bot_data.setdefault(CREDO_LOG_ORIGIN_KEY, {})
+
+
+def _register_credo_log_origin(
+    bot_data: dict, *, user_id: int, card_name: str, origin_chat_id: int
+) -> None:
+    _credo_log_origins(bot_data)[(user_id, card_name.strip().lower())] = origin_chat_id
+
+
+def _get_credo_log_origin(bot_data: dict, *, user_id: int, card_name: str) -> int | None:
+    return _credo_log_origins(bot_data).get((user_id, card_name.strip().lower()))
+
+
+def _resolve_public_credo_chat(
+    settings: Settings, bot_data: dict, *, user_id: int, card_name: str
+) -> int | None:
+    origin = _get_credo_log_origin(bot_data, user_id=user_id, card_name=card_name)
+    if origin is not None:
+        return origin
+    notify = bot_data.get("notify_chat_id") or settings.notify_chat_id
+    return notify
+
+
 def _count_credo_users(database_path: str, card_name: str) -> int:
     usages = list_credo_card_usage(database_path, card_name, limit=500)
     return len({entry.telegram_user_id for entry in usages})
@@ -128,10 +153,10 @@ def _format_usage_people_count(database_path: str, card_name: str) -> str:
 
 def _format_reply_required_notice() -> str:
     return (
-        "🚨 **YOU MUST REPLY TO THIS MESSAGE** with how much you've sent "
+        "🚨 **YOU MUST REPLY TO THIS MESSAGE IN YOUR DMs** with how much you've sent "
         "(e.g. `500` or `£500`).\n\n"
-        "**Do not skip this.** If you don't reply, the limit won't update and "
-        "everyone else will have the wrong balance — that causes problems for the whole team."
+        "**Do not skip this.** If you don't reply here in private, the limit won't update "
+        "and everyone else will have the wrong balance — that causes problems for the whole team."
     )
 
 
@@ -194,8 +219,8 @@ async def _prompt_choose_card(
     context.user_data["credo_cards"] = cards
     await message.reply_text(
         f"💳 **Credo cards**\n\n{_format_cards_list(settings, cards)}\n\n"
-        "Pick one — the **photo** goes **only to your DMs**.\n"
-        "After that you **must reply to the bot's message** with how much you've sent.\n\n"
+        "Pick one — the **photo** and amount reply go **only in your DMs**.\n"
+        "After you get the card, **reply in your DMs** with how much you've sent.\n\n"
         "Tap a button or reply with a **number** (e.g. `1`).",
         parse_mode="Markdown",
         reply_markup=_card_keyboard(cards),
@@ -266,10 +291,13 @@ async def _deliver_credo_card(
 
     context.user_data.pop("credo_selected_card", None)
 
-    prompt_text = (
+    dm_prompt_text = (
         f"Sent **{card.name}** to your DMs get worksy! 🔥\n\n"
         f"{limit_block}\n\n"
         f"{_format_reply_required_notice()}"
+    )
+    origin_chat_id = (
+        reply_target.chat.id if reply_target.chat.type != "private" else None
     )
 
     if sent_to_dm:
@@ -280,7 +308,22 @@ async def _deliver_credo_card(
             created_by_user_id=sender_user.id,
             created_by_username=sender_user.username,
         )
-        prompt = await reply_target.reply_text(prompt_text, parse_mode="Markdown")
+        if origin_chat_id is not None:
+            await reply_target.reply_text(
+                f"Sent **{card.name}** to your DMs get worksy! 🔥\n\n"
+                "Check your **DMs** — you **must reply there** with how much you've sent. "
+                "Not in this chat.",
+                parse_mode="Markdown",
+            )
+            prompt = await bot.send_message(
+                chat_id=sender_user.id,
+                text=dm_prompt_text,
+                parse_mode="Markdown",
+            )
+        else:
+            prompt = await reply_target.reply_text(
+                dm_prompt_text, parse_mode="Markdown"
+            )
     else:
         pending = context.application.bot_data.setdefault("credo_pending", {})
         pending[sender_user.id] = card.name
@@ -301,11 +344,12 @@ async def _deliver_credo_card(
                 )
         except Exception:
             pass
-        prompt = await reply_target.reply_text(
+        prompt = None
+        await reply_target.reply_text(
             f"Could not DM **{card.name}** — the card is **not** posted in this chat.\n\n"
             f"{limit_block}\n\n"
-            "Tap the button below, press **Start**, then send /credos again.\n\n"
-            f"{_format_reply_required_notice()}",
+            "Tap the button below, press **Start**, then send /credos again.\n"
+            "You must log the amount **in your DMs** with the bot — not in this chat.",
             parse_mode="Markdown",
             reply_markup=keyboard,
         )
@@ -317,6 +361,13 @@ async def _deliver_credo_card(
             message_id=prompt.message_id,
             card_name=card.name,
         )
+        if origin_chat_id is not None:
+            _register_credo_log_origin(
+                context.application.bot_data,
+                user_id=sender_user.id,
+                card_name=card.name,
+                origin_chat_id=origin_chat_id,
+            )
 
     return ConversationHandler.END
 
@@ -358,11 +409,27 @@ async def _log_card_usage(
     )
     user_label = _user_label(user)
     limit_block = _format_card_limit_block(settings, card_name)
-    await message.reply_text(
+    summary = (
         f"📊 **{card_name}** — {user_label} logged {format_amount(amount)}.\n\n"
-        f"{limit_block}",
+        f"{limit_block}"
+    )
+    await message.reply_text(
+        f"✅ Logged {format_amount(amount)} on **{card_name}**.\n\n{limit_block}",
         parse_mode="Markdown",
     )
+
+    public_chat_id = _resolve_public_credo_chat(
+        settings,
+        context.application.bot_data,
+        user_id=user.id,
+        card_name=card_name,
+    )
+    if public_chat_id is not None and message.chat_id != public_chat_id:
+        await context.bot.send_message(
+            chat_id=public_chat_id,
+            text=summary,
+            parse_mode="Markdown",
+        )
 
 
 def build_credo_handlers() -> list:
@@ -570,6 +637,21 @@ async def credos_choose_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def credo_reply_log_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not message.text or not message.reply_to_message:
+        return
+
+    if message.chat.type != "private":
+        reply = message.reply_to_message
+        if (
+            reply.from_user
+            and reply.from_user.is_bot
+            and reply.from_user.id == context.bot.id
+        ):
+            await message.reply_text(
+                "Log the amount **in your DMs** with the bot — reply there to the bot's "
+                "private message, **not in this group**.",
+                parse_mode="Markdown",
+            )
+            raise ApplicationHandlerStop
         return
 
     reply = message.reply_to_message
