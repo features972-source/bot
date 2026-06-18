@@ -16,6 +16,8 @@ GROUP_ALLOWED_COMMANDS = frozenset(
         "creditcard",
         "credo",
         "credos",
+        "activeccs",
+        "usingccs",
         "setnotify",
         "setnotifypayments",
     }

@@ -30,6 +30,7 @@ from database import (
     list_credo_credit_cards,
     list_credo_card_usage,
     list_credo_whitelist,
+    list_links,
     record_credo_card_usage,
     remove_credo_credit_card,
     remove_credo_whitelist_user,
@@ -49,6 +50,7 @@ from handlers.admin_access import (
 from handlers.chat_scope import PM_ONLY
 from handlers.payments import parse_payment_amount
 from money_format import format_amount
+from notify import format_duration
 from telegram.error import Forbidden
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,7 @@ CREDO_LOG_PROMPT_KEY = "credo_log_prompts"
 CREDO_LOG_ORIGIN_KEY = "credo_log_origins"
 CREDO_ACTIVE_SESSIONS_KEY = "credo_active_sessions"
 CREDO_PICKER_COMMANDS = ("cc", "creditcard", "credo", "credos")
+ACTIVECCS_COMMANDS = ("activeccs", "usingccs")
 CREDO_START_ARGS = frozenset(CREDO_PICKER_COMMANDS)
 CREDO_REMINDER_INTERVAL_SECONDS = 15 * 60
 CREDO_ACTIVE_ALLOWED_COMMANDS = frozenset({
@@ -68,6 +71,8 @@ CREDO_ACTIVE_ALLOWED_COMMANDS = frozenset({
     "cancel",
     "blastmode",
     "blastmodeoff",
+    "activeccs",
+    "usingccs",
     "payments",
     "sent",
     "alltimepayments",
@@ -184,6 +189,47 @@ def start_credo_session(
 
 def end_credo_session(bot_data: dict, user_id: int) -> CredoActiveSession | None:
     return _active_credo_sessions(bot_data).pop(user_id, None)
+
+
+def _session_user_label(database_path: str, user_id: int) -> str:
+    for entry in list_credo_whitelist(database_path):
+        if entry.telegram_user_id == user_id:
+            return _stored_user_label(
+                entry.telegram_username,
+                entry.display_name,
+                entry.telegram_user_id,
+            )
+    for link in list_links(database_path):
+        if link.telegram_user_id == user_id:
+            if link.telegram_username:
+                label = f"@{link.telegram_username.lstrip('@')}"
+                if link.display_name:
+                    return f"{label} ({link.display_name})"
+                return label
+            if link.display_name:
+                return link.display_name
+    return f"id `{user_id}`"
+
+
+def format_active_credo_sessions(settings: Settings, bot_data: dict) -> str:
+    sessions = _active_credo_sessions(bot_data)
+    if not sessions:
+        return "💳 **No cards in use** — nobody has an active /cc session."
+
+    now = time.time()
+    rows: list[tuple[str, str, int]] = []
+    for user_id, session in sessions.items():
+        display_label = _format_card_label(settings.database_path, session.card_name)
+        elapsed = max(0, int(now - session.started_at))
+        user_label = _session_user_label(settings.database_path, user_id)
+        rows.append((display_label, user_label, elapsed))
+
+    rows.sort(key=lambda row: row[0].lower())
+
+    lines = [f"💳 **Cards in use** ({len(rows)})", ""]
+    for display_label, user_label, elapsed in rows:
+        lines.append(f"• **{display_label}** — {user_label} · {format_duration(elapsed)}")
+    return "\n".join(lines)
 
 
 def apply_credo_usage_from_payment_out(
@@ -719,6 +765,21 @@ async def credo_active_command_guard(
     raise ApplicationHandlerStop
 
 
+async def activeccs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    user = update.effective_user
+    message = update.effective_message
+    if not user or not message:
+        return
+
+    if not is_credo_allowed(settings, settings.database_path, user.id):
+        await message.reply_text(UNAUTHORIZED)
+        return
+
+    text = format_active_credo_sessions(settings, context.application.bot_data)
+    await message.reply_text(text, parse_mode="Markdown")
+
+
 async def credo_finished_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     user = update.effective_user
@@ -916,6 +977,10 @@ def build_credo_handlers() -> list:
         CommandHandler("blastmode", blastmode_command, filters=PM_ONLY),
         CommandHandler("blastmodeoff", blastmodeoff_command, filters=PM_ONLY),
         CommandHandler("finished", credo_finished_command, filters=PM_ONLY),
+        *[
+            CommandHandler(command, activeccs_command)
+            for command in ACTIVECCS_COMMANDS
+        ],
         CallbackQueryHandler(credos_standalone_callback, pattern=r"^credocard:\d+$"),
         CommandHandler("addcredouser", addcredouser_command, filters=PM_ONLY),
         CommandHandler("removecredouser", removecredouser_command, filters=PM_ONLY),

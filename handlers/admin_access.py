@@ -36,16 +36,19 @@ MENU_BOT_COMMANDS = [
 ADMIN_BOT_COMMANDS = MENU_BOT_COMMANDS + [
     BotCommand("blastmode", "Turn credo card picking on/off"),
     BotCommand("blastmodeoff", "Turn blast mode off"),
+    BotCommand("activeccs", "See which cards are in use"),
 ]
 
 CREDO_USER_COMMANDS = MENU_BOT_COMMANDS + [
     BotCommand("cc", "View credo cards & capacity"),
+    BotCommand("activeccs", "See which cards are in use"),
     BotCommand("finished", "End active credo session"),
 ]
 
 CREDO_GROUP_COMMANDS = [
     BotCommand("cc", "Pick a credo card (when blast mode is on)"),
     BotCommand("credos", "Pick a credo card (when blast mode is on)"),
+    BotCommand("activeccs", "See which cards are in use"),
 ]
 
 
