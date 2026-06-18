@@ -10,8 +10,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
 
-from telegram import InputMediaPhoto, Update
-from telegram.ext import CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 
 from config import Settings
 from call_display import format_extension_user_plain
@@ -42,7 +49,7 @@ from database import (
     update_payment_cleared,
 )
 from handlers.admin_access import is_bot_admin, require_admin
-from handlers.payment_table import format_image_subtitle, status_summary_totals
+from handlers.payment_table import format_image_subtitle, status_summary_totals, PAYMENTS_PAGE_SIZE
 from handlers.payment_table_image import live_report_title, render_payments_table_png
 from handlers.stats_period import (
     _parse_stats_period,
@@ -143,6 +150,7 @@ def build_payment_command_handlers() -> list:
         CommandHandler("paidside", paidside_command),
         CommandHandler("excelwebauth", excelwebauth_command),
         CommandHandler("myid", myid_command),
+        CallbackQueryHandler(payments_page_callback, pattern=r"^paypage:"),
     ]
 
 
@@ -227,7 +235,7 @@ _PAYMENTS_LIST_LIMIT = 25
 
 
 def _format_card_saved_reply(payment_id: int) -> str:
-    return f"✅ Added to the system · **#{payment_id}**"
+    return f"✅ Added to the system · Payment #{payment_id}"
 
 
 def _format_card_prompt(
@@ -248,14 +256,14 @@ def _format_card_prompt(
         starter_username, starter_display_name, starter_user_id
     )
     if starter_user_id == finisher_user_id:
-        team = f"{starter} · starter & finisher"
+        team = f"{finisher} · started and finished"
     else:
         team = f"Starter {starter} → Finisher {finisher}"
     return (
         f"🔥 {amount_str} OUT 🔥\n\n"
         f"💸 {team}\n\n"
-        "💳 Reply to **this message** and add the last **4 digits** of the card "
-        "(e.g. `1234`) — or it will **not** be added to the system."
+        "💳 Reply to this message and add the last 4 digits of the card — "
+        "⚠️If you fail to do so you will not be paid⚠️"
     )
 
 
@@ -674,16 +682,7 @@ async def _finalize_payment_out(
     except Exception:
         logger.exception("Payment report refresh failed")
     if settings.payments_onedrive_path:
-        timer_msg = await message.reply_text(
-            f"⏳ Updating Excel… ~{SYNC_ESTIMATE_SECONDS}s remaining"
-        )
-        await excel_sync_with_timer(
-            context.bot,
-            chat_id=timer_msg.chat_id,
-            message_id=timer_msg.message_id,
-            settings=settings,
-            show_full_detail=False,
-        )
+        schedule_payments_excel_sync(settings)
 
 
 async def _try_complete_pending_card(
@@ -1009,13 +1008,75 @@ def _payment_records_for_period(
     return records[:limit]
 
 
+def _payment_page_slice(
+    records: list[PaymentRecord], page: int, *, page_size: int = PAYMENTS_PAGE_SIZE
+) -> tuple[list[PaymentRecord], int, int, str]:
+    """Return (page_records, page_index, total_pages, page_info label)."""
+    total = len(records)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page_index = max(0, min(page, total_pages - 1))
+    start = page_index * page_size
+    chunk = records[start : start + page_size]
+    end = start + len(chunk)
+    page_info = f"Page {page_index + 1}/{total_pages} · {start + 1}–{end} of {total}"
+    return chunk, page_index, total_pages, page_info
+
+
+def _payments_page_keyboard(
+    *, scope: str, page: int, total_pages: int
+) -> InlineKeyboardMarkup | None:
+    if total_pages <= 1:
+        return None
+    row: list[InlineKeyboardButton] = []
+    if page > 0:
+        row.append(
+            InlineKeyboardButton("◀ Prev", callback_data=f"paypage:{scope}:{page - 1}")
+        )
+    row.append(
+        InlineKeyboardButton(
+            f"{page + 1} / {total_pages}", callback_data="paypage:noop:0"
+        )
+    )
+    if page < total_pages - 1:
+        row.append(
+            InlineKeyboardButton("Next ▶", callback_data=f"paypage:{scope}:{page + 1}")
+        )
+    return InlineKeyboardMarkup([row])
+
+
+def _payments_summary_caption(
+    *,
+    since: datetime | None,
+    include_admin: bool,
+    total_pages: int = 1,
+) -> str | None:
+    caption_parts = []
+    if since is not None:
+        caption_parts.append(
+            "<i>This week’s payments · new week every Sunday</i>\n"
+            "<i>/alltimepayments — full history</i>"
+        )
+    else:
+        caption_parts.append("<i>All payments on record</i>")
+    if total_pages > 1:
+        caption_parts.append(
+            f"<i>{PAYMENTS_PAGE_SIZE} per page — use buttons below to browse</i>"
+        )
+    if include_admin:
+        caption_parts.append(
+            "<i>Admin: use # from table in bot DM — /setcleared 12 · /setpayment 12 amount</i>"
+        )
+    return "\n".join(caption_parts)
+
+
 def _build_payments_summary_image(
     settings: Settings,
     *,
     since: datetime | None,
     period_label: str,
-    records: list[PaymentRecord],
-) -> bytes | list[bytes]:
+    all_records: list[PaymentRecord],
+    page: int = 0,
+) -> tuple[bytes, int, int]:
     total_count, total_amount = get_payment_totals(settings.database_path, since=since)
     pending_count, pending_amount = get_payment_totals(
         settings.database_path, since=since, pending=True
@@ -1041,25 +1102,27 @@ def _build_payments_summary_image(
         not_cleared_amount=not_cleared_amount,
         not_cleared_count=not_cleared_count,
     )
-    title = live_report_title(settings.bot_display_name)
-    total_label = "WEEK TOTAL"
-    if since is None:
-        title = "All-time payments"
-        total_label = "ALL TIME"
-    return render_payments_table_png(
-        records,
+    title = ""
+    total_label = "TOTAL"
+    page_records, page_index, total_pages, page_info = _payment_page_slice(
+        all_records, page
+    )
+    png = render_payments_table_png(
+        page_records,
         database_path=settings.database_path,
         total_amount=total_amount,
         total_count=total_count,
         lookup_records=lookup_records,
+        totals_records=all_records,
         title=title,
-        subtitle=format_image_subtitle(period_label) if since is not None else "Every payment on record",
+        subtitle="",
         status_totals=status_totals,
         live=False,
-        full_excel=False,
+        full_excel=True,
         total_label=total_label,
-        mobile=True,
+        page_info=page_info,
     )
+    return png, page_index, total_pages
 
 
 async def _send_payments_summary(
@@ -1069,6 +1132,8 @@ async def _send_payments_summary(
     since: datetime | None,
     period_label: str,
     empty_text: str,
+    page: int = 0,
+    edit_message=None,
 ) -> None:
     settings: Settings = context.bot_data["settings"]
     if not await _require_payment_view(update, settings, context.bot_data):
@@ -1088,71 +1153,101 @@ async def _send_payments_summary(
     include_admin = bool(
         user and is_bot_admin(settings, settings.database_path, user.id)
     )
+    scope = "week" if since is not None else "all"
     try:
-        result = await asyncio.to_thread(
+        png, page_index, total_pages = await asyncio.to_thread(
             _build_payments_summary_image,
             settings,
             since=since,
             period_label=period_label,
-            records=records,
+            all_records=records,
+            page=page,
         )
     except Exception:
         logger.exception("Failed to build payments summary image")
-        await message.reply_text(
+        target = edit_message or message
+        await target.reply_text(
             "Could not build the payment table image. Try again in a moment."
         )
         return
 
-    pages = result if isinstance(result, list) else [result]
+    caption = _payments_summary_caption(
+        since=since, include_admin=include_admin, total_pages=total_pages
+    )
+    keyboard = _payments_page_keyboard(
+        scope=scope, page=page_index, total_pages=total_pages
+    )
 
-    caption_parts = []
-    if since is not None:
-        caption_parts.append(
-            "<i>This week’s payments · new week every Sunday</i>\n"
-            "<i>/alltimepayments — full history</i>"
-        )
-    else:
-        caption_parts.append("<i>All payments on record</i>")
-    if len(pages) > 1:
-        caption_parts.append(
-            f"<i>{len(pages)} pages — swipe through all images</i>"
-        )
-    if include_admin:
-        caption_parts.append(
-            "<i>Admin: use # from table in bot DM — /setcleared 12 · /setpayment 12 amount</i>"
-        )
-    caption = "\n".join(caption_parts) if caption_parts else None
-
+    bio = BytesIO(png)
+    bio.name = "payments.jpg"
+    bio.seek(0)
     try:
-        if len(pages) == 1:
-            bio = BytesIO(pages[0])
-            bio.name = "payments.jpg"
-            bio.seek(0)
-            await message.reply_photo(
-                photo=bio,
-                caption=caption,
-                parse_mode="HTML",
+        if edit_message is not None:
+            await edit_message.edit_media(
+                media=InputMediaPhoto(media=bio, caption=caption, parse_mode="HTML"),
+                reply_markup=keyboard,
             )
             return
-
-        media: list[InputMediaPhoto] = []
-        for index, png in enumerate(pages):
-            bio = BytesIO(png)
-            bio.name = f"payments-{index + 1}.jpg"
-            bio.seek(0)
-            media.append(
-                InputMediaPhoto(
-                    media=bio,
-                    caption=caption if index == 0 else None,
-                    parse_mode="HTML" if index == 0 else None,
-                )
-            )
-        await message.reply_media_group(media=media)
+        await message.reply_photo(
+            photo=bio,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
     except Exception:
         logger.exception("Failed to send payments summary image")
         await message.reply_text(
             "Could not send the payment table image. Try again in a moment."
         )
+
+
+async def payments_page_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = update.callback_query
+    if query is None or not query.data:
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3 or parts[0] != "paypage":
+        return
+    if parts[1] == "noop":
+        await query.answer()
+        return
+
+    settings: Settings = context.bot_data["settings"]
+    if not await _require_payment_view(update, settings, context.bot_data):
+        await query.answer("Not allowed.", show_alert=True)
+        return
+
+    try:
+        page = int(parts[2])
+    except ValueError:
+        await query.answer()
+        return
+
+    scope = parts[1]
+    if scope == "week":
+        since, period_label = current_payment_week_start()
+        empty_text = ""
+    elif scope == "all":
+        since = None
+        period_label = "all time"
+        empty_text = ""
+    else:
+        await query.answer()
+        return
+
+    await query.answer()
+    await _send_payments_summary(
+        update,
+        context,
+        since=since,
+        period_label=period_label,
+        empty_text=empty_text,
+        page=page,
+        edit_message=query.message,
+    )
 
 
 async def payments_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

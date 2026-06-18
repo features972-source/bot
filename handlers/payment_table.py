@@ -34,6 +34,8 @@ TABLE_HEADERS_FULL = (
 
 TABLE_HEADERS = TABLE_HEADERS_FULL
 
+PAYMENTS_PAGE_SIZE = 20
+
 
 def table_headers(*, full_excel: bool = True) -> tuple[str, ...]:
     return TABLE_HEADERS_FULL if full_excel else TABLE_HEADERS_COMPACT

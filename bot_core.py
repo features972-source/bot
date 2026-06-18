@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from telegram.error import Conflict
 from telegram.ext import Application
 
+from bot_message_format import apply_bot_bold_patch
 from instance_lock import acquire_single_instance_lock
 from instance_registry import register_instance, register_bot
 from call_control_listener import start_call_control_listener
@@ -41,6 +42,7 @@ class BotRuntime:
 
 
 def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
+    apply_bot_bold_patch()
     if settings.cloud_deployed and not settings.persistent_data:
         logger.warning(
             "[%s] DATA NOT PERSISTENT — database is at %s.",

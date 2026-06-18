@@ -24,6 +24,7 @@ from database import (
 )
 from handlers.admin_access import require_admin
 from handlers.payment_table import (
+    PAYMENTS_PAGE_SIZE,
     format_image_subtitle,
     status_summary_totals,
 )
@@ -89,17 +90,26 @@ def build_payment_report_image(settings: Settings) -> bytes | None:
         return None
 
     total_count, total_amount = get_payment_totals(settings.database_path, since=since)
+    shown = all_records[:PAYMENTS_PAGE_SIZE]
+    page_info = ""
+    if total_count > PAYMENTS_PAGE_SIZE:
+        page_info = (
+            f"Latest {len(shown)} of {total_count} payments "
+            f"(run /payments in DM to browse all)"
+        )
     return render_payments_table_png(
-        all_records,
+        shown,
         database_path=settings.database_path,
         total_amount=total_amount,
         total_count=total_count,
         lookup_records=all_records,
+        totals_records=all_records,
         title=live_report_title(settings.bot_display_name),
         subtitle=format_image_subtitle(period_label),
         status_totals=_status_totals(settings, since),
         live=True,
         full_excel=True,
+        page_info=page_info,
     )
 
 
