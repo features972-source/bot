@@ -11,6 +11,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 from config import Settings
 from database import (
+    PaymentRecord,
     clear_payment_notify_message_id,
     get_payment_notify_chat_id,
     get_payment_notify_message_id,
@@ -24,7 +25,6 @@ from instance_registry import get_instance, list_instances
 from payments_excel_export import (
     CENTRE_PAY_PERCENT,
     FINISHER_PAY_PERCENT,
-    HEADERS,
     STARTER_PAY_PERCENT,
     format_payment_sheet_updated_note,
     payment_sheet_data_rows,
@@ -37,8 +37,8 @@ logger = logging.getLogger(__name__)
 CALLBACK_PREFIX = "paynotify:"
 MAX_MESSAGE_LEN = 4096
 
-# Fixed-width columns matching the Excel export layout.
-_COL_WIDTHS = (11, 11, 12, 12, 5, 8, 14, 14, 14)
+_ROW_DIVIDER = "────────────────────────"
+_STATUS_LEGEND = "🟩 Cleared   🟧 Pending   🟥 Not cleared"
 
 
 def build_payment_report_handlers() -> list:
@@ -50,42 +50,66 @@ def build_payment_report_handlers() -> list:
     ]
 
 
-def _fit_cell(value: str, width: int) -> str:
-    text = value or ""
-    if len(text) <= width:
-        return text.ljust(width)
-    if width <= 1:
-        return text[:width]
-    return text[: width - 1] + "…"
+def _status_banner(cleared: bool | None) -> str:
+    if cleared is None:
+        return "🟧 <b>PENDING</b>"
+    if cleared:
+        return "🟩 <b>CLEARED</b>"
+    return "🟥 <b>NOT CLEARED</b>"
 
 
-def _format_sheet_row(cells: list[str]) -> str:
-    padded = [
-        _fit_cell(cells[i] if i < len(cells) else "", _COL_WIDTHS[i])
-        for i in range(len(_COL_WIDTHS))
+def _format_payment_block_html(record: PaymentRecord, row: list[str]) -> str:
+    amount, date, starter, finisher, card, _cleared, pay_starter, pay_finisher, pay_centre = row
+    lines = [
+        _status_banner(record.cleared),
+        f"💷 <b>{html.escape(amount)}</b>     📅 {html.escape(date)}",
+        (
+            f"👤 Starter: <b>{html.escape(starter or '—')}</b>"
+            f"     ➜ Finisher: <b>{html.escape(finisher)}</b>"
+        ),
     ]
-    return "".join(padded).rstrip()
+    if card:
+        lines.append(f"💳 Card ····{html.escape(card)}")
+    lines.append(
+        f"Pay starter: <b>{html.escape(pay_starter or '—')}</b>"
+        f"     Pay finisher: <b>{html.escape(pay_finisher)}</b>"
+        f"     Pay centre: <b>{html.escape(pay_centre)}</b>"
+    )
+    return "\n".join(lines)
 
 
-def _format_sheet_table(
-    records: list,
+def _format_totals_html(records: list[PaymentRecord]) -> str:
+    _total_label, amount, count, *_rest, pay_starter, pay_finisher, pay_centre = (
+        payment_sheet_totals_row(records)
+    )
+    return (
+        f"\n<b>━━━━━━━━  TOTAL  ━━━━━━━━</b>\n\n"
+        f"💷 <b>{html.escape(amount)}</b>     📋 {html.escape(count)}\n\n"
+        f"Pay starter: <b>{html.escape(pay_starter)}</b>\n"
+        f"Pay finisher: <b>{html.escape(pay_finisher)}</b>\n"
+        f"Pay centre: <b>{html.escape(pay_centre)}</b>\n\n"
+        f"<i>{html.escape(format_payment_sheet_updated_note())}</i>"
+    )
+
+
+def _format_report_body(
+    records: list[PaymentRecord],
     *,
     hidden_count: int = 0,
 ) -> str:
-    header = _format_sheet_row(list(HEADERS))
-    divider = "─" * min(len(header), 96)
-    lines = [header, divider]
-    lines.extend(_format_sheet_row(row) for row in payment_sheet_data_rows(records))
-    lines.append(divider)
-    lines.append(_format_sheet_row(payment_sheet_totals_row(records)))
+    data_rows = payment_sheet_data_rows(records)
+    blocks = [
+        _format_payment_block_html(record, row)
+        for record, row in zip(records, data_rows)
+    ]
+    body = f"\n\n{_ROW_DIVIDER}\n\n".join(blocks)
+    body += _format_totals_html(records)
     if hidden_count > 0:
-        lines.append(
-            f"… plus {hidden_count} older payment"
-            f"{'' if hidden_count == 1 else 's'} this week (see /payments)"
+        body += (
+            f"\n\n<i>… plus {hidden_count} older payment"
+            f"{'' if hidden_count == 1 else 's'} this week (see /payments)</i>"
         )
-    footer = format_payment_sheet_updated_note()
-    lines.append(f"{footer:>{len(header)}}")
-    return "\n".join(lines)
+    return body
 
 
 def _week_records(settings: Settings) -> tuple:
@@ -101,20 +125,20 @@ def build_payment_report_text(settings: Settings) -> str:
 
     title = (
         f"📊 <b>{html.escape(settings.bot_display_name)}</b>\n"
-        f"<i>{html.escape(period_label)}</i>"
+        f"<i>{html.escape(period_label)}</i>\n\n"
+        f"{_STATUS_LEGEND}"
     )
     if not all_records:
         return (
             f"{title}\n\n"
-            "<pre>No payments logged this week yet.</pre>\n\n"
+            "No payments logged this week yet.\n\n"
             f"<i>Same data as /payments · resets every Sunday</i>"
         )
 
     shown = list(all_records)
     hidden = 0
     while shown:
-        table = _format_sheet_table(shown, hidden_count=hidden)
-        body = f"{title}\n\n<pre>{html.escape(table)}</pre>"
+        body = f"{title}{_format_report_body(shown, hidden_count=hidden)}"
         if len(body) <= MAX_MESSAGE_LEN - 16:
             return body
         if len(shown) == 1:
@@ -122,8 +146,7 @@ def build_payment_report_text(settings: Settings) -> str:
         shown.pop()
         hidden += 1
 
-    table = _format_sheet_table(shown, hidden_count=hidden)
-    return f"{title}\n\n<pre>{html.escape(table)}</pre>"
+    return f"{title}{_format_report_body(shown, hidden_count=hidden)}"
 
 
 async def refresh_payment_report(bot, settings: Settings) -> None:
@@ -225,7 +248,7 @@ async def setnotifypayments_command(
         "💸 **Live payment list**\n\n"
         "Pick **Q1** or **Q2**. One message in this group will stay updated "
         "whenever payments are logged, edited, cleared, or removed.\n\n"
-        f"Same layout as the Excel sheet · /payments data (resets Sunday). "
+        f"Same data as the Excel sheet · /payments (resets Sunday). "
         f"Payouts: starter {STARTER_PAY_PERCENT}%, finisher {FINISHER_PAY_PERCENT}%, "
         f"owners {CENTRE_PAY_PERCENT}%.",
         parse_mode="Markdown",
