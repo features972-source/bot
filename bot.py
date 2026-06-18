@@ -150,6 +150,12 @@ def main() -> None:
             ready_check_shift_loop(app.bot, settings, app.bot_data),
             name="ready-check-shift",
         )
+        from handlers.credo import credo_reminder_loop
+
+        asyncio.create_task(
+            credo_reminder_loop(app.bot, settings, app.bot_data),
+            name="credo-reminder-loop",
+        )
         from onedrive_cloud_sync import remember_excel_web_url
 
         remember_excel_web_url(settings)

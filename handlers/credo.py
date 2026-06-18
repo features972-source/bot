@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
+from dataclasses import dataclass
 from enum import IntEnum, auto
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -42,12 +46,17 @@ from handlers.payments import parse_payment_amount
 from money_format import format_amount
 from telegram.error import Forbidden
 
+logger = logging.getLogger(__name__)
+
 PHOTO_FILTER = filters.PHOTO | filters.Document.IMAGE
 CALLBACK_CARD_PREFIX = "credocard:"
 CREDO_LOG_PROMPT_KEY = "credo_log_prompts"
 CREDO_LOG_ORIGIN_KEY = "credo_log_origins"
+CREDO_ACTIVE_SESSIONS_KEY = "credo_active_sessions"
 CREDO_PICKER_COMMANDS = ("cc", "creditcard", "credo", "credos")
 CREDO_START_ARGS = frozenset(CREDO_PICKER_COMMANDS)
+CREDO_REMINDER_INTERVAL_SECONDS = 15 * 60
+CREDO_ACTIVE_ALLOWED_COMMANDS = frozenset({"mail", "finished"})
 
 UNAUTHORIZED = (
     "You are not on the credo whitelist. Ask an admin to add you with /addcredouser."
@@ -67,6 +76,57 @@ class AddCardState(IntEnum):
     NAME = auto()
     CAPACITY = auto()
     PHOTO = auto()
+
+
+@dataclass
+class CredoActiveSession:
+    card_name: str
+    origin_chat_id: int | None
+    started_at: float
+    last_reminder_at: float
+
+
+def _active_credo_sessions(bot_data: dict) -> dict[int, CredoActiveSession]:
+    return bot_data.setdefault(CREDO_ACTIVE_SESSIONS_KEY, {})
+
+
+def has_active_credo_session(bot_data: dict, user_id: int) -> bool:
+    return user_id in _active_credo_sessions(bot_data)
+
+
+def get_active_credo_session(bot_data: dict, user_id: int) -> CredoActiveSession | None:
+    return _active_credo_sessions(bot_data).get(user_id)
+
+
+def start_credo_session(
+    bot_data: dict,
+    *,
+    user_id: int,
+    card_name: str,
+    origin_chat_id: int | None,
+) -> None:
+    now = time.time()
+    _active_credo_sessions(bot_data)[user_id] = CredoActiveSession(
+        card_name=card_name,
+        origin_chat_id=origin_chat_id,
+        started_at=now,
+        last_reminder_at=now,
+    )
+
+
+def end_credo_session(bot_data: dict, user_id: int) -> CredoActiveSession | None:
+    return _active_credo_sessions(bot_data).pop(user_id, None)
+
+
+def _command_name(text: str) -> str:
+    part = (text or "").strip().split()[0]
+    if "@" in part:
+        part = part.split("@", 1)[0]
+    return part.lstrip("/").lower()
+
+
+def is_credo_active_command_allowed(command_text: str) -> bool:
+    return _command_name(command_text) in CREDO_ACTIVE_ALLOWED_COMMANDS
 
 
 def is_credo_allowed(settings: Settings, database_path: str, user_id: int) -> bool:
@@ -153,12 +213,13 @@ def _format_usage_people_count(database_path: str, card_name: str) -> str:
     return f"Used by {count} people"
 
 
-def _format_reply_required_notice() -> str:
+def _format_dm_session_notice(card_name: str, limit_block: str) -> str:
     return (
-        "🚨 **YOU MUST REPLY TO THIS MESSAGE IN YOUR DMs** with how much you've sent "
-        "(e.g. `500` or `£500`).\n\n"
-        "**Do not skip this.** If you don't reply here in private, the limit won't update "
-        "and everyone else will have the wrong balance — that causes problems for the whole team."
+        f"Sent **{card_name}** to your DMs get worksy! 🔥\n\n"
+        f"{limit_block}\n\n"
+        "Type any payment amount here (e.g. `500` or `£500`) — **no need to reply** to a message.\n\n"
+        "When you're finished with this card, send **/finished**.\n"
+        "While a card is active, only **/mail** and **/finished** work."
     )
 
 
@@ -221,8 +282,8 @@ async def _prompt_choose_card(
     context.user_data["credo_cards"] = cards
     await message.reply_text(
         f"💳 **Credo cards**\n\n{_format_cards_list(settings, cards)}\n\n"
-        "Pick one — the **photo** and amount reply go **only in your DMs**.\n"
-        "After you get the card, **reply in your DMs** with how much you've sent.\n\n"
+        "Pick one — the **photo** goes **only in your DMs**.\n"
+        "Type payment amounts in your DMs (no reply needed). Send **/finished** when done.\n\n"
         "Tap a button or reply with a **number** (e.g. `1`).",
         parse_mode="Markdown",
         reply_markup=_card_keyboard(cards),
@@ -293,11 +354,7 @@ async def _deliver_credo_card(
 
     context.user_data.pop("credo_selected_card", None)
 
-    dm_prompt_text = (
-        f"Sent **{card.name}** to your DMs get worksy! 🔥\n\n"
-        f"{limit_block}\n\n"
-        f"{_format_reply_required_notice()}"
-    )
+    dm_prompt_text = _format_dm_session_notice(card.name, limit_block)
     origin_chat_id = (
         reply_target.chat.id if reply_target.chat.type != "private" else None
     )
@@ -309,6 +366,12 @@ async def _deliver_credo_card(
             photo_file_id=card.photo_file_id,
             created_by_user_id=sender_user.id,
             created_by_username=sender_user.username,
+        )
+        start_credo_session(
+            context.application.bot_data,
+            user_id=sender_user.id,
+            card_name=card.name,
+            origin_chat_id=origin_chat_id,
         )
         if origin_chat_id is not None:
             await reply_target.reply_text(
@@ -424,12 +487,131 @@ async def _log_card_usage(
         user_id=user.id,
         card_name=card_name,
     )
+    session = get_active_credo_session(context.application.bot_data, user.id)
+    if session and session.origin_chat_id is not None:
+        public_chat_id = session.origin_chat_id
     if public_chat_id is not None and message.chat_id != public_chat_id:
         await context.bot.send_message(
             chat_id=public_chat_id,
             text=summary,
             parse_mode="Markdown",
         )
+
+
+async def try_log_active_credo_amount(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Log a plain-text amount for the user's active credo session. Returns True if handled."""
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user or not message.text or message.chat.type != "private":
+        return False
+
+    session = get_active_credo_session(context.application.bot_data, user.id)
+    if session is None:
+        return False
+
+    amount = _parse_usage_amount(message.text)
+    if amount is None:
+        return False
+
+    await _log_card_usage(update, context, card_name=session.card_name, amount=amount)
+    return True
+
+
+async def credo_active_dm_amount_text(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    if await try_log_active_credo_amount(update, context):
+        raise ApplicationHandlerStop
+
+
+async def credo_active_command_guard(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user or not message.text:
+        return
+    if not message.text.startswith("/"):
+        return
+    if not has_active_credo_session(context.application.bot_data, user.id):
+        return
+    if is_credo_active_command_allowed(message.text):
+        return
+
+    session = get_active_credo_session(context.application.bot_data, user.id)
+    card_label = session.card_name if session else "a card"
+    await message.reply_text(
+        f"**{card_label}** is active — only **/mail** and **/finished** work until you're done.",
+        parse_mode="Markdown",
+    )
+    raise ApplicationHandlerStop
+
+
+async def credo_finished_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user:
+        return
+
+    session = end_credo_session(context.application.bot_data, user.id)
+    if session is None:
+        await message.reply_text("No active card session. Send /cc to pick one.")
+        return
+
+    await message.reply_text(
+        f"✅ Finished with **{session.card_name}**. You can use other commands again.",
+        parse_mode="Markdown",
+    )
+
+    public_chat_id = session.origin_chat_id
+    if public_chat_id is None:
+        settings: Settings = context.bot_data["settings"]
+        public_chat_id = context.application.bot_data.get("notify_chat_id") or settings.notify_chat_id
+    if public_chat_id is not None and message.chat_id != public_chat_id:
+        user_label = _user_label(user)
+        await context.bot.send_message(
+            chat_id=public_chat_id,
+            text=f"✅ {user_label} finished using **{session.card_name}**.",
+            parse_mode="Markdown",
+        )
+
+
+async def credo_reminder_loop(bot, settings: Settings, bot_data: dict) -> None:
+    """DM users every 15 minutes while they have an active credo session."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            now = time.time()
+            for user_id, session in list(_active_credo_sessions(bot_data).items()):
+                if now - session.last_reminder_at < CREDO_REMINDER_INTERVAL_SECONDS:
+                    continue
+                limit_block = _format_card_limit_block(settings, session.card_name)
+                try:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            f"⏰ **Payment check** — have you sent anything on "
+                            f"**{session.card_name}**?\n\n"
+                            f"{limit_block}\n\n"
+                            "Type the amount here (e.g. `500`) or send **/finished** when you're done."
+                        ),
+                        parse_mode="Markdown",
+                    )
+                    session.last_reminder_at = now
+                except Forbidden:
+                    end_credo_session(bot_data, user_id)
+                except Exception:
+                    logger.exception(
+                        "Failed credo reminder for user %s card %s",
+                        user_id,
+                        session.card_name,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("credo reminder loop error")
 
 
 def build_credo_handlers() -> list:
@@ -483,10 +665,16 @@ def build_credo_handlers() -> list:
     )
     return [
         MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
+            credo_active_dm_amount_text,
+            block=False,
+        ),
+        MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.REPLY,
             credo_reply_log_amount,
             block=False,
         ),
+        CommandHandler("finished", credo_finished_command),
         user_conversation,
         add_card_conversation,
         CallbackQueryHandler(credos_standalone_callback, pattern=r"^credocard:\d+$"),
@@ -567,6 +755,15 @@ async def credos_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     if not is_credo_allowed(settings, settings.database_path, user.id):
         await message.reply_text(UNAUTHORIZED)
+        return ConversationHandler.END
+
+    active = get_active_credo_session(context.application.bot_data, user.id)
+    if active is not None:
+        await message.reply_text(
+            f"You already have **{active.card_name}** active.\n\n"
+            "Type payment amounts in your DMs or send **/finished** when you're done.",
+            parse_mode="Markdown",
+        )
         return ConversationHandler.END
 
     await open_credo_picker(message, context, settings, user)

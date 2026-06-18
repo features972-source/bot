@@ -17,7 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 def build_mailer_handlers() -> list:
+    from handlers.credo import credo_active_command_guard
+
     return [
+        MessageHandler(filters.COMMAND, credo_active_command_guard, block=False),
         CallbackQueryHandler(mailer_callback, pattern=rf"^{re.escape(CALLBACK_PREFIX)}"),
         CommandHandler("mail", mail_command),
         CommandHandler("maildone", maildone_command),
@@ -188,7 +191,7 @@ async def mailer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 def _credo_conversation_active(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """True when credo add-card or usage wizard is in progress."""
+    """True when credo add-card wizard or card picker is in progress."""
     data = context.user_data
     return bool(
         data.get("add_card_active")
@@ -199,13 +202,20 @@ def _credo_conversation_active(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 
 async def private_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Route private DM text: active mailer session first, then credo picker."""
-    from handlers.credo import credos_choose_text as credo_choose_text
+    """Route private DM text: credo amount, mailer session, then credo picker."""
+    from handlers.credo import (
+        credos_choose_text as credo_choose_text,
+        get_active_credo_session,
+        try_log_active_credo_amount,
+    )
 
     settings: Settings = context.bot_data["settings"]
     user = update.effective_user
     message = update.effective_message
     if not user or not message or not message.text:
+        return
+
+    if message.chat.type == "private" and await try_log_active_credo_amount(update, context):
         return
 
     if _credo_conversation_active(context):
@@ -246,5 +256,16 @@ async def private_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
             await message.reply_text(detail)
         return
 
+    session = get_active_credo_session(context.application.bot_data, user.id)
+    if session is not None and message.chat.type == "private":
+        await message.reply_text(
+            f"**{session.card_name}** is active — type a payment amount (e.g. `500`) "
+            "or send **/finished** when you're done.",
+            parse_mode="Markdown",
+        )
+        return
+
     if "credo_cards" in context.user_data:
+        if get_active_credo_session(context.application.bot_data, user.id) is not None:
+            return
         await credo_choose_text(update, context)
