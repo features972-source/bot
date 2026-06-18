@@ -741,6 +741,7 @@ async def _try_complete_pending_card(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> bool:
     message = update.effective_message
+    user = update.effective_user
     if message is None or not message.text or message.reply_to_message is None:
         return False
 
@@ -748,18 +749,25 @@ async def _try_complete_pending_card(
     if not reply.from_user or not reply.from_user.is_bot:
         return False
 
-    pending = _pending_card_map(context.bot_data).pop(
-        (message.chat_id, reply.message_id),
-        None,
-    )
+    card_map = _pending_card_map(context.bot_data)
+    pending = card_map.pop((message.chat_id, reply.message_id), None)
+    if pending is None and user is not None:
+        last4_candidate = message.text.strip()
+        if CARD_LAST4_PATTERN.fullmatch(last4_candidate):
+            for key, candidate in list(card_map.items()):
+                if (
+                    key[0] == message.chat_id
+                    and candidate.finisher_user_id == user.id
+                ):
+                    pending = card_map.pop(key)
+                    break
+
     if pending is None:
         return False
 
     last4 = message.text.strip()
     if not CARD_LAST4_PATTERN.fullmatch(last4):
-        _pending_card_map(context.bot_data)[(message.chat_id, reply.message_id)] = (
-            pending
-        )
+        card_map[(message.chat_id, reply.message_id)] = pending
         await message.reply_text(
             "Send exactly 4 digits for the card, e.g. `1234`.",
             parse_mode="Markdown",
@@ -989,6 +997,10 @@ async def payment_out_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat = update.effective_chat
     if not message or not user or not chat or not message.text:
         return
+
+    if await _try_complete_pending_card(update, context):
+        return
+
     if not _payment_chat_allowed(settings, context.bot_data, chat):
         text = _strip_leading_bot_mention(
             message.text, getattr(context.bot, "username", None)
@@ -1006,9 +1018,6 @@ async def payment_out_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "Admin: run **/setnotify** in the group where you log payments.",
                 parse_mode="Markdown",
             )
-        return
-
-    if await _try_complete_pending_card(update, context):
         return
 
     if await _try_complete_pending_clearpayments(update, context):

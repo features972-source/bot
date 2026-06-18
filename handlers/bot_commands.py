@@ -34,9 +34,9 @@ def build_bot_handlers() -> list:
     return [
         *build_panic_handlers(),
         *build_payment_command_handlers(),
-        *build_expense_message_handlers(),
-        # Payment text outs before credo — credo reply guard must not block ON CALL replies.
+        # Payment outs before expenses — "933 out" must not be logged as an expense.
         *build_payment_message_handlers(),
+        *build_expense_message_handlers(),
         *build_credo_handlers(),
         *build_expense_report_handlers(),
         *build_payment_report_handlers(),

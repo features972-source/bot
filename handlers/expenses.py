@@ -53,6 +53,13 @@ async def expense_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not _expense_chat_allowed(settings, chat):
         return
 
+    from handlers.payments import _payment_chat_allowed, looks_like_payment_out
+
+    if _payment_chat_allowed(settings, context.bot_data, chat) and looks_like_payment_out(
+        message.text, getattr(context.bot, "username", None)
+    ):
+        return
+
     parsed = parse_expense_line(message.text)
     if parsed is None:
         return

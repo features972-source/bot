@@ -89,6 +89,11 @@ def parse_expense_line(text: str) -> tuple[float, str, str] | None:
     reason = match.group(3).strip()
     if not reason:
         return None
+    reason_lower = reason.lower()
+    if reason_lower in {"out", "out of", "out too", "outof"}:
+        return None
+    if PAYMENT_OUT_PATTERN.match(normalized):
+        return None
     amount = _amount_from_match(match)
     if amount <= 0:
         return None
