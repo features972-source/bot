@@ -76,7 +76,7 @@ def _format_help_text(
             "/payments — this week's payments (resets Sunday)\n"
             "/alltimepayments — all-time totals (/alltime works too)\n"
             "/leaderboard — opener & closer rankings (today · 7 · all)\n"
-            "/nemesis @user — head-to-head payment rivalry (updates 12pm–8pm)\n"
+            "/nemesis @user — challenge someone (they tap Yes to start)\n"
             "/out — log payment (reply + /out 5182)\n"
             "/setcleared — mark cleared (reply to out, or use # from /todaypayments)\n"
             "/setnotcleared — mark not cleared\n"

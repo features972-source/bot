@@ -1,14 +1,17 @@
-"""Payment nemesis rivalry — periodic head-to-head updates in group chat."""
+"""Payment nemesis rivalry — challenge flow and periodic head-to-head updates."""
 
 from __future__ import annotations
 
 import asyncio
 import html
 import logging
+import secrets
+from dataclasses import dataclass
 from datetime import datetime
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden
-from telegram.ext import CommandHandler, ContextTypes
+from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 from config import Settings
 from database import (
@@ -19,7 +22,7 @@ from database import (
     list_payment_nemesis,
     set_payment_nemesis,
 )
-from handlers.admin_access import _display_name, _resolve_target_user, _user_label
+from handlers.admin_access import _display_name, _resolve_target_user
 from handlers.payments import _require_payment_view
 from handlers.stats_period import current_payment_week_start, stats_timezone
 from money_format import format_amount
@@ -27,14 +30,36 @@ from money_format import format_amount
 logger = logging.getLogger(__name__)
 
 NEMESIS_LAST_SLOT_KEY = "nemesis_last_slot"
+NEMESIS_CHALLENGES_KEY = "nemesis_challenges"
 NEMESIS_LOOP_SECONDS = 60
 NEMESIS_POST_HOURS = (12, 14, 16, 18, 20)
+CALLBACK_PREFIX = "nemesis:"
+
+
+@dataclass
+class PendingNemesisChallenge:
+    chat_id: int
+    challenger_id: int
+    challenger_username: str | None
+    challenger_display: str | None
+    target_id: int
+    target_username: str | None
+    target_display: str | None
 
 
 def build_nemesis_handlers() -> list:
     return [
         CommandHandler("nemesis", nemesis_command),
+        CallbackQueryHandler(nemesis_challenge_callback, pattern=rf"^{CALLBACK_PREFIX}"),
     ]
+
+
+def _challenge_map(bot_data: dict) -> dict[str, PendingNemesisChallenge]:
+    return bot_data.setdefault(NEMESIS_CHALLENGES_KEY, {})
+
+
+def _new_challenge_id() -> str:
+    return secrets.token_hex(4)
 
 
 def _nemesis_user_label(
@@ -53,6 +78,40 @@ def _nemesis_slot_key(now: datetime) -> str | None:
     if now.hour not in NEMESIS_POST_HOURS:
         return None
     return f"{now.date().isoformat()}:{now.hour}"
+
+
+def _challenge_keyboard(challenge_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Yes",
+                    callback_data=f"{CALLBACK_PREFIX}yes:{challenge_id}",
+                ),
+                InlineKeyboardButton(
+                    "❌ No",
+                    callback_data=f"{CALLBACK_PREFIX}no:{challenge_id}",
+                ),
+            ]
+        ]
+    )
+
+
+def format_nemesis_challenge_text(
+    *,
+    challenger_username: str | None,
+    challenger_display: str | None,
+    target_username: str | None,
+    target_display: str | None,
+) -> str:
+    challenger = _nemesis_user_label(
+        0, challenger_username, challenger_display
+    )
+    target = _nemesis_user_label(0, target_username, target_display)
+    return (
+        f"⚔️ {target} — {challenger} tagged you.\n\n"
+        "<b>Do you accept this battle?</b>"
+    )
 
 
 def format_nemesis_update(
@@ -89,7 +148,7 @@ def format_nemesis_update(
     )
 
 
-async def nemesis_command(update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def nemesis_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     if not await _require_payment_view(update, settings, context.bot_data):
         return
@@ -98,6 +157,10 @@ async def nemesis_command(update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat = update.effective_chat
     if message is None or user is None or chat is None:
+        return
+
+    if chat.type not in ("group", "supergroup"):
+        await message.reply_text("Use /nemesis in the group chat.")
         return
 
     args = [arg.strip() for arg in (context.args or []) if arg.strip()]
@@ -112,11 +175,11 @@ async def nemesis_command(update, context: ContextTypes.DEFAULT_TYPE) -> None:
         existing = get_payment_nemesis(settings.database_path, chat.id)
         if existing is None:
             await message.reply_text(
-                "Start a payment rivalry:\n"
+                "Challenge someone to a payment battle:\n"
                 "• <code>/nemesis @username</code>\n"
                 "• Reply to someone with <code>/nemesis</code>\n\n"
-                "Updates post here every 2 hours (12pm–8pm).\n"
-                "Use <code>/nemesis off</code> to stop.",
+                "They must tap <b>Yes</b> to start. Updates every 2 hours (12pm–8pm).\n"
+                "Use <code>/nemesis off</code> to stop an active battle.",
                 parse_mode="HTML",
             )
             return
@@ -154,26 +217,126 @@ async def nemesis_command(update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text("You can't nemesis yourself.")
         return
 
-    set_payment_nemesis(
-        settings.database_path,
+    existing = get_payment_nemesis(settings.database_path, chat.id)
+    if existing is not None and {
+        user.id,
+        target.id,
+    } == {existing.user_a_id, existing.user_b_id}:
+        await message.reply_text(
+            "You two already have an active nemesis battle in this chat.\n"
+            "Use <code>/nemesis</code> to see standings or <code>/nemesis off</code> to stop.",
+            parse_mode="HTML",
+        )
+        return
+
+    challenge_id = _new_challenge_id()
+    challenge = PendingNemesisChallenge(
         chat_id=chat.id,
-        user_a_id=user.id,
-        user_a_username=user.username,
-        user_a_display=_display_name(user),
-        user_b_id=target.id,
-        user_b_username=getattr(target, "username", None),
-        user_b_display=_display_name(target),
-        created_by_id=user.id,
+        challenger_id=user.id,
+        challenger_username=user.username,
+        challenger_display=_display_name(user),
+        target_id=target.id,
+        target_username=getattr(target, "username", None),
+        target_display=_display_name(target),
     )
+    _challenge_map(context.bot_data)[challenge_id] = challenge
 
     await message.reply_text(
-        f"⚔️ Nemesis set: <b>{html.escape(_user_label(user))}</b> vs "
-        f"<b>{html.escape(_user_label(target))}</b>\n\n"
-        "Head-to-head updates every 2 hours between 12pm and 8pm "
-        "(skipped if neither has logged an out this week).\n"
-        "<code>/nemesis off</code> to stop.",
+        format_nemesis_challenge_text(
+            challenger_username=user.username,
+            challenger_display=_display_name(user),
+            target_username=getattr(target, "username", None),
+            target_display=_display_name(target),
+        ),
         parse_mode="HTML",
+        reply_markup=_challenge_keyboard(challenge_id),
     )
+
+
+async def nemesis_challenge_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None or not query.data:
+        return
+
+    parts = query.data.split(":", 2)
+    if len(parts) != 3 or parts[0] != "nemesis":
+        await query.answer()
+        return
+
+    action, challenge_id = parts[1], parts[2]
+    if action not in {"yes", "no"}:
+        await query.answer()
+        return
+
+    challenge = _challenge_map(context.bot_data).pop(challenge_id, None)
+    if challenge is None:
+        await query.answer("This challenge expired.", show_alert=True)
+        if query.message:
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except BadRequest:
+                pass
+        return
+
+    if user.id != challenge.target_id:
+        who = challenge.target_username or challenge.target_display or "them"
+        if challenge.target_username:
+            who = f"@{challenge.target_username.lstrip('@')}"
+        await query.answer(f"Only {who} can accept or decline.", show_alert=True)
+        _challenge_map(context.bot_data)[challenge_id] = challenge
+        return
+
+    settings: Settings = context.bot_data["settings"]
+    challenger_label = html.escape(
+        _nemesis_user_label(
+            challenge.challenger_id,
+            challenge.challenger_username,
+            challenge.challenger_display,
+        )
+    )
+    target_label = html.escape(
+        _nemesis_user_label(
+            challenge.target_id,
+            challenge.target_username,
+            challenge.target_display,
+        )
+    )
+
+    if action == "no":
+        await query.answer("Battle declined.")
+        if query.message:
+            await query.message.edit_text(
+                f"⚔️ {target_label} declined the battle with {challenger_label}.",
+                parse_mode="HTML",
+                reply_markup=None,
+            )
+        return
+
+    set_payment_nemesis(
+        settings.database_path,
+        chat_id=challenge.chat_id,
+        user_a_id=challenge.challenger_id,
+        user_a_username=challenge.challenger_username,
+        user_a_display=challenge.challenger_display,
+        user_b_id=challenge.target_id,
+        user_b_username=challenge.target_username,
+        user_b_display=challenge.target_display,
+        created_by_id=challenge.challenger_id,
+    )
+    await query.answer("Battle accepted!")
+    if query.message:
+        await query.message.edit_text(
+            f"⚔️ <b>Battle accepted!</b>\n\n"
+            f"{challenger_label} vs {target_label}\n\n"
+            "Head-to-head updates every 2 hours between 12pm and 8pm "
+            "(skipped if neither has logged an out this week).\n"
+            "<code>/nemesis off</code> to stop.",
+            parse_mode="HTML",
+            reply_markup=None,
+        )
 
 
 async def _post_nemesis_update(bot, settings: Settings, nemesis: PaymentNemesis) -> bool:
@@ -216,7 +379,7 @@ async def _post_nemesis_update(bot, settings: Settings, nemesis: PaymentNemesis)
 
 
 async def nemesis_loop(bot, settings: Settings, bot_data: dict) -> None:
-    """Post nemesis payment updates every 2 hours between 12:00 and 18:00 local."""
+    """Post nemesis payment updates every 2 hours between 12:00 and 20:00 local."""
     last_slots: dict[int, str] = bot_data.setdefault(NEMESIS_LAST_SLOT_KEY, {})
     try:
         while True:
