@@ -91,6 +91,10 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
             credo_reminder_loop(app.bot, settings, app.bot_data),
             name=f"credo-reminder-{instance_id}",
         )
+        asyncio.create_task(
+            nemesis_loop(app.bot, settings, app.bot_data),
+            name=f"nemesis-{instance_id}",
+        )
         from onedrive_cloud_sync import remember_excel_web_url
 
         remember_excel_web_url(settings)

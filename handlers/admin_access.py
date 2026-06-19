@@ -56,6 +56,7 @@ CREDO_GROUP_COMMANDS = [
     BotCommand("alltimepayments", "All-time payment totals"),
     BotCommand("alltime", "All-time payment totals (short)"),
     BotCommand("leaderboard", "Opener & closer rankings"),
+    BotCommand("nemesis", "Head-to-head payment rivalry"),
     BotCommand("cc", "Pick a credo card"),
     BotCommand("credos", "Pick a credo card"),
     BotCommand("usingcc", "See which cards are in use"),

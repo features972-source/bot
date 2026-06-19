@@ -27,6 +27,7 @@ from handlers.payments import (
 from handlers.panic import build_panic_handlers
 from handlers.payment_reports import build_payment_report_handlers
 from handlers.premium_access import build_premium_access_handlers
+from handlers.nemesis import build_nemesis_handlers
 
 
 def build_bot_handlers() -> list:
@@ -50,6 +51,7 @@ def build_bot_handlers() -> list:
         CommandHandler("setnotify", set_notify_command),
         *build_admin_access_handlers(),
         *build_premium_access_handlers(),
+        *build_nemesis_handlers(),
     ]
 
 
@@ -74,6 +76,7 @@ def _format_help_text(
             "/payments — this week's payments (resets Sunday)\n"
             "/alltimepayments — all-time totals (/alltime works too)\n"
             "/leaderboard — opener & closer rankings (today · 7 · all)\n"
+            "/nemesis @user — head-to-head payment rivalry (updates 12pm–8pm)\n"
             "/out — log payment (reply + /out 5182)\n"
             "/setcleared — mark cleared (reply to out, or use # from /todaypayments)\n"
             "/setnotcleared — mark not cleared\n"

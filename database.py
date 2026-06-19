@@ -144,6 +144,19 @@ class PaymentLeaderboardEntry:
 
 
 @dataclass
+class PaymentNemesis:
+    chat_id: int
+    user_a_id: int
+    user_a_username: str | None
+    user_a_display: str | None
+    user_b_id: int
+    user_b_username: str | None
+    user_b_display: str | None
+    created_by_id: int
+    created_at: str
+
+
+@dataclass
 class CompletedCall:
     id: int
     extension: str
@@ -467,6 +480,21 @@ def init_db(path: str) -> None:
                 local_date TEXT NOT NULL,
                 sent_at TEXT NOT NULL,
                 PRIMARY KEY (telegram_user_id, local_date)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS payment_nemesis (
+                chat_id INTEGER PRIMARY KEY,
+                user_a_id INTEGER NOT NULL,
+                user_a_username TEXT,
+                user_a_display TEXT,
+                user_b_id INTEGER NOT NULL,
+                user_b_username TEXT,
+                user_b_display TEXT,
+                created_by_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL
             )
             """
         )
@@ -1600,6 +1628,147 @@ def get_payment_starter_leaderboard(
     ]
 
 
+def get_user_payment_totals(
+    path: str,
+    user_id: int,
+    *,
+    since: datetime | None = None,
+) -> tuple[int, float]:
+    clauses = ["telegram_user_id = ?"]
+    params: list[str | int] = [user_id]
+    if since is not None:
+        clauses.append("created_at >= ?")
+        params.append(since.isoformat())
+    where = " AND ".join(clauses)
+    with _connect(path) as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM payment_outs WHERE {where}",
+            params,
+        ).fetchone()
+    if row is None:
+        return 0, 0.0
+    return int(row[0]), float(row[1])
+
+
+def _payment_nemesis_from_row(row: tuple) -> PaymentNemesis:
+    return PaymentNemesis(
+        chat_id=int(row[0]),
+        user_a_id=int(row[1]),
+        user_a_username=row[2],
+        user_a_display=row[3],
+        user_b_id=int(row[4]),
+        user_b_username=row[5],
+        user_b_display=row[6],
+        created_by_id=int(row[7]),
+        created_at=row[8],
+    )
+
+
+def set_payment_nemesis(
+    path: str,
+    *,
+    chat_id: int,
+    user_a_id: int,
+    user_a_username: str | None,
+    user_a_display: str | None,
+    user_b_id: int,
+    user_b_username: str | None,
+    user_b_display: str | None,
+    created_by_id: int,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO payment_nemesis (
+                chat_id,
+                user_a_id,
+                user_a_username,
+                user_a_display,
+                user_b_id,
+                user_b_username,
+                user_b_display,
+                created_by_id,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                user_a_id = excluded.user_a_id,
+                user_a_username = excluded.user_a_username,
+                user_a_display = excluded.user_a_display,
+                user_b_id = excluded.user_b_id,
+                user_b_username = excluded.user_b_username,
+                user_b_display = excluded.user_b_display,
+                created_by_id = excluded.created_by_id,
+                created_at = excluded.created_at
+            """,
+            (
+                chat_id,
+                user_a_id,
+                user_a_username,
+                user_a_display,
+                user_b_id,
+                user_b_username,
+                user_b_display,
+                created_by_id,
+                now,
+            ),
+        )
+        conn.commit()
+
+
+def get_payment_nemesis(path: str, chat_id: int) -> PaymentNemesis | None:
+    with _connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+                chat_id,
+                user_a_id,
+                user_a_username,
+                user_a_display,
+                user_b_id,
+                user_b_username,
+                user_b_display,
+                created_by_id,
+                created_at
+            FROM payment_nemesis
+            WHERE chat_id = ?
+            """,
+            (chat_id,),
+        ).fetchone()
+    return _payment_nemesis_from_row(row) if row else None
+
+
+def list_payment_nemesis(path: str) -> list[PaymentNemesis]:
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                chat_id,
+                user_a_id,
+                user_a_username,
+                user_a_display,
+                user_b_id,
+                user_b_username,
+                user_b_display,
+                created_by_id,
+                created_at
+            FROM payment_nemesis
+            ORDER BY chat_id ASC
+            """
+        ).fetchall()
+    return [_payment_nemesis_from_row(row) for row in rows]
+
+
+def clear_payment_nemesis(path: str, chat_id: int) -> bool:
+    with _connect(path) as conn:
+        cursor = conn.execute(
+            "DELETE FROM payment_nemesis WHERE chat_id = ?",
+            (chat_id,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 def add_credo_whitelist_user(
     path: str,
     *,
@@ -2611,6 +2780,7 @@ _DATA_TABLES = (
     "q1_premium_users",
     "quiet_win_log",
     "ready_check_sent",
+    "payment_nemesis",
 )
 
 
