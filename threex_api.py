@@ -265,11 +265,7 @@ def is_real_connected_participant(
     if ext and party_dn == ext:
         return False
 
-    caller_id = _normalize_text(participant.get("party_caller_id"))
-    caller_name = _normalize_text(participant.get("party_caller_name"))
-    if caller_id or caller_name:
-        return True
-    return False
+    return True
 
 
 def find_connected_participant(

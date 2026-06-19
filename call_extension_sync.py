@@ -23,6 +23,8 @@ from notify import (
 )
 from threex_api import (
     filter_real_connected_participants,
+    is_connected_participant,
+    is_external_caller_participant,
     is_real_connected_participant,
     participant_callid,
 )
@@ -35,12 +37,10 @@ SYNC_WANT_KEY = "extension_sync_want"
 EXT_LOCKS_KEY = "call_extension_locks"
 EMPTY_STREAK_KEY = "empty_participant_streak"
 LIST_PARTICIPANTS_SEM = asyncio.Semaphore(12)
-SYNC_DEBOUNCE_SECONDS = 0.08
-RECONCILE_INTERVAL_SECONDS = 12
+SYNC_DEBOUNCE_SECONDS = 0.0
+RECONCILE_INTERVAL_SECONDS = 5
 RECONCILE_CONCURRENCY = 6
 EMPTY_CONFIRM_COUNT = 2
-CALL_START_STABLE_SECONDS = 2
-CALL_START_STABLE_HITS = 2
 CALL_REPLACE_GRACE_SECONDS = 15
 PENDING_START_KEY = "pending_call_starts"
 QUIET_SYNC_KEY = "call_sync_quiet"
@@ -109,7 +109,30 @@ def _extension_lock(bot_data: dict, extension: str) -> asyncio.Lock:
 def _connected_participants(
     participants: list[dict[str, Any]], *, extension: str
 ) -> list[dict[str, Any]]:
-    return filter_real_connected_participants(participants, extension=extension)
+    connected = filter_real_connected_participants(participants, extension=extension)
+    if connected:
+        return connected
+    # Early API/WS payloads may lack fields used by the strict filter — fall back.
+    return [
+        participant
+        for participant in participants
+        if is_connected_participant(participant)
+        and is_external_caller_participant(participant, extension=extension)
+    ]
+
+
+def _ws_participant_for_sync(
+    participant: dict[str, Any] | None, *, extension: str
+) -> dict[str, Any] | None:
+    if participant is None:
+        return None
+    if is_real_connected_participant(participant, extension=extension):
+        return participant
+    if is_connected_participant(participant) and is_external_caller_participant(
+        participant, extension=extension
+    ):
+        return participant
+    return None
 
 
 def _empty_streak(bot_data: dict) -> dict[str, int]:
@@ -137,30 +160,11 @@ def _call_start_is_stable(
     callid: int | None,
     participant_id: int | None,
 ) -> bool:
-    """Wait for the same callid to stay connected before posting ON CALL."""
+    """Announce as soon as we see a connected call with a callid."""
     if callid is None:
         return False
-    now = time.monotonic()
-    pending = bot_data.setdefault(PENDING_START_KEY, {})
-    state = pending.get(extension)
-    if state is None or state.get("callid") != callid:
-        pending[extension] = {
-            "callid": callid,
-            "participant_id": participant_id,
-            "since": now,
-            "hits": 1,
-        }
-        return False
-    state["hits"] = int(state.get("hits", 0)) + 1
-    if participant_id is not None:
-        state["participant_id"] = participant_id
-    if now - float(state["since"]) >= CALL_START_STABLE_SECONDS:
-        pending.pop(extension, None)
-        return True
-    if state["hits"] >= CALL_START_STABLE_HITS:
-        pending.pop(extension, None)
-        return True
-    return False
+    _clear_pending_start(bot_data, extension)
+    return True
 
 
 def _queue_start_if_stable(
@@ -334,7 +338,7 @@ async def sync_extension_state(
                     participants_resolved = []
                 else:
                     return
-        elif ws_participant and is_real_connected_participant(
+        elif ws_participant := _ws_participant_for_sync(
             ws_participant, extension=extension
         ):
             participants_resolved = [ws_participant]
@@ -858,7 +862,7 @@ async def reconcile_all_linked_extensions(
         snap_parts = snapshot.get(extension, [])
         snap_connected = _connected_participants(snap_parts, extension=extension)
         is_live = extension in live_extensions
-        if not is_live and not snap_connected:
+        if not is_live and not snap_connected and not snap_parts:
             return
 
         async with sem:
