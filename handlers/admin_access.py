@@ -15,7 +15,7 @@ from telegram import (
     BotCommandScopeDefault,
     Update,
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import CommandHandler, ContextTypes
 
 from config import Settings
@@ -116,69 +116,75 @@ def iter_bot_admin_user_ids(settings: Settings, database_path: str) -> list[int]
 
 
 async def _clear_command_scope(bot: Bot, scope) -> None:
-    await bot.delete_my_commands(scope=scope)
-    await bot.set_my_commands([], scope=scope)
+    try:
+        await bot.delete_my_commands(scope=scope)
+        await bot.set_my_commands([], scope=scope)
+    except (BadRequest, NetworkError) as exc:
+        logger.warning("Could not clear command scope %s: %s", scope, exc)
 
 
 async def sync_bot_command_menu(bot: Bot, settings: Settings) -> None:
     """Private chats get full menus; groups show the main command set."""
-    scopes_to_clear = [
-        BotCommandScopeDefault(),
-        BotCommandScopeAllPrivateChats(),
-        BotCommandScopeAllGroupChats(),
-        BotCommandScopeAllChatAdministrators(),
-    ]
-    if settings.copy_to_chat_id is not None:
-        scopes_to_clear.append(BotCommandScopeChat(chat_id=settings.copy_to_chat_id))
-
-    if settings.notify_chat_id is not None:
-        scopes_to_clear.append(BotCommandScopeChat(chat_id=settings.notify_chat_id))
-    for chat_id in _payment_group_chat_ids(settings):
-        scopes_to_clear.append(BotCommandScopeChat(chat_id=chat_id))
-
-    for scope in scopes_to_clear:
-        await _clear_command_scope(bot, scope)
-
-    await bot.set_my_commands(
-        MENU_BOT_COMMANDS
-        + [
-            BotCommand("mail", f"Open {settings.mailer_display_name}"),
-            BotCommand("maildone", "End mailer session"),
-        ],
-        scope=BotCommandScopeAllPrivateChats(),
-    )
-
-    await bot.set_my_commands(
-        CREDO_GROUP_COMMANDS,
-        scope=BotCommandScopeAllGroupChats(),
-    )
-
-    for chat_id in _payment_group_chat_ids(settings):
-        await bot.set_my_commands(
-            CREDO_GROUP_COMMANDS,
-            scope=BotCommandScopeChat(chat_id=chat_id),
-        )
     try:
+        scopes_to_clear = [
+            BotCommandScopeDefault(),
+            BotCommandScopeAllPrivateChats(),
+            BotCommandScopeAllGroupChats(),
+            BotCommandScopeAllChatAdministrators(),
+        ]
+        if settings.copy_to_chat_id is not None:
+            scopes_to_clear.append(BotCommandScopeChat(chat_id=settings.copy_to_chat_id))
+
+        if settings.notify_chat_id is not None:
+            scopes_to_clear.append(BotCommandScopeChat(chat_id=settings.notify_chat_id))
+        for chat_id in _payment_group_chat_ids(settings):
+            scopes_to_clear.append(BotCommandScopeChat(chat_id=chat_id))
+
+        for scope in scopes_to_clear:
+            await _clear_command_scope(bot, scope)
+
+        await bot.set_my_commands(
+            MENU_BOT_COMMANDS
+            + [
+                BotCommand("mail", f"Open {settings.mailer_display_name}"),
+                BotCommand("maildone", "End mailer session"),
+            ],
+            scope=BotCommandScopeAllPrivateChats(),
+        )
+
         await bot.set_my_commands(
             CREDO_GROUP_COMMANDS,
-            scope=BotCommandScopeAllChatAdministrators(),
+            scope=BotCommandScopeAllGroupChats(),
         )
-    except BadRequest:
-        logger.warning("Could not set group command menu")
 
-    for user_id in iter_bot_admin_user_ids(settings, settings.database_path):
-        scope = BotCommandScopeChat(chat_id=user_id)
+        for chat_id in _payment_group_chat_ids(settings):
+            await bot.set_my_commands(
+                CREDO_GROUP_COMMANDS,
+                scope=BotCommandScopeChat(chat_id=chat_id),
+            )
         try:
-            await bot.set_my_commands(ADMIN_BOT_COMMANDS, scope=scope)
+            await bot.set_my_commands(
+                CREDO_GROUP_COMMANDS,
+                scope=BotCommandScopeAllChatAdministrators(),
+            )
         except BadRequest:
-            logger.warning("Could not set admin commands for user %s", user_id)
+            logger.warning("Could not set group command menu")
 
-    for user_id in iter_credo_only_user_ids(settings, settings.database_path):
-        scope = BotCommandScopeChat(chat_id=user_id)
-        try:
-            await bot.set_my_commands(CREDO_USER_COMMANDS, scope=scope)
-        except BadRequest:
-            logger.warning("Could not set credo commands for user %s", user_id)
+        for user_id in iter_bot_admin_user_ids(settings, settings.database_path):
+            scope = BotCommandScopeChat(chat_id=user_id)
+            try:
+                await bot.set_my_commands(ADMIN_BOT_COMMANDS, scope=scope)
+            except BadRequest:
+                logger.warning("Could not set admin commands for user %s", user_id)
+
+        for user_id in iter_credo_only_user_ids(settings, settings.database_path):
+            scope = BotCommandScopeChat(chat_id=user_id)
+            try:
+                await bot.set_my_commands(CREDO_USER_COMMANDS, scope=scope)
+            except BadRequest:
+                logger.warning("Could not set credo commands for user %s", user_id)
+    except NetworkError as exc:
+        logger.warning("Telegram network error syncing command menu (will retry on next deploy): %s", exc)
 
 
 async def revoke_bot_command_menu(bot: Bot, user_id: int) -> None:

@@ -86,6 +86,7 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
             name=f"active-calls-{instance_id}",
         )
         from handlers.credo import credo_reminder_loop
+        from handlers.nemesis import nemesis_loop
 
         asyncio.create_task(
             credo_reminder_loop(app.bot, settings, app.bot_data),
