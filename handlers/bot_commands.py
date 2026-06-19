@@ -2,7 +2,6 @@ from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes, ConversationHandler
 
 from config import Settings
-from handlers.chat_scope import GROUP_ONLY, PM_ONLY, reject_group_command
 from database import (
     ExtensionLink,
     link_extension,
@@ -43,12 +42,12 @@ def build_bot_handlers() -> list:
         *build_call_stats_handlers(),
         *build_chat_blacklist_handlers(),
         CommandHandler("start", start_command),
-        CommandHandler("help", help_command, filters=PM_ONLY),
-        CommandHandler("link", link_command, filters=PM_ONLY),
-        CommandHandler("unlink", unlink_command, filters=PM_ONLY),
-        CommandHandler("links", links_command, filters=PM_ONLY),
-        CommandHandler("users", users_command, filters=PM_ONLY),
-        CommandHandler("setnotify", set_notify_command, filters=GROUP_ONLY),
+        CommandHandler("help", help_command),
+        CommandHandler("link", link_command),
+        CommandHandler("unlink", unlink_command),
+        CommandHandler("links", links_command),
+        CommandHandler("users", users_command),
+        CommandHandler("setnotify", set_notify_command),
         *build_admin_access_handlers(),
         *build_premium_access_handlers(),
     ]
@@ -74,7 +73,7 @@ def _format_help_text(
             "<b>💸 Payments</b>\n"
             "/payments — this week's payments (resets Sunday)\n"
             "/alltimepayments — all-time totals (/alltime works too)\n"
-            "/out — log payment in DM (reply + /out 5182)\n"
+            "/out — log payment (reply + /out 5182)\n"
             "/setcleared — mark cleared (reply to out, or use # from /todaypayments)\n"
             "/setnotcleared — mark not cleared\n"
             "/setpayment # amount — fix amount · /removepayment # — remove\n"
@@ -101,10 +100,9 @@ def _format_help_text(
             "/addcredouser · /removecredouser · /credousers\n"
             "/addcredo · /removecredo · /listcredocards\n"
             "/addpremium · /removepremium · /premiumusers\n"
-            f"/mail — {mailer_name} in DM · /maildone to stop\n"
+            f"/mail — {mailer_name} · /maildone to stop\n"
             "/maillogs — recent /mail audit trail (admin)\n\n"
-            "<i>Tip: in the group, reply to notes or ON CALL with 5182 out, "
-            "or use /payments and /out. Other commands — DM the bot.</i>"
+            "<i>Tip: reply to notes or ON CALL with 5182 out, or use /payments and /out.</i>"
         )
 
     if credo:
@@ -114,17 +112,16 @@ def _format_help_text(
             "(also /creditcard, /credo, /credos)\n"
             "/activeccs · /usingcc — see which cards are in use\n"
             "/finished — when done (works in group or DM)\n"
-            f"/mail — open {mailer_name} via the bot (DM only)\n"
+            f"/mail — open {mailer_name} (multi-step flow works best in DM)\n"
             "/maildone — end mailer session\n"
             "/cancel — cancel an in-progress flow"
         )
 
     return (
         f"📱 <b>{bot_name}</b>\n\n"
-        "Call announcements run in your team group. Use /payments and /out in the group; "
-        "other bot commands are DM-only (except /cc and credo commands).\n\n"
+        "Call announcements and bot commands run in your team group.\n\n"
         f"<b>📧 {mailer_name}</b>\n"
-        f"/mail — open {mailer_name} in this DM (joins queue if busy)\n"
+        f"/mail — open {mailer_name} (multi-step flow works best in DM)\n"
         "/maildone — end session or leave queue"
     )
 
@@ -159,11 +156,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         if context.args[0] in CREDO_START_ARGS:
             await credos_start_resume(update, context)
-            return
-
-    chat = update.effective_chat
-    if chat is not None and chat.type in ("group", "supergroup"):
-        if await reject_group_command(update):
             return
 
     settings: Settings = context.bot_data["settings"]

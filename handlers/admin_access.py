@@ -19,7 +19,6 @@ from telegram.error import BadRequest
 from telegram.ext import CommandHandler, ContextTypes
 
 from config import Settings
-from handlers.chat_scope import PM_ONLY
 from database import (
     add_bot_admin,
     list_bot_admins,
@@ -50,6 +49,8 @@ CREDO_USER_COMMANDS = MENU_BOT_COMMANDS + [
 ]
 
 CREDO_GROUP_COMMANDS = [
+    BotCommand("help", "Command list"),
+    BotCommand("start", "Bot info"),
     BotCommand("out", "Log payment (reply + /out 5182)"),
     BotCommand("payments", "This week's payments (resets Sunday)"),
     BotCommand("alltimepayments", "All-time payment totals"),
@@ -77,10 +78,10 @@ def _payment_group_chat_ids(settings: Settings) -> set[int]:
 
 def build_admin_access_handlers() -> list:
     return [
-        CommandHandler("admin", admin_command, filters=PM_ONLY),
-        CommandHandler("admins", admins_command, filters=PM_ONLY),
-        CommandHandler("addadmin", addadmin_command, filters=PM_ONLY),
-        CommandHandler("removeadmin", removeadmin_command, filters=PM_ONLY),
+        CommandHandler("admin", admin_command),
+        CommandHandler("admins", admins_command),
+        CommandHandler("addadmin", addadmin_command),
+        CommandHandler("removeadmin", removeadmin_command),
     ]
 
 
@@ -118,7 +119,7 @@ async def _clear_command_scope(bot: Bot, scope) -> None:
 
 
 async def sync_bot_command_menu(bot: Bot, settings: Settings) -> None:
-    """Private chats get full menus; groups only show credo picker commands."""
+    """Private chats get full menus; groups show the main command set."""
     scopes_to_clear = [
         BotCommandScopeDefault(),
         BotCommandScopeAllPrivateChats(),

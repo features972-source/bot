@@ -8,7 +8,6 @@ import re
 from telegram import Update
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import CommandHandler, ContextTypes
-from handlers.chat_scope import PM_ONLY
 
 from config import Settings
 from database import (
@@ -27,10 +26,10 @@ USERNAME_TOKEN = re.compile(r"^@?([A-Za-z0-9_]{4,})$", re.IGNORECASE)
 
 def build_chat_blacklist_handlers() -> list:
     return [
-        CommandHandler("blacklist", blacklist_command, filters=PM_ONLY),
-        CommandHandler("unblacklist", unblacklist_command, filters=PM_ONLY),
-        CommandHandler("blacklisted", blacklisted_command, filters=PM_ONLY),
-        CommandHandler("blocklist", blacklisted_command, filters=PM_ONLY),
+        CommandHandler("blacklist", blacklist_command),
+        CommandHandler("unblacklist", unblacklist_command),
+        CommandHandler("blacklisted", blacklisted_command),
+        CommandHandler("blocklist", blacklisted_command),
     ]
 
 

@@ -22,7 +22,6 @@ from database import (
     set_expense_notify_message_id,
 )
 from handlers.admin_access import require_admin
-from handlers.chat_scope import GROUP_ONLY
 from handlers.expense_table import LIVE_EXPENSE_ROW_LIMIT, format_expense_subtitle
 from handlers.expense_table_image import (
     expense_report_title,
@@ -43,7 +42,7 @@ _REFRESH_DEBOUNCE_SEC = 0.35
 
 def build_expense_report_handlers() -> list:
     return [
-        CommandHandler("setexpenses", setexpenses_command, filters=GROUP_ONLY),
+        CommandHandler("setexpenses", setexpenses_command),
         CallbackQueryHandler(
             setexpenses_callback, pattern=rf"^{CALLBACK_PREFIX}[a-z0-9]+$"
         ),

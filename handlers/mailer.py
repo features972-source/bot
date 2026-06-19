@@ -16,7 +16,6 @@ from telegram.ext import (
 )
 
 from config import Settings
-from handlers.chat_scope import PM_ONLY
 from handlers.admin_access import is_bot_admin
 from mailer_audit import recent_mailer_log_rows
 from mailer_bridge import CALLBACK_PREFIX, get_mailer_bridge
@@ -30,9 +29,9 @@ def build_mailer_handlers() -> list:
     return [
         MessageHandler(filters.COMMAND, credo_active_command_guard, block=False),
         CallbackQueryHandler(mailer_callback, pattern=rf"^{re.escape(CALLBACK_PREFIX)}"),
-        CommandHandler("mail", mail_command, filters=PM_ONLY),
-        CommandHandler("maildone", maildone_command, filters=PM_ONLY),
-        CommandHandler("maillogs", maillogs_command, filters=PM_ONLY),
+        CommandHandler("mail", mail_command),
+        CommandHandler("maildone", maildone_command),
+        CommandHandler("maillogs", maillogs_command),
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             private_text_router,

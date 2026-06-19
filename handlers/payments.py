@@ -45,7 +45,6 @@ from database import (
     update_payment_cleared,
 )
 from handlers.admin_access import is_bot_admin, iter_bot_admin_user_ids, require_admin
-from handlers.chat_scope import PM_ONLY
 from handlers.payment_table import (
     format_image_subtitle,
     render_payments_mobile_html,
@@ -140,19 +139,19 @@ def build_payment_command_handlers() -> list:
         CommandHandler("sent", payments_command),
         CommandHandler("alltimepayments", alltimepayments_command),
         CommandHandler("alltime", alltimepayments_command),
-        CommandHandler("clearpayments", clearpayments_command, filters=PM_ONLY),
-        CommandHandler("todaypayments", todaypayments_command, filters=PM_ONLY),
-        CommandHandler("cleared", cleared_command, filters=PM_ONLY),
-        CommandHandler("setcleared", cleared_command, filters=PM_ONLY),
-        CommandHandler("notcleared", notcleared_command, filters=PM_ONLY),
-        CommandHandler("setnotcleared", notcleared_command, filters=PM_ONLY),
-        CommandHandler("setpayment", setpayment_command, filters=PM_ONLY),
-        CommandHandler("updatepayment", setpayment_command, filters=PM_ONLY),
-        CommandHandler("editpayment", setpayment_command, filters=PM_ONLY),
-        CommandHandler("removepayment", removepayment_command, filters=PM_ONLY),
-        CommandHandler("syncpayments", syncpayments_command, filters=PM_ONLY),
-        CommandHandler("paidside", paidside_command, filters=PM_ONLY),
-        CommandHandler("myid", myid_command, filters=PM_ONLY),
+        CommandHandler("clearpayments", clearpayments_command),
+        CommandHandler("todaypayments", todaypayments_command),
+        CommandHandler("cleared", cleared_command),
+        CommandHandler("setcleared", cleared_command),
+        CommandHandler("notcleared", notcleared_command),
+        CommandHandler("setnotcleared", notcleared_command),
+        CommandHandler("setpayment", setpayment_command),
+        CommandHandler("updatepayment", setpayment_command),
+        CommandHandler("editpayment", setpayment_command),
+        CommandHandler("removepayment", removepayment_command),
+        CommandHandler("syncpayments", syncpayments_command),
+        CommandHandler("paidside", paidside_command),
+        CommandHandler("myid", myid_command),
         CallbackQueryHandler(payments_page_callback, pattern=r"^paypage:"),
     ]
 

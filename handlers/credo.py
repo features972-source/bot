@@ -46,7 +46,6 @@ from handlers.admin_access import (
     is_bot_admin,
     require_admin,
 )
-from handlers.chat_scope import PM_ONLY
 from handlers.payments import parse_payment_amount
 from money_format import format_amount
 from notify import format_duration
@@ -843,8 +842,8 @@ async def credo_reminder_loop(bot, settings: Settings, bot_data: dict) -> None:
 def build_add_card_handlers() -> list:
     """Register in group -1 so add-card replies beat the mailer text router."""
     return [
-        CommandHandler("addcredo", addcredocard_start, filters=PM_ONLY),
-        CommandHandler("cancel", addcredocard_cancel_if_active, block=False, filters=PM_ONLY),
+        CommandHandler("addcredo", addcredocard_start),
+        CommandHandler("cancel", addcredocard_cancel_if_active, block=False),
         MessageHandler(
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
             addcredocard_route_text,
@@ -873,8 +872,8 @@ def build_credo_handlers() -> list:
             CommandHandler(command, activeccs_conversation_fallback)
             for command in ACTIVECCS_COMMANDS
         ],
-        CommandHandler("start", help_conversation_fallback, filters=PM_ONLY),
-        CommandHandler("help", help_conversation_fallback, filters=PM_ONLY),
+        CommandHandler("start", help_conversation_fallback),
+        CommandHandler("help", help_conversation_fallback),
         CommandHandler("out", out_conversation_fallback),
         CommandHandler("payments", payments_conversation_fallback),
         CommandHandler("alltimepayments", alltimepayments_conversation_fallback),
