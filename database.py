@@ -1343,6 +1343,31 @@ def clear_all_payments(path: str) -> int:
     return count
 
 
+def count_payments_before(path: str, before: datetime) -> int:
+    with _connect(path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM payment_outs WHERE created_at < ?",
+            (before.isoformat(),),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def clear_payments_before(path: str, before: datetime) -> int:
+    """Delete payments strictly before `before` (UTC). Returns rows removed."""
+    with _connect(path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM payment_outs WHERE created_at < ?",
+            (before.isoformat(),),
+        ).fetchone()
+        count = int(row[0]) if row else 0
+        conn.execute(
+            "DELETE FROM payment_outs WHERE created_at < ?",
+            (before.isoformat(),),
+        )
+        conn.commit()
+    return count
+
+
 def get_payment_totals(
     path: str,
     *,

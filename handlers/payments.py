@@ -28,7 +28,9 @@ from database import (
     PaymentLeaderboardEntry,
     PaymentRecord,
     clear_all_payments,
+    clear_payments_before,
     delete_payment_out,
+    count_payments_before,
     get_payment_by_id,
     get_payment_by_message,
     is_chat_blacklisted,
@@ -128,6 +130,7 @@ class PendingPaymentOut:
 @dataclass
 class PendingClearPayments:
     admin_user_id: int
+    keep_since_utc: datetime | None = None
 
 
 def _normalize_payment_text(text: str) -> str:
@@ -148,6 +151,7 @@ def build_payment_command_handlers() -> list:
         CommandHandler("outstats", leaderboard_command),
         CommandHandler("outleaderboard", leaderboard_command),
         CommandHandler("clearpayments", clearpayments_command),
+        CommandHandler("clearalldata", clearalldata_command),
         CommandHandler("todaypayments", todaypayments_command),
         CommandHandler("cleared", cleared_command),
         CommandHandler("setcleared", cleared_command),
@@ -815,8 +819,7 @@ async def _try_complete_pending_clearpayments(
     if message.text.strip() != "DELETE":
         _pending_clear_payments_map(context.bot_data)[key] = pending
         await message.reply_text(
-            "Not confirmed. Reply to the warning with DELETE (all capitals) to wipe "
-            "all payments."
+            "Not confirmed. Reply to the warning with DELETE (all capitals) to confirm."
         )
         return True
 
@@ -824,15 +827,30 @@ async def _try_complete_pending_clearpayments(
     if not await require_admin(update, settings, deny_message="Admin only."):
         return True
 
-    cleared = clear_all_payments(settings.database_path)
-    if cleared == 0:
-        await message.reply_text("No payment records to clear.")
-        return True
-
-    await message.reply_text(
-        f"Cleared {cleared} payment record(s). /payments will be empty until new "
-        "outs are logged."
-    )
+    if pending.keep_since_utc is None:
+        cleared = clear_all_payments(settings.database_path)
+        if cleared == 0:
+            await message.reply_text("No payment records to clear.")
+            return True
+        await message.reply_text(
+            f"Cleared {cleared} payment record(s). /payments will be empty until new "
+            "outs are logged."
+        )
+    else:
+        keep_since = pending.keep_since_utc
+        cleared = clear_payments_before(settings.database_path, keep_since)
+        if cleared == 0:
+            await message.reply_text(
+                f"No payments to delete before {_format_keep_from_label(keep_since)}."
+            )
+            return True
+        kept_count, _ = get_payment_totals(settings.database_path, since=keep_since)
+        await message.reply_text(
+            f"Deleted {cleared} payment record(s) before "
+            f"<b>{html.escape(_format_keep_from_label(keep_since))}</b>.\n"
+            f"Kept <b>{kept_count}</b> on or after that date.",
+            parse_mode="HTML",
+        )
     schedule_payments_excel_sync(settings)
     try:
         from handlers.payment_reports import schedule_payment_report_refresh
@@ -2179,6 +2197,89 @@ async def clearpayments_command(update: Update, context: ContextTypes.DEFAULT_TY
     _pending_clear_payments_map(context.bot_data)[
         (message.chat_id, prompt.message_id)
     ] = PendingClearPayments(admin_user_id=user.id)
+
+
+def _parse_keep_from_date_arg(arg: str) -> datetime | None:
+    """Parse a calendar date -> UTC start of that day in STATS_TIMEZONE."""
+    text = arg.strip()
+    tz = stats_timezone()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y"):
+        try:
+            local = datetime.strptime(text, fmt).replace(tzinfo=tz)
+            return local.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _format_keep_from_label(since_utc: datetime) -> str:
+    tz = stats_timezone()
+    local = since_utc.astimezone(tz)
+    return local.strftime("%d %b %Y")
+
+
+async def clearalldata_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not await require_admin(update, settings, deny_message="Admin only."):
+        return
+
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+
+    args = context.args or []
+    keep_since: datetime | None = None
+    if args:
+        keep_since = _parse_keep_from_date_arg(args[0])
+        if keep_since is None:
+            await message.reply_text(
+                "Usage:\n"
+                "• <code>/clearalldata</code> — delete every payment\n"
+                "• <code>/clearalldata 2025-06-01</code> — delete older payments, "
+                "keep from that date onward\n"
+                "• <code>/clearalldata 01/06/2025</code> — same (DD/MM/YYYY)\n\n"
+                "Reply <code>DELETE</code> to the confirmation prompt to proceed.",
+                parse_mode="HTML",
+            )
+            return
+
+    total_count, _ = get_payment_totals(settings.database_path)
+    if total_count == 0:
+        await message.reply_text("No payment records to clear.")
+        return
+
+    if keep_since is None:
+        prompt_text = (
+            f"⚠️ This will permanently delete all <b>{total_count}</b> payment record"
+            f"{'' if total_count == 1 else 's'}.\n\n"
+            "Tip: use <code>/clearalldata 2025-06-01</code> to keep payments from a "
+            "date onward.\n\n"
+            "Reply to this message with <code>DELETE</code> (all capitals) to confirm."
+        )
+    else:
+        delete_count = count_payments_before(settings.database_path, keep_since)
+        kept_count = total_count - delete_count
+        keep_label = html.escape(_format_keep_from_label(keep_since))
+        if delete_count == 0:
+            await message.reply_text(
+                f"No payments before {keep_label} to delete.\n"
+                f"<b>{kept_count}</b> payment(s) on or after that date will stay.",
+                parse_mode="HTML",
+            )
+            return
+        prompt_text = (
+            f"⚠️ Delete <b>{delete_count}</b> payment record"
+            f"{'' if delete_count == 1 else 's'} "
+            f"<b>before</b> {keep_label}.\n"
+            f"Keep <b>{kept_count}</b> on or after {keep_label}.\n\n"
+            "Reply to this message with <code>DELETE</code> (all capitals) to confirm."
+        )
+
+    prompt = await message.reply_text(prompt_text, parse_mode="HTML")
+    _pending_clear_payments_map(context.bot_data)[
+        (message.chat_id, prompt.message_id)
+    ] = PendingClearPayments(admin_user_id=user.id, keep_since_utc=keep_since)
 
 
 def _format_when(iso_timestamp: str) -> str:

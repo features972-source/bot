@@ -81,6 +81,7 @@ def _format_help_text(
             f"{sync_line}"
             "/todaypayments — today's summary to your DM\n"
             "/clearpayments — wipe all (reply DELETE to confirm)\n"
+            "/clearalldata — wipe payments (optional keep-from date)\n"
             "/panic — wipe everything (reply PANIC to confirm)\n"
             "/myid — your Telegram user id\n\n"
             "<b>📞 Calls</b>\n"
