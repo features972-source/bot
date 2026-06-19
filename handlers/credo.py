@@ -861,6 +861,7 @@ def build_credo_handlers() -> list:
     from handlers.bot_commands import help_conversation_fallback
     from handlers.payments import (
         alltimepayments_conversation_fallback,
+        leaderboard_conversation_fallback,
         out_conversation_fallback,
         payments_conversation_fallback,
     )
@@ -876,6 +877,9 @@ def build_credo_handlers() -> list:
         CommandHandler("help", help_conversation_fallback),
         CommandHandler("out", out_conversation_fallback),
         CommandHandler("payments", payments_conversation_fallback),
+        CommandHandler("leaderboard", leaderboard_conversation_fallback),
+        CommandHandler("outstats", leaderboard_conversation_fallback),
+        CommandHandler("outleaderboard", leaderboard_conversation_fallback),
         CommandHandler("alltimepayments", alltimepayments_conversation_fallback),
         CommandHandler("alltime", alltimepayments_conversation_fallback),
     ]

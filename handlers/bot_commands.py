@@ -73,6 +73,7 @@ def _format_help_text(
             "<b>💸 Payments</b>\n"
             "/payments — this week's payments (resets Sunday)\n"
             "/alltimepayments — all-time totals (/alltime works too)\n"
+            "/leaderboard — opener & closer rankings (today · 7 · all)\n"
             "/out — log payment (reply + /out 5182)\n"
             "/setcleared — mark cleared (reply to out, or use # from /todaypayments)\n"
             "/setnotcleared — mark not cleared\n"

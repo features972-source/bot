@@ -25,6 +25,7 @@ from config import Settings
 from call_display import format_extension_user_plain
 from database import (
     ExtensionLink,
+    PaymentLeaderboardEntry,
     PaymentRecord,
     clear_all_payments,
     delete_payment_out,
@@ -32,6 +33,8 @@ from database import (
     get_payment_by_message,
     is_chat_blacklisted,
     update_payment_amount,
+    get_payment_leaderboard,
+    get_payment_starter_leaderboard,
     get_payment_notify_chat_id,
     get_payment_totals,
     list_links,
@@ -59,7 +62,9 @@ from handlers.payment_table_image import (
     render_payments_table_png,
 )
 from handlers.stats_period import (
+    _parse_stats_period,
     current_payment_week_start,
+    stats_period_footnote,
     stats_timezone,
 )
 from payments_excel_export import (
@@ -139,6 +144,9 @@ def build_payment_command_handlers() -> list:
         CommandHandler("sent", payments_command),
         CommandHandler("alltimepayments", alltimepayments_command),
         CommandHandler("alltime", alltimepayments_command),
+        CommandHandler("leaderboard", leaderboard_command),
+        CommandHandler("outstats", leaderboard_command),
+        CommandHandler("outleaderboard", leaderboard_command),
         CommandHandler("clearpayments", clearpayments_command),
         CommandHandler("todaypayments", todaypayments_command),
         CommandHandler("cleared", cleared_command),
@@ -1607,6 +1615,144 @@ async def alltimepayments_command(
     )
 
 
+def _leaderboard_user_label(entry: PaymentLeaderboardEntry) -> str:
+    username = (entry.telegram_username or "").strip()
+    display = (entry.display_name or "").strip()
+    if username and display:
+        return f"@{html.escape(username.lstrip('@'))} ({html.escape(display)})"
+    if username:
+        return f"@{html.escape(username.lstrip('@'))}"
+    if display:
+        return html.escape(display)
+    return html.escape(str(entry.user_id))
+
+
+def _parse_leaderboard_args(
+    args: list[str],
+) -> tuple[datetime | None, str, str | None]:
+    """Return since, period label, and optional role filter (openers | closers)."""
+    role: str | None = None
+    rest = list(args)
+    if rest:
+        token = rest[0].strip().lower()
+        if token in {"openers", "open", "starters", "starter"}:
+            role = "openers"
+            rest = rest[1:]
+        elif token in {"closers", "close", "finishers", "finisher"}:
+            role = "closers"
+            rest = rest[1:]
+    since, period_label = _parse_stats_period(rest)
+    return since, period_label, role
+
+
+def _format_leaderboard_lines(
+    entries: list[PaymentLeaderboardEntry],
+    *,
+    empty_text: str,
+) -> list[str]:
+    if not entries:
+        return [empty_text]
+    medals = ("🥇", "🥈", "🥉")
+    lines: list[str] = []
+    for index, entry in enumerate(entries):
+        prefix = medals[index] if index < len(medals) else f"{index + 1}."
+        lines.append(
+            f"{prefix} {_leaderboard_user_label(entry)} · "
+            f"<b>{html.escape(format_amount(entry.total_amount))}</b> · "
+            f"{entry.payment_count} out{'s' if entry.payment_count != 1 else ''}"
+        )
+    return lines
+
+
+async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not await _require_payment_view(update, settings, context.bot_data):
+        return
+
+    since, period_label, role_filter = _parse_leaderboard_args(context.args or [])
+    closers = get_payment_leaderboard(settings.database_path, since=since)
+    openers = get_payment_starter_leaderboard(settings.database_path, since=since)
+    total_count, total_amount = get_payment_totals(settings.database_path, since=since)
+
+    if role_filter == "closers":
+        if not closers:
+            await update.effective_message.reply_text(
+                f"💸 No closer stats for {period_label}.\n\n"
+                "Reply to the starter's notes with e.g. `5182 out`.",
+                parse_mode="Markdown",
+            )
+            return
+        lines = [
+            f"🔒 <b>Closers</b> — {html.escape(period_label)}",
+            "",
+            f"Total: <b>{html.escape(format_amount(total_amount))}</b> · "
+            f"<b>{total_count}</b> payment{'s' if total_count != 1 else ''}",
+            "",
+            *_format_leaderboard_lines(
+                closers,
+                empty_text="<i>No closers yet.</i>",
+            ),
+        ]
+    elif role_filter == "openers":
+        if not openers:
+            await update.effective_message.reply_text(
+                f"🚪 No opener stats for {period_label}.\n\n"
+                "Starters are tracked when OUT is logged as a reply to their notes.",
+                parse_mode="Markdown",
+            )
+            return
+        lines = [
+            f"🚪 <b>Openers</b> — {html.escape(period_label)}",
+            "",
+            *_format_leaderboard_lines(
+                openers,
+                empty_text="<i>No openers yet.</i>",
+            ),
+        ]
+    elif not closers and not openers:
+        await update.effective_message.reply_text(
+            f"💸 No payments logged for {period_label}.\n\n"
+            "Reply to the starter's notes with e.g. `5182 out`.",
+            parse_mode="Markdown",
+        )
+        return
+    else:
+        lines = [
+            f"💸 <b>Leaderboard</b> — {html.escape(period_label)}",
+            "",
+            f"Total: <b>{html.escape(format_amount(total_amount))}</b> · "
+            f"<b>{total_count}</b> payment{'s' if total_count != 1 else ''}",
+            "",
+            "<b>🔒 Closers</b> <i>(who logged the OUT)</i>",
+            *_format_leaderboard_lines(
+                closers,
+                empty_text="<i>No closers yet.</i>",
+            ),
+            "",
+            "<b>🚪 Openers</b> <i>(reply-to notes on each OUT)</i>",
+            *_format_leaderboard_lines(
+                openers,
+                empty_text=(
+                    "<i>No opener data yet — reply to the starter's notes when logging OUT.</i>"
+                ),
+            ),
+        ]
+
+    lines.extend(
+        [
+            "",
+            stats_period_footnote(),
+            "",
+            "<i>/leaderboard · /leaderboard openers · /leaderboard closers · today · 7 · all</i>",
+        ]
+    )
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
 def _payment_command_conversation_fallback(command_fn):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         context.user_data.clear()
@@ -1621,6 +1767,9 @@ payments_conversation_fallback = _payment_command_conversation_fallback(
 )
 alltimepayments_conversation_fallback = _payment_command_conversation_fallback(
     alltimepayments_command
+)
+leaderboard_conversation_fallback = _payment_command_conversation_fallback(
+    leaderboard_command
 )
 out_conversation_fallback = _payment_command_conversation_fallback(out_command)
 
