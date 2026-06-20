@@ -18,10 +18,12 @@ from call_control_listener import start_call_control_listener
 from config import Settings
 from database import get_notify_chat_id, init_db, set_notify_chat_id
 from handlers.admin_access import sync_bot_command_menu
+from handlers.admin_panel import build_admin_handlers
 from handlers.bot_commands import build_bot_handlers
 from handlers.credo import build_add_card_handlers
 from handlers.mailer import build_mailer_handlers
 from handlers.pass_queue import build_pass_queue_notes_handler
+from handlers.ready_check import build_ready_check_handlers, ready_check_shift_loop
 from mailer_bridge import init_mailer_bridge
 from notify import (
     active_calls_digest_loop,
@@ -102,6 +104,10 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
             pass_reminder_loop(app.bot, settings, app.bot_data),
             name=f"pass-reminder-{instance_id}",
         )
+        asyncio.create_task(
+            ready_check_shift_loop(app.bot, settings, app.bot_data),
+            name=f"ready-check-{instance_id}",
+        )
         from onedrive_cloud_sync import remember_excel_web_url
 
         remember_excel_web_url(settings)
@@ -147,6 +153,10 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
     for handler in build_mailer_handlers():
         tg_app.add_handler(handler, group=-1)
     tg_app.add_handler(build_pass_queue_notes_handler(), group=-2)
+    for handler in build_admin_handlers():
+        tg_app.add_handler(handler)
+    for handler in build_ready_check_handlers():
+        tg_app.add_handler(handler)
     for handler in build_bot_handlers():
         tg_app.add_handler(handler)
 

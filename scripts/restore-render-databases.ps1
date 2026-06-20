@@ -17,7 +17,7 @@ function Resolve-RenderBaseUrl($envPath, $fallback) {
     return $fallback
 }
 
-$q1Url = Resolve-RenderBaseUrl (Join-Path $Root ".env") "https://bot-josl.onrender.com"
+$q1Url = Resolve-RenderBaseUrl (Join-Path $Root ".env") "https://q1-call-manager-eu.onrender.com"
 $q2Url = Resolve-RenderBaseUrl (Join-Path $Root ".env.bot2") ""
 
 $q1Secret = Read-EnvValue (Join-Path $Root ".env") "WEBHOOK_SECRET"

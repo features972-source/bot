@@ -27,10 +27,12 @@ _DB.close()
 os.environ["DATABASE_PATH"] = _DB.name
 
 from config import load_settings  # noqa: E402
-from database import init_db, set_notify_chat_id  # noqa: E402
+from database import init_db, link_extension, set_notify_chat_id  # noqa: E402
+from handlers.admin_panel import build_admin_handlers  # noqa: E402
 from handlers.bot_commands import build_bot_handlers  # noqa: E402
 from handlers.credo import build_add_card_handlers, build_credo_handlers  # noqa: E402
 from handlers.mailer import build_mailer_handlers  # noqa: E402
+from handlers.ready_check import build_ready_check_handlers  # noqa: E402
 from money_format import init_currency  # noqa: E402
 
 
@@ -100,6 +102,8 @@ def _collect_command_handlers():
         build_credo_handlers,
         build_add_card_handlers,
         build_mailer_handlers,
+        build_admin_handlers,
+        build_ready_check_handlers,
     ):
         for handler in builder():
             if handler.__class__.__name__ == "CommandHandler":
@@ -142,6 +146,13 @@ class CommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         cls.settings = load_settings()
         init_db(cls.settings.database_path)
         set_notify_chat_id(cls.settings.database_path, -1003928995399)
+        link_extension(
+            cls.settings.database_path,
+            extension="101",
+            telegram_user_id=8780653370,
+            telegram_username="testadmin",
+            display_name="Test Admin",
+        )
 
     async def _run_command(self, command: str, callback, *, args: list[str] | None = None):
         update = _make_update(f"/{command}", args=args)
@@ -169,6 +180,12 @@ class CommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "handlers.admin_access.sync_bot_command_menu",
             new=AsyncMock(),
+        ), patch(
+            "handlers.ready_check.send_ready_check",
+            new=AsyncMock(return_value=True),
+        ), patch(
+            "handlers.admin_panel.list_all_active_calls",
+            new=AsyncMock(return_value=[]),
         ):
             try:
                 result = callback(update, context)

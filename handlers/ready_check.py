@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime
 
 from telegram import Update
@@ -25,7 +26,13 @@ READY_LOOP_SECONDS = 45
 
 
 def build_ready_check_handlers() -> list:
-    return []
+    return [
+        CommandHandler("ready", ready_command),
+        CallbackQueryHandler(
+            ready_callback,
+            pattern=rf"^{re.escape(CALLBACK_PREFIX)}",
+        ),
+    ]
 
 
 async def ready_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
