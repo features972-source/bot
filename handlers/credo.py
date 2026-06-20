@@ -1062,6 +1062,7 @@ def build_credo_handlers() -> list:
         CommandHandler("credousers", credousers_command),
         CommandHandler("removecredo", removecredocard_command),
         CommandHandler("setcredolimit", setcredolimit_command),
+        CommandHandler("setlimit", setcredolimit_command),
         CommandHandler("listcredocards", listcredocards_command),
     ]
 
@@ -1605,7 +1606,7 @@ async def listcredocards_command(update: Update, context: ContextTypes.DEFAULT_T
         f"   → remove: `/removecredo {labels.get(name, name)}`" for name in cards
     ]
     limit_hints = [
-        f"   → set left: `/setcredolimit {labels.get(name, name)} 5000`"
+        f"   → set left: `/setlimit {labels.get(name, name)} 5000`"
         for name in cards
     ]
     body = "\n".join(
@@ -1619,7 +1620,7 @@ async def listcredocards_command(update: Update, context: ContextTypes.DEFAULT_T
         + body
         + "\n\n"
         + "<i>Amount left on /cc buttons = limit minus logged outs. "
-        "Use /setcredolimit to set it manually (clears logged outs for that card).</i>",
+        "Use /setlimit to set it manually (clears logged outs for that card).</i>",
         parse_mode="Markdown",
     )
 
@@ -1632,8 +1633,9 @@ async def setcredolimit_command(update: Update, context: ContextTypes.DEFAULT_TY
     if len(context.args) < 2:
         await update.effective_message.reply_text(
             "Set **amount left** on the /cc picker for a card:\n\n"
-            "`/setcredolimit Lloyds #1 5000`\n"
-            "`/setcredolimit Tesco 5k`\n\n"
+            "`/setlimit Lloyds #1 5000`\n"
+            "`/setlimit Tesco 5k`\n\n"
+            "Also works as `/setcredolimit`.\n\n"
             "This clears logged outs for that card and sets the limit to that amount.\n"
             "Use **/listcredocards** to see exact card names.",
             parse_mode="Markdown",

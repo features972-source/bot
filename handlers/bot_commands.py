@@ -114,7 +114,7 @@ def _format_help_text(
             "/cc · /creditcard · /credo · /credos\n"
             "/activeccs · /usingcc — see which cards are currently in use\n"
             "/addcredouser · /removecredouser · /credousers\n"
-            "/addcredo · /removecredo · /listcredocards · /setcredolimit\n"
+            "/addcredo · /removecredo · /listcredocards · /setlimit\n"
             "/addpremium · /removepremium · /premiumusers\n"
             f"/mail — {mailer_name} · /maildone to stop\n"
             "/maillogs — recent /mail audit trail (admin)\n\n"
