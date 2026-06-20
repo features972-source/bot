@@ -107,6 +107,7 @@ FUZZY_OUT_PATTERN = re.compile(r"o[uot]+\s*(?:of|too)?", re.IGNORECASE)
 from money_format import (
     INLINE_PAYMENT_OUT_PATTERN,
     PAYMENT_OUT_PATTERN,
+    REVERSED_PAYMENT_OUT_PATTERN,
     currency_symbol,
     format_amount,
     parse_amount_candidates,
@@ -198,10 +199,22 @@ def _amount_from_match(match: re.Match[str]) -> float | None:
 
 
 def parse_payment_out(text: str) -> float | None:
+    stripped = re.sub(r"(?<=\d),(?=\d)", "", text.strip())
+    if REVERSED_PAYMENT_OUT_PATTERN is not None:
+        reversed_match = REVERSED_PAYMENT_OUT_PATTERN.match(stripped)
+        if reversed_match:
+            return _amount_from_match(reversed_match)
     match = PAYMENT_OUT_PATTERN.match(_normalize_payment_text(text))
     if not match:
         return None
     return _amount_from_match(match)
+
+
+def _effective_message_text(message) -> str | None:
+    if message is None:
+        return None
+    text = (message.text or message.caption or "").strip()
+    return text or None
 
 
 def find_payment_out_in_text(text: str) -> tuple[float, str] | None:
@@ -211,12 +224,11 @@ def find_payment_out_in_text(text: str) -> tuple[float, str] | None:
         return whole, stripped
     normalized = _normalize_payment_text(stripped)
     match = INLINE_PAYMENT_OUT_PATTERN.search(normalized)
-    if not match:
-        return None
-    amount = _amount_from_match(match)
-    if amount is None:
-        return None
-    return amount, match.group(0).strip()
+    if match:
+        amount = _amount_from_match(match)
+        if amount is not None:
+            return amount, match.group(0).strip()
+    return None
 
 
 def looks_like_payment_out(text: str, bot_username: str | None = None) -> bool:
@@ -548,6 +560,51 @@ def _strip_explicit_starter(text: str) -> str:
     return cleaned.strip()
 
 
+def _starter_from_pass_offer_chain(
+    path: str,
+    reply_to,
+) -> tuple[int | None, str | None, str | None] | None:
+    """Resolve starter from pass-offer posts when replying to bot pass messages."""
+    from database import get_pass_offer_by_notes_message, get_pass_offer_by_offer_message
+
+    if reply_to is None:
+        return None
+    chat_id = reply_to.chat_id if reply_to.chat else None
+    if chat_id is None:
+        return None
+
+    msg = reply_to
+    depth = 0
+    while msg is not None and depth < 12:
+        message_id = getattr(msg, "message_id", None)
+        if message_id is not None:
+            offer = get_pass_offer_by_offer_message(
+                path,
+                chat_id=chat_id,
+                offer_message_id=message_id,
+            )
+            if offer is not None:
+                return (
+                    offer.starter_user_id,
+                    offer.starter_username,
+                    offer.starter_display_name,
+                )
+            offer = get_pass_offer_by_notes_message(
+                path,
+                chat_id=chat_id,
+                notes_message_id=message_id,
+            )
+            if offer is not None:
+                return (
+                    offer.starter_user_id,
+                    offer.starter_username,
+                    offer.starter_display_name,
+                )
+        msg = msg.reply_to_message
+        depth += 1
+    return None
+
+
 def _resolve_starter(
     *,
     settings: Settings,
@@ -585,6 +642,10 @@ def _resolve_starter(
         if link is not None:
             return link.telegram_user_id, link.telegram_username, link.display_name
 
+    starter = _starter_from_pass_offer_chain(settings.database_path, reply_to)
+    if starter is not None:
+        return starter
+
     return None
 
 
@@ -595,8 +656,14 @@ def _display_name(user) -> str:
 
 
 def _payment_chat_ids(settings: Settings, bot_data: dict) -> set[int]:
+    from database import get_notify_chat_id
+
     ids: set[int] = set()
-    notify_id = bot_data.get("notify_chat_id") or settings.notify_chat_id
+    notify_id = (
+        bot_data.get("notify_chat_id")
+        or get_notify_chat_id(settings.database_path)
+        or settings.notify_chat_id
+    )
     if notify_id is not None:
         ids.add(notify_id)
     payment_notify_id = get_payment_notify_chat_id(settings.database_path)
@@ -753,7 +820,8 @@ async def _try_complete_pending_card(
 ) -> bool:
     message = update.effective_message
     user = update.effective_user
-    if message is None or not message.text or message.reply_to_message is None:
+    body = _effective_message_text(message)
+    if message is None or not body or message.reply_to_message is None:
         return False
 
     reply = message.reply_to_message
@@ -763,7 +831,7 @@ async def _try_complete_pending_card(
     card_map = _pending_card_map(context.bot_data)
     pending = card_map.pop((message.chat_id, reply.message_id), None)
     if pending is None and user is not None:
-        last4_candidate = message.text.strip()
+        last4_candidate = body.strip()
         if CARD_LAST4_PATTERN.fullmatch(last4_candidate):
             for key, candidate in list(card_map.items()):
                 if (
@@ -776,7 +844,7 @@ async def _try_complete_pending_card(
     if pending is None:
         return False
 
-    last4 = message.text.strip()
+    last4 = body.strip()
     if not CARD_LAST4_PATTERN.fullmatch(last4):
         card_map[(message.chat_id, reply.message_id)] = pending
         await message.reply_text(
@@ -1020,7 +1088,8 @@ async def payment_out_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     message = update.effective_message
     user = update.effective_user
     chat = update.effective_chat
-    if not message or not user or not chat or not message.text:
+    body = _effective_message_text(message)
+    if not message or not user or not chat or not body:
         return
 
     if await _try_complete_pending_card(update, context):
@@ -1033,7 +1102,7 @@ async def payment_out_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if not _payment_chat_allowed(settings, context.bot_data, chat):
         text = _strip_leading_bot_mention(
-            message.text, getattr(context.bot, "username", None)
+            body, getattr(context.bot, "username", None)
         )
         if find_payment_out_in_text(_strip_explicit_starter(text)) is not None:
             allowed = _payment_chat_ids(settings, context.bot_data)
@@ -1059,7 +1128,7 @@ async def payment_out_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     text = _strip_leading_bot_mention(
-        message.text, getattr(context.bot, "username", None)
+        body, getattr(context.bot, "username", None)
     )
     amount_result = find_payment_out_in_text(_strip_explicit_starter(text))
     if amount_result is None:

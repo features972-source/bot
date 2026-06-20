@@ -2373,6 +2373,44 @@ def pending_pass_offer_for_notes(path: str, chat_id: int, notes_message_id: int)
     return row is not None
 
 
+def get_pass_offer_by_offer_message(
+    path: str,
+    *,
+    chat_id: int,
+    offer_message_id: int,
+) -> PassOffer | None:
+    with _connect(path) as conn:
+        row = conn.execute(
+            f"""
+            {_PASS_OFFER_SELECT}
+            WHERE chat_id = ? AND offer_message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (chat_id, offer_message_id),
+        ).fetchone()
+    return _pass_offer_from_row(row) if row else None
+
+
+def get_pass_offer_by_notes_message(
+    path: str,
+    *,
+    chat_id: int,
+    notes_message_id: int,
+) -> PassOffer | None:
+    with _connect(path) as conn:
+        row = conn.execute(
+            f"""
+            {_PASS_OFFER_SELECT}
+            WHERE chat_id = ? AND notes_message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (chat_id, notes_message_id),
+        ).fetchone()
+    return _pass_offer_from_row(row) if row else None
+
+
 _PENDING_PASS_NOTE_SELECT = """
     SELECT
         id,

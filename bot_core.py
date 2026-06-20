@@ -23,6 +23,7 @@ from handlers.bot_commands import build_bot_handlers
 from handlers.credo import build_add_card_handlers
 from handlers.mailer import build_mailer_handlers
 from handlers.pass_queue import build_pass_queue_notes_handler
+from handlers.payments import build_payment_message_handlers
 from handlers.ready_check import build_ready_check_handlers, ready_check_shift_loop
 from mailer_bridge import init_mailer_bridge
 from notify import (
@@ -148,6 +149,8 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
     if runtime_notify_chat_id is not None:
         tg_app.bot_data["notify_chat_id"] = runtime_notify_chat_id
 
+    for handler in build_payment_message_handlers():
+        tg_app.add_handler(handler, group=-1)
     for handler in build_add_card_handlers():
         tg_app.add_handler(handler, group=-1)
     for handler in build_mailer_handlers():

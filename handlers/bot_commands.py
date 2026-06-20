@@ -26,7 +26,6 @@ from handlers.expense_reports import build_expense_report_handlers
 from handlers.expenses import build_expense_command_handlers, build_expense_message_handlers
 from handlers.payments import (
     build_payment_command_handlers,
-    build_payment_message_handlers,
 )
 from handlers.panic import build_panic_handlers
 from handlers.payment_reports import build_payment_report_handlers
@@ -43,9 +42,8 @@ def build_bot_handlers() -> list:
         *build_payment_command_handlers(),
         *build_profit_export_handlers(),
         *build_expense_command_handlers(),
-        # Expense wizard before payment outs — catch step replies in shared groups.
+        # Expense wizard before credo — catch step replies in shared groups.
         *build_expense_message_handlers(),
-        *build_payment_message_handlers(),
         *build_credo_handlers(),
         *build_expense_report_handlers(),
         *build_payment_report_handlers(),

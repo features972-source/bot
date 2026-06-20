@@ -10,6 +10,7 @@ _PARSE_SYMBOLS = ("A$", "AU$", "£", "$", "€")
 PAYMENT_AMOUNT = ""
 PAYMENT_OUT_PATTERN: re.Pattern[str] | None = None
 INLINE_PAYMENT_OUT_PATTERN: re.Pattern[str] | None = None
+REVERSED_PAYMENT_OUT_PATTERN: re.Pattern[str] | None = None
 EXPENSE_LINE_PATTERN: re.Pattern[str] | None = None
 STANDALONE_AMOUNT_PATTERN: re.Pattern[str] | None = None
 
@@ -46,6 +47,7 @@ def _currency_regex_fragment() -> str:
 def _rebuild_patterns() -> None:
     global PAYMENT_AMOUNT, PAYMENT_OUT_PATTERN, INLINE_PAYMENT_OUT_PATTERN
     global EXPENSE_LINE_PATTERN, STANDALONE_AMOUNT_PATTERN
+    global REVERSED_PAYMENT_OUT_PATTERN
     PAYMENT_AMOUNT = (
         _currency_regex_fragment()
         + r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*"
@@ -58,6 +60,10 @@ def _rebuild_patterns() -> None:
     )
     INLINE_PAYMENT_OUT_PATTERN = re.compile(
         rf"(?:^|\s){PAYMENT_AMOUNT}\s*out(?:\s+of|\s+too)?\b",
+        re.IGNORECASE,
+    )
+    REVERSED_PAYMENT_OUT_PATTERN = re.compile(
+        rf"^\s*out\s*{PAYMENT_AMOUNT}\s*[!?.]*\s*$",
         re.IGNORECASE,
     )
     EXPENSE_LINE_PATTERN = re.compile(
