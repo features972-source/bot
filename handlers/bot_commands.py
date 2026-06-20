@@ -36,9 +36,9 @@ def build_bot_handlers() -> list:
         *build_panic_handlers(),
         *build_payment_command_handlers(),
         *build_expense_command_handlers(),
-        # Payment outs before expenses — "933 out" must not be logged as an expense.
-        *build_payment_message_handlers(),
+        # Expense wizard before payment outs — catch step replies in shared groups.
         *build_expense_message_handlers(),
+        *build_payment_message_handlers(),
         *build_credo_handlers(),
         *build_expense_report_handlers(),
         *build_payment_report_handlers(),

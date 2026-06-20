@@ -10,12 +10,12 @@ from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import Settings
 from database import get_expense_logging_chat_id, list_links, record_expense
-from handlers.admin_access import _resolve_target_user, _user_label
+from handlers.admin_access import USERNAME_TOKEN, _MinimalUser, _resolve_target_user, _user_label
 from money_format import format_amount, parse_expense_amount, parse_expense_line
 
 logger = logging.getLogger(__name__)
 
-PENDING_EXPENSE_KEY = "pending_expense"
+PENDING_EXPENSES_KEY = "pending_expenses"
 STEP_WHO = "who"
 STEP_AMOUNT = "amount"
 STEP_WHERE = "where"
@@ -25,6 +25,7 @@ STEP_WHERE = "where"
 class PendingExpense:
     step: str
     chat_id: int
+    user_id: int
     subject_user_id: int | None = None
     subject_username: str | None = None
     subject_display_name: str | None = None
@@ -63,25 +64,80 @@ def _display_name(user) -> str:
     return name or "Unknown"
 
 
-def _clear_pending_expense(context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop(PENDING_EXPENSE_KEY, None)
+def _pending_expense_map(bot_data: dict) -> dict[tuple[int, int], PendingExpense]:
+    return bot_data.setdefault(PENDING_EXPENSES_KEY, {})
 
 
-def _get_pending_expense(context: ContextTypes.DEFAULT_TYPE) -> PendingExpense | None:
-    raw = context.user_data.get(PENDING_EXPENSE_KEY)
-    if raw is None:
-        return None
-    if isinstance(raw, PendingExpense):
-        return raw
-    return None
+def _pending_key(chat_id: int, user_id: int) -> tuple[int, int]:
+    return (chat_id, user_id)
+
+
+def _clear_pending_expense(context: ContextTypes.DEFAULT_TYPE, *, chat_id: int, user_id: int) -> None:
+    _pending_expense_map(context.bot_data).pop(_pending_key(chat_id, user_id), None)
+
+
+def _get_pending_expense(
+    context: ContextTypes.DEFAULT_TYPE, *, chat_id: int, user_id: int
+) -> PendingExpense | None:
+    return _pending_expense_map(context.bot_data).get(_pending_key(chat_id, user_id))
 
 
 def _set_pending_expense(context: ContextTypes.DEFAULT_TYPE, pending: PendingExpense) -> None:
-    context.user_data[PENDING_EXPENSE_KEY] = pending
+    _pending_expense_map(context.bot_data)[
+        _pending_key(pending.chat_id, pending.user_id)
+    ] = pending
 
 
 def _subject_from_user(user) -> tuple[int, str | None, str | None]:
     return user.id, getattr(user, "username", None), _display_name(user)
+
+
+def _link_to_user(link) -> _MinimalUser:
+    return _MinimalUser(
+        link.telegram_user_id,
+        username=link.telegram_username,
+        first_name=link.display_name or "",
+    )
+
+
+def _resolve_by_name_or_username(text: str, database_path: str):
+    query = text.strip()
+    if not query:
+        return None
+
+    if query.startswith("@"):
+        match = USERNAME_TOKEN.match(query)
+        if match:
+            username = match.group(1).lower()
+            for link in list_links(database_path):
+                if (
+                    link.telegram_username
+                    and link.telegram_username.lower().lstrip("@") == username
+                ):
+                    return _link_to_user(link)
+        return None
+
+    lowered = query.lower()
+    exact: list = []
+    partial: list = []
+    for link in list_links(database_path):
+        display = (link.display_name or "").strip()
+        username = (link.telegram_username or "").lstrip("@")
+        if display.lower() == lowered or username.lower() == lowered:
+            exact.append(link)
+            continue
+        if display and lowered in display.lower():
+            partial.append(link)
+        elif username and lowered in username.lower():
+            partial.append(link)
+
+    if len(exact) == 1:
+        return _link_to_user(exact[0])
+    if len(exact) > 1:
+        return None
+    if len(partial) == 1:
+        return _link_to_user(partial[0])
+    return None
 
 
 def _resolve_expense_subject(
@@ -112,22 +168,22 @@ def _resolve_expense_subject(
                     link.telegram_username
                     and link.telegram_username.lower().lstrip("@") == username.lower()
                 ):
-                    from handlers.admin_access import _MinimalUser
-
-                    return _MinimalUser(
-                        link.telegram_user_id,
-                        username=link.telegram_username,
-                        first_name=link.display_name or "",
-                    )
+                    return _link_to_user(link)
 
     if args:
-        return _resolve_target_user(update, args, database_path=settings.database_path)
+        resolved = _resolve_target_user(update, args, database_path=settings.database_path)
+        if resolved is not None:
+            return resolved
 
     text = (message.text or "").strip()
-    if text:
-        return _resolve_target_user(update, [text], database_path=settings.database_path)
+    if not text:
+        return None
 
-    return None
+    resolved = _resolve_target_user(update, [text], database_path=settings.database_path)
+    if resolved is not None:
+        return resolved
+
+    return _resolve_by_name_or_username(text, settings.database_path)
 
 
 async def _finalize_expense(
@@ -141,7 +197,7 @@ async def _finalize_expense(
     message = update.effective_message
     user = update.effective_user
     if not message or not user or pending.subject_user_id is None or pending.amount is None:
-        _clear_pending_expense(context)
+        _clear_pending_expense(context, chat_id=pending.chat_id, user_id=pending.user_id)
         return
 
     where = where.strip()
@@ -164,7 +220,7 @@ async def _finalize_expense(
         chat_id=pending.chat_id,
         telegram_message_id=message.message_id,
     )
-    _clear_pending_expense(context)
+    _clear_pending_expense(context, chat_id=pending.chat_id, user_id=pending.user_id)
     if expense_id is None:
         await message.reply_text("Could not save that expense (duplicate message?).")
         return
@@ -191,8 +247,6 @@ async def _finalize_expense(
 
 
 def _user_label_from_pending(pending: PendingExpense) -> str:
-    from handlers.admin_access import _MinimalUser
-
     user = _MinimalUser(
         pending.subject_user_id or 0,
         username=pending.subject_username,
@@ -229,6 +283,7 @@ async def expense_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         pending = PendingExpense(
             step=STEP_AMOUNT,
             chat_id=chat.id,
+            user_id=user.id,
             subject_user_id=user_id,
             subject_username=username,
             subject_display_name=display_name,
@@ -242,43 +297,47 @@ async def expense_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     _set_pending_expense(
         context,
-        PendingExpense(step=STEP_WHO, chat_id=chat.id),
+        PendingExpense(step=STEP_WHO, chat_id=chat.id, user_id=user.id),
     )
     await message.reply_text(
         "🧾 **New expense**\n\n"
         "Whose expense was it?\n"
-        "Reply to their message, tag `@username`, or type their name.",
+        "Reply to **their** message, tag `@username`, or type their linked name.",
         parse_mode="Markdown",
     )
 
 
 async def expense_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    pending = _get_pending_expense(context)
+    message = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+    if not message or not user or not chat:
+        return
+    pending = _get_pending_expense(context, chat_id=chat.id, user_id=user.id)
     if pending is None:
         return
-    _clear_pending_expense(context)
-    message = update.effective_message
-    if message:
-        await message.reply_text("Expense cancelled.")
+    _clear_pending_expense(context, chat_id=chat.id, user_id=user.id)
+    await message.reply_text("Expense cancelled.")
 
 
-async def _try_complete_pending_expense(
+async def try_complete_pending_expense(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> bool:
-    pending = _get_pending_expense(context)
-    if pending is None:
-        return False
-
-    settings: Settings = context.bot_data["settings"]
     message = update.effective_message
     user = update.effective_user
     chat = update.effective_chat
     if not message or not user or not chat or not message.text:
         return False
+
+    pending = _get_pending_expense(context, chat_id=chat.id, user_id=user.id)
+    if pending is None:
+        return False
+
+    settings: Settings = context.bot_data["settings"]
     if chat.id != pending.chat_id:
         return False
     if not _expense_chat_allowed(settings, chat):
-        _clear_pending_expense(context)
+        _clear_pending_expense(context, chat_id=chat.id, user_id=user.id)
         return False
 
     text = message.text.strip()
@@ -287,8 +346,10 @@ async def _try_complete_pending_expense(
         subject = _resolve_expense_subject(update, settings)
         if subject is None:
             await message.reply_text(
-                "Couldn't find that person. Reply to their message, use `@username`, "
-                "or pick someone linked with /link."
+                "Couldn't find that person.\n\n"
+                "• Reply to **their** message (not the bot's)\n"
+                "• Or tag `@username`\n"
+                "• Or type their linked name from /links"
             )
             return True
         user_id, username, display_name = _subject_from_user(subject)
@@ -335,7 +396,7 @@ async def expense_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not message or not user or not chat or not message.text:
         return
 
-    if await _try_complete_pending_expense(update, context):
+    if await try_complete_pending_expense(update, context):
         return
 
     if not _expense_chat_allowed(settings, chat):

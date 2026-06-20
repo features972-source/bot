@@ -1026,6 +1026,11 @@ async def payment_out_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if await _try_complete_pending_card(update, context):
         return
 
+    from handlers.expenses import try_complete_pending_expense
+
+    if await try_complete_pending_expense(update, context):
+        return
+
     if not _payment_chat_allowed(settings, context.bot_data, chat):
         text = _strip_leading_bot_mention(
             message.text, getattr(context.bot, "username", None)

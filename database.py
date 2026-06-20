@@ -585,7 +585,10 @@ def get_expense_logging_chat_id(path: str) -> int | None:
     chat_id = _parse_stored_chat_id(_get_bot_setting(path, EXPENSE_LOGGING_CHAT_ID_KEY))
     if chat_id is not None:
         return chat_id
-    return _parse_stored_chat_id(_get_bot_setting(path, EXPENSE_NOTIFY_CHAT_ID_KEY))
+    legacy = _parse_stored_chat_id(_get_bot_setting(path, EXPENSE_NOTIFY_CHAT_ID_KEY))
+    if legacy is not None:
+        return legacy
+    return get_expense_report_chat_id(path)
 
 
 def set_expense_logging_chat_id(path: str, chat_id: int) -> None:
