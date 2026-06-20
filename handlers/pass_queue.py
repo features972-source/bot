@@ -66,7 +66,7 @@ def _pass_summary_block(notes_text: str) -> str:
 
 
 def _pass_read_line() -> str:
-    return "<i>Read notes before taking pass.</i>"
+    return "👀 <i>Read full notes before taking pass.</i>"
 
 
 def _pass_offer_text(offer: PassOffer, *, reminder: bool = False) -> str:
@@ -75,7 +75,8 @@ def _pass_offer_text(offer: PassOffer, *, reminder: bool = False) -> str:
     read_line = _pass_read_line()
     if offer.manual_override:
         return (
-            f"🚨 <b>Manual override open</b>{suffix} — anyone in queue can take this pass.\n\n"
+            f"🚨 <b>Manual override open</b>{suffix}\n"
+            "Anyone in queue can take this pass.\n\n"
             f"{summary}{read_line}"
         )
     mention = _mention_html(
@@ -84,7 +85,7 @@ def _pass_offer_text(offer: PassOffer, *, reminder: bool = False) -> str:
         offer.assigned_display_name,
     )
     return (
-        f"{mention} — <b>take this pass</b>{suffix}\n\n"
+        f"{mention} — 📞 <b>Take this pass</b>{suffix}\n\n"
         f"{summary}{read_line}"
     )
 
@@ -100,7 +101,7 @@ def _manual_override_text(
     read_line = _pass_read_line()
     finishers = [entry for entry in queue if entry.user_id != starter_user_id]
     suffix = " ⏰" if reminder else ""
-    header = f"🚨 <b>Manual override open</b>{suffix} — anyone in queue can take this pass."
+    header = f"🚨 <b>Manual override open</b>{suffix}\nAnyone in queue can take this pass."
     if not finishers:
         return f"{header}\n\n{summary}{read_line}"
     mentions = ", ".join(

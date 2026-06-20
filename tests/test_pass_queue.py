@@ -165,9 +165,10 @@ also has hsbc"""
         notes_message.reply_text.assert_awaited()
         args, kwargs = notes_message.reply_text.await_args
         text = kwargs.get("text", args[0] if args else "")
-        self.assertIn("take this pass", text)
-        self.assertIn("Balance:", text)
-        self.assertIn("DOB:", text)
+        self.assertIn("Take this pass", text)
+        self.assertIn("Quick look", text)
+        self.assertIn("Balance", text)
+        self.assertIn("DOB", text)
 
     async def test_notes_handler_assigns_second_note_to_next_free_finisher(self):
         from config import load_settings
@@ -225,7 +226,7 @@ also has hsbc"""
         notes_message.reply_text.assert_awaited_once()
         args, kwargs = notes_message.reply_text.await_args
         text = kwargs.get("text", args[0] if args else "")
-        self.assertIn("take this pass", text)
+        self.assertIn("Take this pass", text)
         self.assertIn("finisher2", text.lower())
         busy = pending_pass_assignee_user_ids(self.db_path, chat_id=-100)
         self.assertEqual(busy, {111, 222})
@@ -421,8 +422,8 @@ also has hsbc"""
         parent.reply_text.assert_awaited_once()
         args, kwargs = parent.reply_text.await_args
         text = kwargs.get("text", args[0] if args else "")
-        self.assertIn("take this pass", text)
-        self.assertIn("Read notes before taking pass", text)
+        self.assertIn("Take this pass", text)
+        self.assertIn("Read full notes before taking pass", text)
 
     async def test_joinqueue_assigns_pending_pass_to_new_finisher(self):
         from config import load_settings
@@ -727,16 +728,18 @@ also has hsbc"""
         self.assertEqual(summary.dob, "14/09/67")
         self.assertIn("£5000", summary.balance or "")
         html_summary = format_notes_summary_html(notes)
-        self.assertIn("<b>Balance:</b>", html_summary)
-        self.assertIn("<b>DOB:</b>", html_summary)
+        self.assertIn("Quick look", html_summary)
+        self.assertIn("💰", html_summary)
+        self.assertIn("🎂", html_summary)
 
     def test_format_notes_summary_html(self):
         html_summary = format_notes_summary_html(
             "David rechard\n20/03/56\nBk\n£3737.38 current"
         )
-        self.assertIn("<b>Balance:</b>", html_summary)
-        self.assertIn("<b>DOB:</b>", html_summary)
-        self.assertIn("<b>Bank:</b>", html_summary)
+        self.assertIn("Quick look", html_summary)
+        self.assertIn("💰", html_summary)
+        self.assertIn("🎂", html_summary)
+        self.assertIn("🏦", html_summary)
         self.assertIn("Bk", html_summary)
 
     def test_notes_missing_balance(self):

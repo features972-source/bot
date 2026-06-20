@@ -333,15 +333,25 @@ def extract_notes_pass_summary(text: str | None) -> NotesPassSummary:
     )
 
 
+def _online_summary_emoji(online: str) -> str:
+    lower = online.lower()
+    if "no" in lower or "not" in lower:
+        return "📵"
+    return "📱"
+
+
 def format_notes_summary_html(text: str | None) -> str:
     summary = extract_notes_pass_summary(text)
     lines: list[str] = []
     if summary.balance:
-        lines.append(f"<b>Balance:</b> {html.escape(summary.balance)}")
+        lines.append(f"💰 <b>Balance</b> · {html.escape(summary.balance)}")
     if summary.dob:
-        lines.append(f"<b>DOB:</b> {html.escape(summary.dob)}")
+        lines.append(f"🎂 <b>DOB</b> · {html.escape(summary.dob)}")
     if summary.bank:
-        lines.append(f"<b>Bank:</b> {html.escape(summary.bank)}")
+        lines.append(f"🏦 <b>Bank</b> · {html.escape(summary.bank)}")
     if summary.online:
-        lines.append(f"<b>Online:</b> {html.escape(summary.online)}")
-    return "\n".join(lines)
+        emoji = _online_summary_emoji(summary.online)
+        lines.append(f"{emoji} <b>Online</b> · {html.escape(summary.online)}")
+    if not lines:
+        return ""
+    return "📋 <b>Quick look</b>\n" + "\n".join(lines)
