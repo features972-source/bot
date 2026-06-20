@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import Settings
@@ -30,6 +31,7 @@ class PendingExpense:
     subject_username: str | None = None
     subject_display_name: str | None = None
     amount: float | None = None
+    cleanup_message_ids: list[int] = field(default_factory=list)
 
 
 def build_expense_message_handlers() -> list:
@@ -86,6 +88,35 @@ def _set_pending_expense(context: ContextTypes.DEFAULT_TYPE, pending: PendingExp
     _pending_expense_map(context.bot_data)[
         _pending_key(pending.chat_id, pending.user_id)
     ] = pending
+
+
+def _track_cleanup(pending: PendingExpense, *message_ids: int | None) -> None:
+    seen = set(pending.cleanup_message_ids)
+    for message_id in message_ids:
+        if message_id is None or message_id in seen:
+            continue
+        pending.cleanup_message_ids.append(message_id)
+        seen.add(message_id)
+
+
+async def _delete_messages(bot, chat_id: int, message_ids: list[int]) -> None:
+    for message_id in message_ids:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except BadRequest:
+            pass
+        except Exception:
+            logger.warning("Could not delete message %s in chat %s", message_id, chat_id)
+
+
+async def _cleanup_wizard_messages(
+    bot, pending: PendingExpense, *, extra_message_ids: list[int] | None = None
+) -> None:
+    ids = list(pending.cleanup_message_ids)
+    if extra_message_ids:
+        ids.extend(extra_message_ids)
+    if ids:
+        await _delete_messages(bot, pending.chat_id, ids)
 
 
 def _subject_from_user(user) -> tuple[int, str | None, str | None]:
@@ -235,15 +266,15 @@ async def _finalize_expense(
         expense_id,
     )
 
-    from handlers.expense_reports import schedule_expense_report_refresh
-
-    schedule_expense_report_refresh(context.bot, settings)
-
-    subject = _user_label_from_pending(pending)
-    await message.reply_text(
-        f"✅ Logged **{format_amount(pending.amount)}** for **{subject}** → {where} (#{expense_id})",
-        parse_mode="Markdown",
+    await _cleanup_wizard_messages(
+        context.bot,
+        pending,
+        extra_message_ids=[message.message_id],
     )
+
+    from handlers.expense_reports import refresh_expense_report
+
+    await refresh_expense_report(context.bot, settings)
 
 
 def _user_label_from_pending(pending: PendingExpense) -> str:
@@ -287,24 +318,28 @@ async def expense_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             subject_user_id=user_id,
             subject_username=username,
             subject_display_name=display_name,
+            cleanup_message_ids=[message.message_id],
         )
         _set_pending_expense(context, pending)
-        await message.reply_text(
+        prompt = await message.reply_text(
             f"🧾 Expense for **{_user_label(subject)}**\n\nHow much was it? (e.g. `132` or `£132`)",
             parse_mode="Markdown",
         )
+        _track_cleanup(pending, prompt.message_id)
+        _set_pending_expense(context, pending)
         return
 
-    _set_pending_expense(
-        context,
-        PendingExpense(step=STEP_WHO, chat_id=chat.id, user_id=user.id),
-    )
-    await message.reply_text(
+    pending = PendingExpense(step=STEP_WHO, chat_id=chat.id, user_id=user.id)
+    _track_cleanup(pending, message.message_id)
+    _set_pending_expense(context, pending)
+    prompt = await message.reply_text(
         "🧾 **New expense**\n\n"
         "Whose expense was it?\n"
         "Reply to **their** message, tag `@username`, or type their linked name.",
         parse_mode="Markdown",
     )
+    _track_cleanup(pending, prompt.message_id)
+    _set_pending_expense(context, pending)
 
 
 async def expense_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -316,8 +351,8 @@ async def expense_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
     pending = _get_pending_expense(context, chat_id=chat.id, user_id=user.id)
     if pending is None:
         return
+    await _cleanup_wizard_messages(context.bot, pending, extra_message_ids=[message.message_id])
     _clear_pending_expense(context, chat_id=chat.id, user_id=user.id)
-    await message.reply_text("Expense cancelled.")
 
 
 async def try_complete_pending_expense(
@@ -341,44 +376,51 @@ async def try_complete_pending_expense(
         return False
 
     text = message.text.strip()
+    _track_cleanup(pending, message.message_id)
 
     if pending.step == STEP_WHO:
         subject = _resolve_expense_subject(update, settings)
         if subject is None:
-            await message.reply_text(
+            prompt = await message.reply_text(
                 "Couldn't find that person.\n\n"
                 "• Reply to **their** message (not the bot's)\n"
                 "• Or tag `@username`\n"
                 "• Or type their linked name from /links"
             )
+            _track_cleanup(pending, prompt.message_id)
+            _set_pending_expense(context, pending)
             return True
         user_id, username, display_name = _subject_from_user(subject)
         pending.subject_user_id = user_id
         pending.subject_username = username
         pending.subject_display_name = display_name
         pending.step = STEP_AMOUNT
-        _set_pending_expense(context, pending)
-        await message.reply_text(
+        prompt = await message.reply_text(
             f"How much was it for **{_user_label(subject)}**? (e.g. `132` or `£132`)",
             parse_mode="Markdown",
         )
+        _track_cleanup(pending, prompt.message_id)
+        _set_pending_expense(context, pending)
         return True
 
     if pending.step == STEP_AMOUNT:
         parsed = parse_expense_amount(text)
         if parsed is None:
-            await message.reply_text(
+            prompt = await message.reply_text(
                 f"Send the amount only (e.g. `132` or `{format_amount(132)}`)."
             )
+            _track_cleanup(pending, prompt.message_id)
+            _set_pending_expense(context, pending)
             return True
         amount, _ = parsed
         pending.amount = amount
         pending.step = STEP_WHERE
-        _set_pending_expense(context, pending)
-        await message.reply_text(
+        prompt = await message.reply_text(
             f"**{format_amount(amount)}** — where was it to? (e.g. `Tesco`, `Uber`, `Office supplies`)",
             parse_mode="Markdown",
         )
+        _track_cleanup(pending, prompt.message_id)
+        _set_pending_expense(context, pending)
         return True
 
     if pending.step == STEP_WHERE:
@@ -437,11 +479,7 @@ async def expense_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         expense_id,
     )
 
-    from handlers.expense_reports import schedule_expense_report_refresh
+    from handlers.expense_reports import refresh_expense_report
 
-    schedule_expense_report_refresh(context.bot, settings)
-
-    await message.reply_text(
-        f"✅ Logged **{format_amount(amount)}** · {reason} (#{expense_id})",
-        parse_mode="Markdown",
-    )
+    await _delete_messages(context.bot, chat.id, [message.message_id])
+    await refresh_expense_report(context.bot, settings)

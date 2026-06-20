@@ -7,7 +7,7 @@ import html
 import logging
 from collections import defaultdict
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
@@ -164,19 +164,6 @@ async def refresh_expense_report(bot, settings: Settings) -> None:
         if image_bytes is None:
             text = build_expense_report_empty_text(settings)
             if message_id is not None:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        text=text,
-                        parse_mode="HTML",
-                    )
-                    return
-                except BadRequest as exc:
-                    if "message is not modified" in str(exc).lower():
-                        return
-                except Exception:
-                    logger.exception("Failed to edit empty expense report")
                 await _delete_notify_message(bot, chat_id, message_id)
                 message_id = None
             try:
@@ -189,8 +176,6 @@ async def refresh_expense_report(bot, settings: Settings) -> None:
             return
 
         if message_id is not None:
-            if await _try_edit_photo(bot, chat_id, message_id, image_bytes):
-                return
             await _delete_notify_message(bot, chat_id, message_id)
 
         try:
@@ -258,7 +243,7 @@ async def setexpenses_command(
     await message.reply_text(
         "🧾 **Live expense table**\n\n"
         "Choose **Q1** or **Q2**. The bot posts **one table** in this group and "
-        "**updates the same image** whenever an expense is logged.\n\n"
+        "**reposts it at the bottom** whenever an expense is logged.\n\n"
         "Run **/setnotifyexpenses** first in the group where people log expenses.\n"
         "Post expenses like: `£132 blast` or use **/expense** (step-by-step)\n"
         "New week every **Sunday**.",
