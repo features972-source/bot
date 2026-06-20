@@ -64,6 +64,18 @@ Very stiff no Barclays
 
 BK19CSS"""
 
+    EXAMPLE_4 = """Frank Williams
+
+23/02/1943
+
+barclays
+
+balance 20,000
+
+savers with 30k
+
+also has hsbc"""
+
     def test_explicit_notes_marker(self):
         text = "NOTES\nName: John Smith\nDOB: 01/01/1980"
         self.assertTrue(looks_like_notes(text))
@@ -80,6 +92,9 @@ BK19CSS"""
 
     def test_real_example_3_heather(self):
         self.assertTrue(looks_like_notes(self.EXAMPLE_3))
+
+    def test_real_example_4_frank_williams(self):
+        self.assertTrue(looks_like_notes(self.EXAMPLE_4))
 
     def test_rejects_payment_out(self):
         self.assertFalse(looks_like_notes("5182 out"))

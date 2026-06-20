@@ -30,14 +30,15 @@ UK_POSTCODE = re.compile(
 
 FINANCIAL_KEYWORD = re.compile(
     r"(?i)\b(?:"
-    r"barclay(?:card|s)?|apay|apple\s*pay|has\s+apay|online(?:\s+banking)?|"
+    r"barclay(?:card|s)?|hsbc|natwest|lloyds|santander|halifax|monzo|"
+    r"apay|apple\s*pay|has\s+apay|online(?:\s+banking)?|"
     r"no\s+online\s+banking|credit|debit|coin|banking|bank|stiff|"
-    r"sort\s*code|account|work\s+address"
+    r"sort\s*code|account|work\s+address|balance|savers?"
     r")\b"
 )
 
 AMOUNT_K_PATTERN = re.compile(
-    r"(?i)(?:around\s+)?\d[\d,.\s]*(?:k|m)(?:\s*[-–]\s*\d[\d,.\s]*(?:k|m))?"
+    r"(?i)(?:around\s+)?(?:balance\s+)?\d[\d,.\s]*(?:k|m)?(?:\s*[-–]\s*\d[\d,.\s]*(?:k|m)?)?"
 )
 
 NAME_LIKE_LINE = re.compile(
@@ -71,6 +72,8 @@ def _freeform_notes(text: str, lines: list[str]) -> bool:
     if has_postcode and has_amount_k:
         return True
     if has_amount_k and has_financial and len(lines) >= 4:
+        return True
+    if has_dob and has_financial and len(lines) >= 3:
         return True
     if has_name_line and has_dob and len(lines) >= 3:
         return True

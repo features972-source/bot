@@ -24,7 +24,6 @@ from database import (
     rotate_pass_queue_user_to_back,
     update_pass_offer,
 )
-from handlers.payments import _payment_chat_allowed
 from notes_detect import looks_like_notes
 
 logger = logging.getLogger(__name__)
@@ -157,6 +156,11 @@ async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+def _pass_queue_chat_allowed(chat) -> bool:
+    """Notes handoff runs wherever /joinqueue works (any team group)."""
+    return chat is not None and chat.type in ("group", "supergroup")
+
+
 async def notes_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     message = update.effective_message
@@ -164,7 +168,7 @@ async def notes_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     chat = update.effective_chat
     if not message or not user or not chat or user.is_bot:
         return
-    if not _payment_chat_allowed(settings, context.bot_data, chat):
+    if not _pass_queue_chat_allowed(chat):
         return
 
     text = message.text or message.caption or ""
@@ -209,6 +213,14 @@ async def notes_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         settings.database_path,
         offer_id,
         offer_message_id=offer_message.message_id,
+    )
+    logger.info(
+        "pass offer chat=%s notes_msg=%s starter=%s assigned=%s offer=%s",
+        chat.id,
+        message.message_id,
+        user.id,
+        assigned.user_id,
+        offer_id,
     )
 
 
