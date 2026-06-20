@@ -73,6 +73,7 @@ COMMAND_SCENARIOS: dict[str, list[list[str]]] = {
     "addcredouser": [[], ["@cuser"]],
     "removecredouser": [[], ["@cuser"]],
     "removecredo": [[], ["1"], ["999"]],
+    "setcredolimit": [[], ["Tesco", "5000"], ["Lloyds #1", "5k"]],
     "addpremium": [[], [str(ADMIN_ID)]],
     "removepremium": [[], [str(ADMIN_ID)]],
     "mail": [[], ["test subject"]],

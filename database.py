@@ -2915,6 +2915,39 @@ def remove_credo_credit_card(path: str, name: str) -> bool:
         return cursor.rowcount > 0
 
 
+def update_credo_credit_card_capacity(path: str, name: str, capacity: float) -> bool:
+    cleaned = name.strip()
+    if not cleaned:
+        return False
+    if capacity < 0:
+        raise ValueError("capacity must be zero or positive")
+    with _connect(path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE credo_credit_cards
+            SET capacity = ?
+            WHERE name = ? COLLATE NOCASE
+            """,
+            (capacity, cleaned),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def clear_credo_card_usage(path: str, card_name: str) -> int:
+    cleaned = card_name.strip()
+    with _connect(path) as conn:
+        cursor = conn.execute(
+            """
+            DELETE FROM credo_card_usage
+            WHERE card_name = ? COLLATE NOCASE
+            """,
+            (cleaned,),
+        )
+        conn.commit()
+        return cursor.rowcount
+
+
 def _credo_credit_card_from_row(row: sqlite3.Row | tuple) -> CredoCreditCard:
     return CredoCreditCard(
         name=row[0],

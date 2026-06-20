@@ -36,6 +36,8 @@ from database import (
     remove_credo_whitelist_user,
     save_credo_profile,
     sum_credo_card_usage,
+    clear_credo_card_usage,
+    update_credo_credit_card_capacity,
     upsert_credo_credit_card,
 )
 from handlers.admin_access import (
@@ -1059,6 +1061,7 @@ def build_credo_handlers() -> list:
         CommandHandler("removecredouser", removecredouser_command),
         CommandHandler("credousers", credousers_command),
         CommandHandler("removecredo", removecredocard_command),
+        CommandHandler("setcredolimit", setcredolimit_command),
         CommandHandler("listcredocards", listcredocards_command),
     ]
 
@@ -1601,11 +1604,79 @@ async def listcredocards_command(update: Update, context: ContextTypes.DEFAULT_T
     remove_hints = [
         f"   → remove: `/removecredo {labels.get(name, name)}`" for name in cards
     ]
+    limit_hints = [
+        f"   → set left: `/setcredolimit {labels.get(name, name)} 5000`"
+        for name in cards
+    ]
     body = "\n".join(
-        f"{line}\n{hint}" for line, hint in zip(lines, remove_hints, strict=True)
+        f"{line}\n{remove_hint}\n{limit_hint}"
+        for line, remove_hint, limit_hint in zip(
+            lines, remove_hints, limit_hints, strict=True
+        )
     )
     await update.effective_message.reply_text(
-        "💳 **Credo credit cards**\n\n" + body,
+        "💳 **Credo credit cards**\n\n"
+        + body
+        + "\n\n"
+        + "<i>Amount left on /cc buttons = limit minus logged outs. "
+        "Use /setcredolimit to set it manually (clears logged outs for that card).</i>",
+        parse_mode="Markdown",
+    )
+
+
+async def setcredolimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not await require_admin(update, settings):
+        return
+
+    if len(context.args) < 2:
+        await update.effective_message.reply_text(
+            "Set **amount left** on the /cc picker for a card:\n\n"
+            "`/setcredolimit Lloyds #1 5000`\n"
+            "`/setcredolimit Tesco 5k`\n\n"
+            "This clears logged outs for that card and sets the limit to that amount.\n"
+            "Use **/listcredocards** to see exact card names.",
+            parse_mode="Markdown",
+        )
+        return
+
+    amount = _parse_usage_amount(context.args[-1])
+    if amount is None:
+        await update.effective_message.reply_text(
+            "Send a valid amount like `5000`, `£5000`, or `5k`.",
+            parse_mode="Markdown",
+        )
+        return
+
+    card_query = " ".join(context.args[:-1]).strip()
+    matches, hint = _resolve_credo_cards_for_removal(settings.database_path, card_query)
+    if hint:
+        await update.effective_message.reply_text(hint, parse_mode="Markdown")
+        return
+    if len(matches) != 1:
+        await update.effective_message.reply_text(
+            f"**{card_query}** was not found. Use **/listcredocards** for exact names.",
+            parse_mode="Markdown",
+        )
+        return
+
+    db_name = matches[0]
+    cleared = clear_credo_card_usage(settings.database_path, db_name)
+    if not update_credo_credit_card_capacity(settings.database_path, db_name, amount):
+        await update.effective_message.reply_text(
+            f"Could not update **{card_query}**.", parse_mode="Markdown"
+        )
+        return
+
+    display_label = _format_card_label(settings.database_path, db_name)
+    cleared_note = (
+        f" Cleared {cleared} logged out{'s' if cleared != 1 else ''}."
+        if cleared
+        else ""
+    )
+    await update.effective_message.reply_text(
+        f"✅ **{display_label}** — amount left set to **{format_amount(amount)}**.{cleared_note}\n\n"
+        "Shows on /cc buttons immediately.",
         parse_mode="Markdown",
     )
 
