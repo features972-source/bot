@@ -107,6 +107,17 @@ also has hsbc"""
             looks_like_notes("See you tomorrow\nThanks\nOk cool")
         )
 
+    def test_short_two_line_with_dob_and_bank(self):
+        self.assertTrue(looks_like_notes("John Smith\n23/02/1943\nbarclays"))
+
+    def test_minimal_three_line_name_and_detail(self):
+        self.assertTrue(looks_like_notes("Sarah Jones\n15/01/1980\nLloyds"))
+
+    def test_five_line_paste_without_strong_keywords(self):
+        self.assertTrue(
+            looks_like_notes("Mary Anne\n12/12/1950\nJulie\nNo barclays\nAB12 3CD")
+        )
+
 
 class PassQueueDbTests(unittest.TestCase):
     @classmethod
