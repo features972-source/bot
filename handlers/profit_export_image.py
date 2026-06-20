@@ -33,7 +33,7 @@ from handlers.payment_table_image import (
     _s,
     _ss,
 )
-from handlers.profit_export import ProfitExportSummary
+from handlers.profit_export import ProfitExportSummary, UserPayoutEntry
 from money_format import format_amount
 from payments_excel_export import (
     CENTRE_PAY_PERCENT,
@@ -66,6 +66,33 @@ def _expense_user_label(
         username_lookup=lookup,
         compact=True,
     )
+
+
+def _payout_user_label(entry: UserPayoutEntry, *, lookup: dict[int, str]) -> str:
+    return sheet_user_label(
+        entry.telegram_username,
+        entry.display_name,
+        entry.user_id,
+        username_lookup=lookup,
+        compact=True,
+    )
+
+
+def _payout_detail(entry: UserPayoutEntry) -> str:
+    parts: list[str] = []
+    if entry.starter_amount > 0:
+        parts.append(f"S {format_amount(entry.starter_amount)}")
+    if entry.finisher_amount > 0:
+        parts.append(f"F {format_amount(entry.finisher_amount)}")
+    job_bits: list[str] = []
+    if entry.starter_count:
+        job_bits.append(f"{entry.starter_count} starter")
+    if entry.finisher_count:
+        job_bits.append(f"{entry.finisher_count} finisher")
+    breakdown = " + ".join(parts)
+    if job_bits:
+        return f"{breakdown} · {', '.join(job_bits)}"
+    return breakdown or "—"
 
 
 def render_profit_export_png(
@@ -101,6 +128,23 @@ def render_profit_export_png(
     for entry in summary.expense_by_user:
         if entry.telegram_username:
             lookup[entry.user_id] = entry.telegram_username.lstrip("@")
+    for entry in summary.payout_by_user:
+        if entry.telegram_username:
+            lookup[entry.user_id] = entry.telegram_username.lstrip("@")
+
+    payout_rows: list[list[str]] = []
+    if summary.payout_by_user:
+        payout_rows.append(["— Amount to pay —", "", ""])
+        for entry in summary.payout_by_user:
+            payout_rows.append(
+                [
+                    _payout_user_label(entry, lookup=lookup),
+                    format_amount(entry.total_owed),
+                    _payout_detail(entry),
+                ]
+            )
+    else:
+        payout_rows.append(["No job payouts owed", "—", ""])
 
     expense_rows: list[list[str]] = []
     if summary.expense_by_user:
@@ -117,11 +161,11 @@ def render_profit_export_png(
         expense_rows.append(["No expenses logged", "—", ""])
 
     header_cells = list(_HEADERS)
-    body_rows = summary_rows + expense_rows
+    body_rows = summary_rows + payout_rows + expense_rows
     totals = [
-        "Centre share",
-        f"{summary.centre_share_of_gross:.1f}% of gross",
-        format_amount(summary.centre_pay),
+        "Staff owed",
+        format_amount(summary.total_owed_to_staff),
+        f"{len(summary.payout_by_user)} user{'s' if len(summary.payout_by_user) != 1 else ''}",
     ]
     stamp_text = format_image_footer(live=False)
 

@@ -106,7 +106,7 @@ def _format_help_text(
             "/setexpenses — live expense table in a group (pick Q1/Q2, auto-updates)\n"
             "/expense — log an expense step-by-step (who · amount · where)\n\n"
             "<b>📊 Profit</b>\n"
-            "/export — jobs payout %, expenses & net profit (today · 7 · all)\n\n"
+            "/export — jobs payout %, owed per user, expenses & net profit (today · 7 · all)\n\n"
             "<b>👑 Admins</b>\n"
             "/admin · /addadmin · /removeadmin — manage bot admins\n\n"
             "<b>🚫 Blacklist</b>\n"

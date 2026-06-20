@@ -13,6 +13,7 @@ from telegram.ext import CommandHandler, ContextTypes
 from config import Settings
 from database import (
     ExpenseSpendingEntry,
+    PaymentRecord,
     get_expense_spending_by_user,
     get_expense_totals,
     get_payment_totals,
@@ -39,6 +40,21 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class UserPayoutEntry:
+    user_id: int
+    telegram_username: str | None
+    display_name: str | None
+    starter_amount: float = 0.0
+    finisher_amount: float = 0.0
+    starter_count: int = 0
+    finisher_count: int = 0
+
+    @property
+    def total_owed(self) -> float:
+        return self.starter_amount + self.finisher_amount
+
+
+@dataclass
 class ProfitExportSummary:
     period_label: str
     payment_count: int
@@ -49,6 +65,7 @@ class ProfitExportSummary:
     expense_count: int
     expense_total: float
     expense_by_user: list[ExpenseSpendingEntry]
+    payout_by_user: list[UserPayoutEntry]
 
     @property
     def net_profit(self) -> float:
@@ -59,6 +76,57 @@ class ProfitExportSummary:
         if self.gross <= 0:
             return 0.0
         return (self.centre_pay / self.gross) * 100
+
+    @property
+    def total_owed_to_staff(self) -> float:
+        return self.starter_pay + self.finisher_pay
+
+
+def _aggregate_payouts_by_user(
+    payments: list[PaymentRecord],
+) -> list[UserPayoutEntry]:
+    by_user: dict[int, UserPayoutEntry] = {}
+
+    def _entry(
+        user_id: int,
+        username: str | None,
+        display_name: str | None,
+    ) -> UserPayoutEntry:
+        if user_id not in by_user:
+            by_user[user_id] = UserPayoutEntry(
+                user_id=user_id,
+                telegram_username=username,
+                display_name=display_name,
+            )
+        entry = by_user[user_id]
+        if username and not entry.telegram_username:
+            entry.telegram_username = username
+        if display_name and not entry.display_name:
+            entry.display_name = display_name
+        return entry
+
+    for record in payments:
+        if record.starter_user_id is not None:
+            starter = _entry(
+                record.starter_user_id,
+                record.starter_username,
+                record.starter_display_name,
+            )
+            starter.starter_amount += starter_payout(record)
+            starter.starter_count += 1
+
+        finisher = _entry(
+            record.finisher_user_id,
+            record.finisher_username,
+            record.finisher_display_name,
+        )
+        finisher.finisher_amount += finisher_payout(record)
+        finisher.finisher_count += 1
+
+    return sorted(
+        by_user.values(),
+        key=lambda row: (-row.total_owed, -row.starter_count - row.finisher_count, row.user_id),
+    )
 
 
 def build_profit_export_handlers() -> list:
@@ -101,7 +169,17 @@ def build_profit_export_summary(
         expense_by_user=get_expense_spending_by_user(
             settings.database_path, since=since
         ),
+        payout_by_user=_aggregate_payouts_by_user(payments),
     )
+
+
+def _payout_detail(entry: UserPayoutEntry) -> str:
+    parts: list[str] = []
+    if entry.starter_amount > 0:
+        parts.append(f"S {format_amount(entry.starter_amount)}")
+    if entry.finisher_amount > 0:
+        parts.append(f"F {format_amount(entry.finisher_amount)}")
+    return " + ".join(parts) if parts else "—"
 
 
 def format_profit_export_caption(summary: ProfitExportSummary, *, bot_name: str) -> str:
@@ -117,8 +195,24 @@ def format_profit_export_caption(summary: ProfitExportSummary, *, bot_name: str)
         f"<b>Expenses:</b> {format_amount(summary.expense_total)} ({summary.expense_count} items)",
         f"<b>Net profit</b> (centre − expenses): <b>{format_amount(summary.net_profit)}</b>",
         "",
-        stats_period_footnote(),
     ]
+    if summary.payout_by_user:
+        lines.append(
+            f"<b>Owed to staff:</b> {format_amount(summary.total_owed_to_staff)}"
+        )
+        for entry in summary.payout_by_user[:12]:
+            label = entry.telegram_username or entry.display_name or str(entry.user_id)
+            if entry.telegram_username and not label.startswith("@"):
+                label = f"@{label.lstrip('@')}"
+            lines.append(
+                f"  · {html.escape(str(label))}: "
+                f"<b>{format_amount(entry.total_owed)}</b> "
+                f"({html.escape(_payout_detail(entry))})"
+            )
+        if len(summary.payout_by_user) > 12:
+            lines.append(f"  · … +{len(summary.payout_by_user) - 12} more")
+        lines.append("")
+    lines.append(stats_period_footnote())
     return "\n".join(lines)
 
 

@@ -73,6 +73,15 @@ class ProfitExportTests(unittest.TestCase):
         self.assertEqual(summary.net_profit, 150.0)
         self.assertEqual(len(summary.expense_by_user), 1)
         self.assertEqual(summary.expense_by_user[0].total_amount, 50.0)
+        self.assertEqual(len(summary.payout_by_user), 2)
+        by_id = {entry.user_id: entry for entry in summary.payout_by_user}
+        self.assertEqual(by_id[2].starter_amount, 50.0)
+        self.assertEqual(by_id[2].starter_count, 1)
+        self.assertEqual(by_id[2].total_owed, 50.0)
+        self.assertEqual(by_id[1].finisher_amount, 150.0)
+        self.assertEqual(by_id[1].finisher_count, 1)
+        self.assertEqual(by_id[1].total_owed, 150.0)
+        self.assertEqual(summary.total_owed_to_staff, 200.0)
 
 
 if __name__ == "__main__":
