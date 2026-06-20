@@ -163,6 +163,9 @@ class CommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "handlers.payment_reports.schedule_payment_report_refresh",
         ), patch(
+            "handlers.profit_export_image.render_profit_export_png",
+            return_value=b"\x89PNG\r\n\x1a\n" + b"0" * 64,
+        ), patch(
             "handlers.admin_access.sync_bot_command_menu",
             new=AsyncMock(),
         ):

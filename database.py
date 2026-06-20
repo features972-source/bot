@@ -135,6 +135,15 @@ class ExpenseRecord:
 
 
 @dataclass
+class ExpenseSpendingEntry:
+    user_id: int
+    telegram_username: str | None
+    display_name: str | None
+    expense_count: int
+    total_amount: float
+
+
+@dataclass
 class PaymentLeaderboardEntry:
     user_id: int
     telegram_username: str | None
@@ -1604,6 +1613,44 @@ def get_expense_totals(
     if row is None:
         return 0, 0.0
     return int(row[0]), float(row[1])
+
+
+def get_expense_spending_by_user(
+    path: str,
+    *,
+    since: datetime | None = None,
+) -> list[ExpenseSpendingEntry]:
+    params: list[str] = []
+    since_clause = ""
+    if since is not None:
+        since_clause = "WHERE created_at >= ?"
+        params.append(since.isoformat())
+    with _connect(path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                telegram_user_id,
+                telegram_username,
+                display_name,
+                COUNT(*) AS expense_count,
+                COALESCE(SUM(amount), 0) AS total_amount
+            FROM expenses
+            {since_clause}
+            GROUP BY telegram_user_id
+            ORDER BY total_amount DESC, expense_count DESC, telegram_user_id ASC
+            """,
+            params,
+        ).fetchall()
+    return [
+        ExpenseSpendingEntry(
+            user_id=int(row[0]),
+            telegram_username=row[1],
+            display_name=row[2],
+            expense_count=int(row[3]),
+            total_amount=float(row[4]),
+        )
+        for row in rows
+    ]
 
 
 def get_payment_leaderboard(

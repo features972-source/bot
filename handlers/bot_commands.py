@@ -32,12 +32,14 @@ from handlers.panic import build_panic_handlers
 from handlers.payment_reports import build_payment_report_handlers
 from handlers.premium_access import build_premium_access_handlers
 from handlers.nemesis import build_nemesis_handlers
+from handlers.profit_export import build_profit_export_handlers
 
 
 def build_bot_handlers() -> list:
     return [
         *build_panic_handlers(),
         *build_payment_command_handlers(),
+        *build_profit_export_handlers(),
         *build_expense_command_handlers(),
         # Expense wizard before payment outs — catch step replies in shared groups.
         *build_expense_message_handlers(),
@@ -103,6 +105,8 @@ def _format_help_text(
             "/setnotifyexpenses — set expenses logging group\n"
             "/setexpenses — live expense table in a group (pick Q1/Q2, auto-updates)\n"
             "/expense — log an expense step-by-step (who · amount · where)\n\n"
+            "<b>📊 Profit</b>\n"
+            "/export — jobs payout %, expenses & net profit (today · 7 · all)\n\n"
             "<b>👑 Admins</b>\n"
             "/admin · /addadmin · /removeadmin — manage bot admins\n\n"
             "<b>🚫 Blacklist</b>\n"
