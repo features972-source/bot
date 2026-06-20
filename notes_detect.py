@@ -267,6 +267,8 @@ ONLINE_STATUS_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"has\s+online(?:\s+banking)?", re.I), "Has online banking"),
 )
 
+COOKIE_LEVEL = re.compile(r"(?i)cookie\s*(?:level)?\s*[:.\-]?\s*(\d+\s*/\s*\d+)")
+
 
 @dataclass
 class NotesPassSummary:
@@ -274,6 +276,8 @@ class NotesPassSummary:
     dob: str | None = None
     bank: str | None = None
     online: str | None = None
+    cookie_level: str | None = None
+    crypto: str | None = None
 
 
 def _extract_balance_summary(text: str) -> str | None:
@@ -281,6 +285,8 @@ def _extract_balance_summary(text: str) -> str | None:
     parts: list[str] = []
     for line in _non_empty_lines(text):
         stripped = line.strip()
+        if re.search(r"(?i)\bcrypto\b", stripped):
+            continue
         if STANDALONE_MONEY_LINE.match(stripped):
             key = stripped.lower()
             if key not in seen:
@@ -321,6 +327,29 @@ def _extract_online_status(text: str) -> str | None:
     return None
 
 
+def _extract_cookie_level(text: str) -> str | None:
+    match = COOKIE_LEVEL.search(text)
+    if not match:
+        return None
+    return re.sub(r"\s+", "", match.group(1))
+
+
+def _extract_crypto(text: str) -> str | None:
+    for line in _non_empty_lines(text):
+        if not re.search(r"(?i)\bcrypto\b", line):
+            continue
+        amount = re.search(
+            r"(?i)(?:has\s+)?crypto(?:\s+bala?\s*[-:.\-]?\s*)?(£?\s*[\d,.\s]+(?:\.\d+)?)",
+            line,
+        )
+        if amount and amount.group(1).strip():
+            return f"Has crypto · {amount.group(1).strip()}"
+        return "Has crypto"
+    if re.search(r"(?i)\bcrypto\b", text):
+        return "Has crypto"
+    return None
+
+
 def extract_notes_pass_summary(text: str | None) -> NotesPassSummary:
     if not text:
         return NotesPassSummary()
@@ -330,6 +359,8 @@ def extract_notes_pass_summary(text: str | None) -> NotesPassSummary:
         dob=_extract_dob(cleaned),
         bank=_extract_bank(cleaned),
         online=_extract_online_status(cleaned),
+        cookie_level=_extract_cookie_level(cleaned),
+        crypto=_extract_crypto(cleaned),
     )
 
 
@@ -352,6 +383,10 @@ def format_notes_summary_html(text: str | None) -> str:
     if summary.online:
         emoji = _online_summary_emoji(summary.online)
         lines.append(f"{emoji} <b>Online</b> · {html.escape(summary.online)}")
+    if summary.cookie_level:
+        lines.append(f"🍪 <b>Cookie</b> · {html.escape(summary.cookie_level)}")
+    if summary.crypto:
+        lines.append(f"🪙 <b>Crypto</b> · {html.escape(summary.crypto)}")
     if not lines:
         return ""
     return "📋 <b>Quick look</b>\n" + "\n".join(lines)

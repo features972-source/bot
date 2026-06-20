@@ -18,6 +18,7 @@ from database import (
     PassQueueEntry,
     add_pass_queue_vip,
     assign_pending_pass_to_user,
+    clear_circulating_pass_notes,
     create_pass_offer,
     delete_pending_pass_note,
     get_pass_offer,
@@ -76,7 +77,7 @@ def _pass_offer_text(offer: PassOffer, *, reminder: bool = False) -> str:
     if offer.manual_override:
         return (
             f"🚨 <b>Manual override open</b>{suffix}\n"
-            "Anyone in queue can take this pass.\n\n"
+            "Anyone can take this pass — no queue needed.\n\n"
             f"{summary}{read_line}"
         )
     mention = _mention_html(
@@ -91,24 +92,18 @@ def _pass_offer_text(offer: PassOffer, *, reminder: bool = False) -> str:
 
 
 def _manual_override_text(
-    queue: list[PassQueueEntry],
     *,
-    starter_user_id: int,
     notes_text: str,
     reminder: bool = False,
 ) -> str:
     summary = _pass_summary_block(notes_text)
     read_line = _pass_read_line()
-    finishers = [entry for entry in queue if entry.user_id != starter_user_id]
     suffix = " ⏰" if reminder else ""
-    header = f"🚨 <b>Manual override open</b>{suffix}\nAnyone in queue can take this pass."
-    if not finishers:
-        return f"{header}\n\n{summary}{read_line}"
-    mentions = ", ".join(
-        _mention_html(entry.user_id, entry.telegram_username, entry.display_name)
-        for entry in finishers
+    return (
+        f"🚨 <b>Manual override open</b>{suffix}\n"
+        "Anyone can take this pass — no queue needed.\n\n"
+        f"{summary}{read_line}"
     )
-    return f"{mentions}\n\n{header}\n\n{summary}{read_line}"
 
 
 def _pass_brushed_text(user) -> str:
@@ -198,6 +193,7 @@ def build_pass_queue_handlers() -> list:
         CommandHandler("queue", queue_command),
         CommandHandler("addvip", addvip_command),
         CommandHandler("removevip", removevip_command),
+        CommandHandler("clearnotes", clearnotes_command),
         CallbackQueryHandler(pass_callback, pattern=rf"^{re.escape(CALLBACK_PREFIX)}"),
     ]
 
@@ -291,12 +287,6 @@ def _queue_finisher_ids(queue: list[PassQueueEntry], *, starter_user_id: int) ->
     return {entry.user_id for entry in queue if entry.user_id != starter_user_id}
 
 
-def _is_queue_finisher(path: str, user_id: int, *, starter_user_id: int) -> bool:
-    if user_id == starter_user_id:
-        return False
-    return any(entry.user_id == user_id for entry in list_pass_queue(path))
-
-
 def _busy_pass_assignees(settings: Settings, chat_id: int, *, exclude_offer_id: int | None = None) -> set[int]:
     return pending_pass_assignee_user_ids(
         settings.database_path,
@@ -329,10 +319,7 @@ async def _ping_manual_override(
     *,
     reminder: bool = False,
 ) -> None:
-    queue = list_pass_queue(settings.database_path)
     text = _manual_override_text(
-        queue,
-        starter_user_id=offer.starter_user_id,
         notes_text=offer.notes_text,
         reminder=reminder,
     )
@@ -388,12 +375,7 @@ async def _activate_manual_override(
     update_pass_offer(path, offer.id, manual_override=True, reset_reminder=True)
     refreshed = get_pass_offer(path, offer.id)
     assert refreshed is not None
-    queue = list_pass_queue(path)
-    text = _manual_override_text(
-        queue,
-        starter_user_id=offer.starter_user_id,
-        notes_text=offer.notes_text,
-    )
+    text = _manual_override_text(notes_text=offer.notes_text)
     if brushed_text:
         text = f"{brushed_text}\n\n{text}"
     reply_to = reply_to_message_id or offer.notes_message_id
@@ -410,10 +392,9 @@ async def _activate_manual_override(
             offer_message_id=offer_message.message_id,
         )
         logger.info(
-            "pass manual override chat=%s offer=%s finishers=%s",
+            "pass manual override chat=%s offer=%s",
             offer.chat_id,
             offer.id,
-            len(queue),
         )
     except BadRequest:
         logger.warning("Failed to send manual override for offer %s", offer.id)
@@ -592,6 +573,34 @@ async def removevip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await message.reply_text(f"Removed VIP status for user {target_id}.")
     else:
         await message.reply_text("That user is not a pass-queue VIP.")
+
+
+async def clearnotes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not await require_admin(update, settings, deny_message="Admin only."):
+        return
+
+    message = update.effective_message
+    if not message:
+        return
+
+    counts = clear_circulating_pass_notes(settings.database_path)
+    offers = counts["pending_offers"]
+    notes = counts["pending_notes"]
+    if offers == 0 and notes == 0:
+        await message.reply_text("No active pass notes to clear.")
+        return
+
+    parts: list[str] = []
+    if offers:
+        parts.append(f"{offers} active pass offer{'s' if offers != 1 else ''}")
+    if notes:
+        parts.append(f"{notes} waiting note{'s' if notes != 1 else ''}")
+    await message.reply_text(
+        f"🧹 Cleared {' and '.join(parts)}.\n"
+        "Reminders stopped — starters can post fresh notes.",
+        parse_mode="HTML",
+    )
 
 
 async def leavequeue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -839,10 +848,8 @@ async def pass_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if action == "take" and offer.manual_override:
-        if not _is_queue_finisher(
-            settings.database_path, user.id, starter_user_id=offer.starter_user_id
-        ):
-            await query.answer("Only finishers in the queue can take this pass.", show_alert=True)
+        if user.id == offer.starter_user_id:
+            await query.answer("You can't take your own pass.", show_alert=True)
             return
     elif user.id != offer.assigned_user_id:
         await query.answer("This pass is assigned to someone else.", show_alert=True)
@@ -897,14 +904,20 @@ async def _handle_take_pass(
     leave_pass_queue(settings.database_path, user.id)
 
     taker = _mention_html(user.id, user.username, _display_name(user))
+    if offer.manual_override:
+        taken_text = f"{taker} — <b>has taken the manual override</b> ✅"
+        answer_text = "Manual override taken — notes sent to your DMs."
+    else:
+        taken_text = f"{taker} — <b>took this pass</b> ✅"
+        answer_text = "Notes sent to your DMs."
     try:
         await query.edit_message_text(
-            f"{taker} — <b>took this pass</b> ✅",
+            taken_text,
             parse_mode="HTML",
         )
     except BadRequest:
         pass
-    await query.answer("Notes sent to your DMs.")
+    await query.answer(answer_text)
 
 
 async def _handle_brush_pass(

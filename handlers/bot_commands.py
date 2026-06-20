@@ -68,6 +68,7 @@ def build_bot_handlers() -> list:
 def _pass_queue_help_block(*, admin: bool) -> str:
     vip_line = (
         "/addvip · /removevip — VIP finishers jump ahead of standard queue\n"
+        "/clearnotes — clear stuck pass offers and waiting notes\n"
         if admin
         else ""
     )
@@ -88,7 +89,7 @@ def _pass_queue_help_block(*, admin: bool) -> str:
         "<i>When assigned:</i>\n"
         "• Take pass — notes sent to your DM (read notes before taking)\n"
         "• Brush pass — skip and offer to the next finisher in queue\n"
-        "• If everyone brushes, manual override opens — all finishers tagged, anyone can take\n"
+        "• If everyone brushes, manual override opens — anyone can take (no queue needed)\n"
         "• 1-minute reminders until take/brush; pass expires after 10 minutes with no taker"
     )
 

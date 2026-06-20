@@ -2451,6 +2451,30 @@ def delete_pending_pass_note(path: str, chat_id: int, notes_message_id: int) -> 
         conn.commit()
 
 
+def clear_circulating_pass_notes(path: str) -> dict[str, int]:
+    """Remove active pass offers and waiting notes so nothing keeps pinging."""
+    with _connect(path) as conn:
+        pending_offer_ids = [
+            int(row[0])
+            for row in conn.execute(
+                "SELECT id FROM pass_offers WHERE status = 'pending'"
+            ).fetchall()
+        ]
+        if pending_offer_ids:
+            placeholders = ",".join("?" * len(pending_offer_ids))
+            conn.execute(
+                f"DELETE FROM pass_offer_brushed WHERE offer_id IN ({placeholders})",
+                pending_offer_ids,
+            )
+        offers_cursor = conn.execute("DELETE FROM pass_offers WHERE status = 'pending'")
+        notes_cursor = conn.execute("DELETE FROM pass_notes_pending")
+        conn.commit()
+        return {
+            "pending_offers": int(offers_cursor.rowcount),
+            "pending_notes": int(notes_cursor.rowcount),
+        }
+
+
 def assign_pending_pass_to_user(
     path: str,
     *,

@@ -26,6 +26,7 @@ from database import (  # noqa: E402
     PassOffer,
     add_pass_queue_vip,
     assign_pending_pass_to_user,
+    clear_circulating_pass_notes,
     create_pass_offer,
     get_active_pass_offer,
     get_pass_offer,
@@ -37,6 +38,7 @@ from database import (  # noqa: E402
     leave_pass_queue,
     list_pass_queue,
     list_pending_pass_notes,
+    list_pending_pass_offers,
     pass_offer_for_notes,
     pending_pass_assignee_user_ids,
     record_pass_offer_brush,
@@ -484,6 +486,58 @@ also has hsbc"""
         reply_text = reply_kwargs.get("text", reply_args[0] if reply_args else "")
         self.assertIn("waiting pass was sent", reply_text)
 
+    async def test_manual_override_take_by_non_queue_user(self):
+        from config import load_settings
+
+        os.environ["DATABASE_PATH"] = self.db_path
+        settings = load_settings()
+
+        offer_id = create_pass_offer(
+            self.db_path,
+            chat_id=-100,
+            notes_message_id=501,
+            starter_user_id=222,
+            starter_username="starter",
+            starter_display_name="Starter",
+            assigned_user_id=111,
+            assigned_username="finisher",
+            assigned_display_name="Finisher",
+            notes_text=self.EXAMPLE,
+        )
+        update_pass_offer(self.db_path, offer_id, manual_override=True)
+
+        user = SimpleNamespace(
+            id=999,
+            username="random",
+            first_name="Random",
+            last_name="User",
+            is_bot=False,
+        )
+        query = MagicMock()
+        query.data = f"pass:take:{offer_id}"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        query.message = MagicMock(message_id=600)
+
+        update = MagicMock()
+        update.callback_query = query
+        update.effective_user = user
+
+        context = MagicMock()
+        context.bot_data = {"settings": settings}
+        context.bot.send_message = AsyncMock()
+
+        await pass_queue.pass_callback(update, context)
+
+        context.bot.send_message.assert_awaited()
+        query.edit_message_text.assert_awaited()
+        args, kwargs = query.edit_message_text.await_args
+        text = kwargs.get("text", args[0] if args else "")
+        self.assertIn("has taken the manual override", text)
+        offer = get_pass_offer(self.db_path, offer_id)
+        assert offer is not None
+        self.assertEqual(offer.status, "taken")
+
     async def test_notes_handler_prompts_for_full_notes_when_balance_only(self):
         from config import load_settings
 
@@ -742,6 +796,31 @@ also has hsbc"""
         self.assertIn("🏦", html_summary)
         self.assertIn("Bk", html_summary)
 
+    def test_notes_pass_summary_christopher_jenkins(self):
+        notes = """Christopher Jenkins
+11/05/1930
+He's computer literate
+Bala £100,038
+Has crypto Bala - £20,393.29
+IG11 7KG
+Flat 18
+
+WhatsApp prepped
+
+Cookie level : 1000/10"""
+        summary = extract_notes_pass_summary(notes)
+        self.assertEqual(summary.dob, "11/05/1930")
+        self.assertIn("100,038", summary.balance or "")
+        self.assertIsNone(summary.online)
+        self.assertEqual(summary.cookie_level, "1000/10")
+        self.assertIn("Has crypto", summary.crypto or "")
+        self.assertIn("20,393.29", summary.crypto or "")
+        html_summary = format_notes_summary_html(notes)
+        self.assertIn("🍪", html_summary)
+        self.assertIn("🪙", html_summary)
+        self.assertIn("1000/10", html_summary)
+        self.assertTrue(notes_has_balance(notes))
+
     def test_notes_missing_balance(self):
         self.assertFalse(notes_has_balance("james adams 31/01/2000 bk"))
         self.assertFalse(notes_has_balance("Frank\n23/02/1943\nbarclays"))
@@ -884,6 +963,64 @@ class PassQueueDbTests(unittest.TestCase):
         )
         self.assertIsNone(offer)
         self.assertEqual(len(list_pending_pass_notes(self.db_path)), 1)
+
+    def test_clear_circulating_pass_notes(self):
+        create_pass_offer(
+            self.db_path,
+            chat_id=-100,
+            notes_message_id=1,
+            starter_user_id=10,
+            starter_username="starter",
+            starter_display_name="Starter",
+            assigned_user_id=20,
+            assigned_username="a",
+            assigned_display_name="A",
+            notes_text="notes a",
+        )
+        create_pass_offer(
+            self.db_path,
+            chat_id=-100,
+            notes_message_id=2,
+            starter_user_id=10,
+            starter_username="starter",
+            starter_display_name="Starter",
+            assigned_user_id=30,
+            assigned_username="b",
+            assigned_display_name="B",
+            notes_text="notes b",
+        )
+        offer_taken = create_pass_offer(
+            self.db_path,
+            chat_id=-100,
+            notes_message_id=3,
+            starter_user_id=10,
+            starter_username="starter",
+            starter_display_name="Starter",
+            assigned_user_id=40,
+            assigned_username="c",
+            assigned_display_name="C",
+            notes_text="notes c",
+        )
+        update_pass_offer(self.db_path, offer_taken, status="taken")
+        record_pass_offer_brush(self.db_path, 1, 20)
+        upsert_pending_pass_note(
+            self.db_path,
+            chat_id=-100,
+            notes_message_id=99,
+            starter_user_id=10,
+            starter_username="starter",
+            starter_display_name="Starter",
+            notes_text="waiting notes",
+        )
+
+        counts = clear_circulating_pass_notes(self.db_path)
+        self.assertEqual(counts, {"pending_offers": 2, "pending_notes": 1})
+        self.assertEqual(list_pending_pass_offers(self.db_path), [])
+        self.assertEqual(list_pending_pass_notes(self.db_path), [])
+        self.assertEqual(get_pass_offer_brushed_user_ids(self.db_path, 1), set())
+        taken = get_pass_offer(self.db_path, offer_taken)
+        assert taken is not None
+        self.assertEqual(taken.status, "taken")
 
     def test_next_queue_assignee_skips_excluded_user(self):
         join_pass_queue(
