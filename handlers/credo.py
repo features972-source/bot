@@ -82,9 +82,11 @@ UNAUTHORIZED = (
 CANCELLED = "Credo cancelled. Send /credos when you want to try again."
 NO_CARDS = (
     "No credit cards are set up yet.\n\n"
-    "An admin can add one with /addcredo (name → limit → last 4 → card photo)."
+    "An admin can add one with /addcredo "
+    "(name → limit → last 4 → sort code → account number → card photo)."
 )
 CARD_LAST4_PATTERN = re.compile(r"^\d{4}$")
+ADD_CARD_TOTAL_STEPS = 6
 
 
 class State(IntEnum):
@@ -94,6 +96,8 @@ class State(IntEnum):
 ADD_CARD_STEP_NAME = "name"
 ADD_CARD_STEP_CAPACITY = "capacity"
 ADD_CARD_STEP_LAST4 = "last4"
+ADD_CARD_STEP_SORT_CODE = "sortcode"
+ADD_CARD_STEP_ACCOUNT = "account"
 ADD_CARD_STEP_PHOTO = "photo"
 ADD_CARD_STEP_KEY = "add_card_step"
 
@@ -106,6 +110,10 @@ def _normalize_add_card_step(step: object) -> str | None:
         return ADD_CARD_STEP_CAPACITY
     if step in (ADD_CARD_STEP_LAST4, "last4"):
         return ADD_CARD_STEP_LAST4
+    if step in (ADD_CARD_STEP_SORT_CODE, "sortcode"):
+        return ADD_CARD_STEP_SORT_CODE
+    if step in (ADD_CARD_STEP_ACCOUNT, "account"):
+        return ADD_CARD_STEP_ACCOUNT
     if step in (ADD_CARD_STEP_PHOTO, "photo"):
         return ADD_CARD_STEP_PHOTO
     # Legacy IntEnum values: NAME=1, CAPACITY=2, PHOTO=3
@@ -139,8 +147,35 @@ def _clear_add_card_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("add_card_name", None)
     context.user_data.pop("add_card_capacity", None)
     context.user_data.pop("add_card_last4", None)
+    context.user_data.pop("add_card_sort_code", None)
+    context.user_data.pop("add_card_account_number", None)
     context.user_data.pop("add_card_active", None)
     context.user_data.pop(ADD_CARD_STEP_KEY, None)
+
+
+def _normalize_sort_code(text: str) -> str | None:
+    digits = re.sub(r"\D", "", text.strip())
+    if len(digits) != 6 or not digits.isdigit():
+        return None
+    return f"{digits[0:2]}-{digits[2:4]}-{digits[4:6]}"
+
+
+def _normalize_account_number(text: str) -> str | None:
+    digits = re.sub(r"\D", "", text.strip())
+    if len(digits) != 8 or not digits.isdigit():
+        return None
+    return digits
+
+
+def _format_bank_details_block(sort_code: str | None, account_number: str | None) -> str:
+    if not sort_code and not account_number:
+        return ""
+    lines: list[str] = []
+    if sort_code:
+        lines.append(f"**Sort code:** `{sort_code}`")
+    if account_number:
+        lines.append(f"**Account number:** `{account_number}`")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -488,13 +523,28 @@ def _format_usage_people_count(database_path: str, card_name: str) -> str:
     return f"Used by {count} people"
 
 
-def _format_dm_photo_caption(card_name: str, limit_block: str) -> str:
-    return (
-        f"💳 **{card_name}**\n\n"
-        f"{limit_block}\n\n"
-        "⚠️ **Log outs in the group** (reply to ON CALL) — matching last 4 auto-deducts.\n\n"
-        "**WHEN YOU ARE FINISHED WITH THE CC DO /finished**"
+def _format_dm_photo_caption(
+    card_name: str,
+    limit_block: str,
+    *,
+    sort_code: str | None = None,
+    account_number: str | None = None,
+) -> str:
+    bank_block = _format_bank_details_block(sort_code, account_number)
+    parts = [f"💳 **{card_name}**"]
+    if bank_block:
+        parts.extend(["", bank_block])
+    parts.extend(
+        [
+            "",
+            limit_block,
+            "",
+            "⚠️ **Log outs in the group** (reply to ON CALL) — matching last 4 auto-deducts.",
+            "",
+            "**WHEN YOU ARE FINISHED WITH THE CC DO /finished**",
+        ]
     )
+    return "\n".join(parts)
 
 
 def _format_card_limit_block(settings: Settings, card_name: str) -> str:
@@ -602,7 +652,12 @@ async def _deliver_credo_card(
     used, capacity, remaining = _card_balance(settings, card_name)
     limit_block = _format_card_limit_block(settings, card_name)
     display_label = _format_card_label(settings.database_path, card.name)
-    dm_caption = _format_dm_photo_caption(display_label, limit_block)
+    dm_caption = _format_dm_photo_caption(
+        display_label,
+        limit_block,
+        sort_code=card.sort_code,
+        account_number=card.account_number,
+    )
     sent_to_dm = False
 
     try:
@@ -674,9 +729,10 @@ async def _deliver_credo_card(
             pass
         fail_text = (
             f"Could not DM **{display_label}** — the card is **not** posted in this chat.\n\n"
+            f"{_format_bank_details_block(card.sort_code, card.account_number)}\n\n"
             f"{limit_block}\n\n"
             "Tap the button below, press **Start**, then send /credos again."
-        )
+        ).replace("\n\n\n", "\n\n")
         if edit_in_place:
             try:
                 await bot.edit_message_text(
@@ -1128,8 +1184,8 @@ async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data[ADD_CARD_STEP_KEY] = ADD_CARD_STEP_NAME
 
     await message.reply_text(
-        "💳 **Add credo card** (4 steps)\n\n"
-        "**Step 1 of 4** — Send the **credit card name** (e.g. Lloyds).",
+        f"💳 **Add credo card** ({ADD_CARD_TOTAL_STEPS} steps)\n\n"
+        f"**Step 1 of {ADD_CARD_TOTAL_STEPS}** — Send the **credit card name** (e.g. Lloyds).",
         parse_mode="Markdown",
     )
 
@@ -1165,6 +1221,14 @@ async def addcredocard_route_text(
         context.user_data[ADD_CARD_STEP_KEY] = await addcredocard_receive_last4(
             update, context
         )
+    elif step == ADD_CARD_STEP_SORT_CODE:
+        context.user_data[ADD_CARD_STEP_KEY] = await addcredocard_receive_sort_code(
+            update, context
+        )
+    elif step == ADD_CARD_STEP_ACCOUNT:
+        context.user_data[ADD_CARD_STEP_KEY] = await addcredocard_receive_account(
+            update, context
+        )
     elif step == ADD_CARD_STEP_PHOTO:
         await addcredocard_receive_photo_text(update, context)
     else:
@@ -1175,8 +1239,8 @@ async def addcredocard_route_text(
         )
         context.user_data[ADD_CARD_STEP_KEY] = ADD_CARD_STEP_NAME
         await message.reply_text(
-            "💳 **Add credo card** (4 steps)\n\n"
-            "**Step 1 of 4** — Send the **credit card name** (e.g. Lloyds).",
+            f"💳 **Add credo card** ({ADD_CARD_TOTAL_STEPS} steps)\n\n"
+            f"**Step 1 of {ADD_CARD_TOTAL_STEPS}** — Send the **credit card name** (e.g. Lloyds).",
             parse_mode="Markdown",
         )
 
@@ -1195,7 +1259,8 @@ async def addcredocard_route_photo(
         return
     if _normalize_add_card_step(context.user_data.get(ADD_CARD_STEP_KEY)) != ADD_CARD_STEP_PHOTO:
         await message.reply_text(
-            "**Step 3 of 4** — Send a **photo** of the card to finish adding it.",
+            f"**Step {ADD_CARD_TOTAL_STEPS} of {ADD_CARD_TOTAL_STEPS}** — "
+            "Send a **photo** of the card to finish adding it.",
             parse_mode="Markdown",
         )
         raise ApplicationHandlerStop
@@ -1215,7 +1280,7 @@ async def addcredocard_receive_name(update: Update, context: ContextTypes.DEFAUL
     name = (message.text or "").strip()
     if len(name) < 2:
         await message.reply_text(
-            "**Step 1 of 4** — Please send a valid name (at least 2 characters).",
+            f"**Step 1 of {ADD_CARD_TOTAL_STEPS}** — Please send a valid name (at least 2 characters).",
             parse_mode="Markdown",
         )
         return ADD_CARD_STEP_NAME
@@ -1223,7 +1288,7 @@ async def addcredocard_receive_name(update: Update, context: ContextTypes.DEFAUL
     context.user_data["add_card_name"] = name
     await message.reply_text(
         f"✅ Name: **{name}**\n\n"
-        "**Step 2 of 4** — Send the **£ limit** for this card (e.g. `5000` or `5k`).",
+        f"**Step 2 of {ADD_CARD_TOTAL_STEPS}** — Send the **£ limit** for this card (e.g. `5000` or `5k`).",
         parse_mode="Markdown",
     )
     return ADD_CARD_STEP_CAPACITY
@@ -1238,7 +1303,7 @@ async def addcredocard_receive_capacity(
     amount = _parse_usage_amount(message.text or "")
     if amount is None:
         await message.reply_text(
-            "**Step 2 of 4** — Send a valid limit like `5000`, `£5000`, or `5k`.",
+            f"**Step 2 of {ADD_CARD_TOTAL_STEPS}** — Send a valid limit like `5000`, `£5000`, or `5k`.",
             parse_mode="Markdown",
         )
         return ADD_CARD_STEP_CAPACITY
@@ -1247,7 +1312,7 @@ async def addcredocard_receive_capacity(
     name = context.user_data.get("add_card_name", "")
     await message.reply_text(
         f"✅ Limit: **{format_amount(amount)}** for **{name}**\n\n"
-        "**Step 3 of 4** — Send the **last 4 digits** of the card (e.g. `1234`).\n"
+        f"**Step 3 of {ADD_CARD_TOTAL_STEPS}** — Send the **last 4 digits** of the card (e.g. `1234`).\n"
         "When someone logs an out with the same last 4, that amount is deducted from this card.",
         parse_mode="Markdown",
     )
@@ -1264,7 +1329,7 @@ async def addcredocard_receive_last4(
     last4 = (message.text or "").strip()
     if not CARD_LAST4_PATTERN.fullmatch(last4):
         await message.reply_text(
-            "**Step 3 of 4** — Send exactly **4 digits** for the card (e.g. `1234`).",
+            f"**Step 3 of {ADD_CARD_TOTAL_STEPS}** — Send exactly **4 digits** for the card (e.g. `1234`).",
             parse_mode="Markdown",
         )
         return ADD_CARD_STEP_LAST4
@@ -1283,7 +1348,56 @@ async def addcredocard_receive_last4(
     name = context.user_data.get("add_card_name", "")
     await message.reply_text(
         f"✅ Last 4: **····{last4}** for **{name}**\n\n"
-        "**Step 4 of 4** — Send a **photo** of the card (sent privately to users).",
+        f"**Step 4 of {ADD_CARD_TOTAL_STEPS}** — Send the **sort code** (e.g. `12-34-56` or `123456`).",
+        parse_mode="Markdown",
+    )
+    return ADD_CARD_STEP_SORT_CODE
+
+
+async def addcredocard_receive_sort_code(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> str:
+    message = update.effective_message
+    if not message:
+        return ADD_CARD_STEP_SORT_CODE
+    sort_code = _normalize_sort_code(message.text or "")
+    if sort_code is None:
+        await message.reply_text(
+            f"**Step 4 of {ADD_CARD_TOTAL_STEPS}** — Send a valid **6-digit sort code** "
+            "(e.g. `12-34-56` or `123456`).",
+            parse_mode="Markdown",
+        )
+        return ADD_CARD_STEP_SORT_CODE
+
+    context.user_data["add_card_sort_code"] = sort_code
+    name = context.user_data.get("add_card_name", "")
+    await message.reply_text(
+        f"✅ Sort code: **{sort_code}** for **{name}**\n\n"
+        f"**Step 5 of {ADD_CARD_TOTAL_STEPS}** — Send the **account number** (8 digits).",
+        parse_mode="Markdown",
+    )
+    return ADD_CARD_STEP_ACCOUNT
+
+
+async def addcredocard_receive_account(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> str:
+    message = update.effective_message
+    if not message:
+        return ADD_CARD_STEP_ACCOUNT
+    account_number = _normalize_account_number(message.text or "")
+    if account_number is None:
+        await message.reply_text(
+            f"**Step 5 of {ADD_CARD_TOTAL_STEPS}** — Send exactly **8 digits** for the account number.",
+            parse_mode="Markdown",
+        )
+        return ADD_CARD_STEP_ACCOUNT
+
+    context.user_data["add_card_account_number"] = account_number
+    name = context.user_data.get("add_card_name", "")
+    await message.reply_text(
+        f"✅ Account: **{account_number}** for **{name}**\n\n"
+        f"**Step 6 of {ADD_CARD_TOTAL_STEPS}** — Send a **photo** of the card (sent privately to users).",
         parse_mode="Markdown",
     )
     return ADD_CARD_STEP_PHOTO
@@ -1293,7 +1407,8 @@ async def addcredocard_receive_photo_text(update: Update, context: ContextTypes.
     message = update.effective_message
     if message:
         await message.reply_text(
-            "**Step 4 of 4** — Please send a **photo** of the card (not text).",
+            f"**Step {ADD_CARD_TOTAL_STEPS} of {ADD_CARD_TOTAL_STEPS}** — "
+            "Please send a **photo** of the card (not text).",
             parse_mode="Markdown",
         )
     return ADD_CARD_STEP_PHOTO
@@ -1313,7 +1428,7 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
     name = context.user_data.get("add_card_name", "").strip()
     if not name:
         await message.reply_text(
-            "**Step 1 of 4** — Send the **credit card name** first.",
+            f"**Step 1 of {ADD_CARD_TOTAL_STEPS}** — Send the **credit card name** first.",
             parse_mode="Markdown",
         )
         return ADD_CARD_STEP_NAME
@@ -1322,10 +1437,26 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
     card_last4 = (context.user_data.get("add_card_last4") or "").strip()
     if not CARD_LAST4_PATTERN.fullmatch(card_last4):
         await message.reply_text(
-            "**Step 3 of 4** — Send the **last 4 digits** of the card first.",
+            f"**Step 3 of {ADD_CARD_TOTAL_STEPS}** — Send the **last 4 digits** of the card first.",
             parse_mode="Markdown",
         )
         return ADD_CARD_STEP_LAST4
+
+    sort_code = context.user_data.get("add_card_sort_code")
+    if not sort_code:
+        await message.reply_text(
+            f"**Step 4 of {ADD_CARD_TOTAL_STEPS}** — Send the **sort code** first.",
+            parse_mode="Markdown",
+        )
+        return ADD_CARD_STEP_SORT_CODE
+
+    account_number = context.user_data.get("add_card_account_number")
+    if not account_number:
+        await message.reply_text(
+            f"**Step 5 of {ADD_CARD_TOTAL_STEPS}** — Send the **account number** first.",
+            parse_mode="Markdown",
+        )
+        return ADD_CARD_STEP_ACCOUNT
 
     stored_name = _allocate_card_name(settings.database_path, name)
     try:
@@ -1335,6 +1466,8 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
             file_id,
             capacity=capacity,
             card_last4=card_last4,
+            sort_code=sort_code,
+            account_number=account_number,
         )
     except Exception:
         logger.exception("Failed to save credo card %r", stored_name)
@@ -1348,6 +1481,8 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
     context.user_data.pop("add_card_name", None)
     context.user_data.pop("add_card_capacity", None)
     context.user_data.pop("add_card_last4", None)
+    context.user_data.pop("add_card_sort_code", None)
+    context.user_data.pop("add_card_account_number", None)
     context.user_data.pop("add_card_active", None)
     cap_line = format_amount(capacity) if capacity > 0 else "no limit"
     limit_hint = (
@@ -1361,6 +1496,7 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
         photo=file_id,
         caption=(
             f"✅ **{display_label}** added{name_note} · ····{card_last4} · limit {cap_line}\n"
+            f"**Sort code:** `{sort_code}` · **Account:** `{account_number}`\n"
             f"{limit_hint}"
         ),
         parse_mode="Markdown",

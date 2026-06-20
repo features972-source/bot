@@ -67,6 +67,8 @@ class CredoCreditCard:
     capacity: float
     added_at: str
     card_last4: str | None = None
+    sort_code: str | None = None
+    account_number: str | None = None
 
 
 @dataclass
@@ -881,6 +883,10 @@ def _ensure_credo_credit_card_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE credo_credit_cards ADD COLUMN logo_file_id TEXT")
     if "card_last4" not in columns:
         conn.execute("ALTER TABLE credo_credit_cards ADD COLUMN card_last4 TEXT")
+    if "sort_code" not in columns:
+        conn.execute("ALTER TABLE credo_credit_cards ADD COLUMN sort_code TEXT")
+    if "account_number" not in columns:
+        conn.execute("ALTER TABLE credo_credit_cards ADD COLUMN account_number TEXT")
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_credo_credit_cards_last4
@@ -2845,6 +2851,8 @@ def upsert_credo_credit_card(
     capacity: float = 0,
     logo_file_id: str | None = None,
     card_last4: str | None = None,
+    sort_code: str | None = None,
+    account_number: str | None = None,
 ) -> None:
     cleaned = name.strip()
     if not cleaned or not photo_file_id.strip():
@@ -2860,22 +2868,38 @@ def upsert_credo_credit_card(
             raise ValueError("card_last4 must be four digits")
         if not last4_clean:
             last4_clean = None
+    sort_code_clean = (sort_code or "").strip() or None
+    account_number_clean = (account_number or "").strip() or None
     added_at = datetime.now(timezone.utc).isoformat()
     with _connect(path) as conn:
         conn.execute(
             """
             INSERT INTO credo_credit_cards (
-                name, photo_file_id, logo_file_id, capacity, added_at, card_last4
+                name, photo_file_id, logo_file_id, capacity, added_at, card_last4,
+                sort_code, account_number
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 photo_file_id = excluded.photo_file_id,
                 capacity = excluded.capacity,
                 added_at = excluded.added_at,
                 logo_file_id = COALESCE(excluded.logo_file_id, credo_credit_cards.logo_file_id),
-                card_last4 = COALESCE(excluded.card_last4, credo_credit_cards.card_last4)
+                card_last4 = COALESCE(excluded.card_last4, credo_credit_cards.card_last4),
+                sort_code = COALESCE(excluded.sort_code, credo_credit_cards.sort_code),
+                account_number = COALESCE(
+                    excluded.account_number, credo_credit_cards.account_number
+                )
             """,
-            (cleaned, photo_file_id, logo_file_id, capacity, added_at, last4_clean),
+            (
+                cleaned,
+                photo_file_id,
+                logo_file_id,
+                capacity,
+                added_at,
+                last4_clean,
+                sort_code_clean,
+                account_number_clean,
+            ),
         )
         conn.commit()
 
@@ -2891,27 +2915,30 @@ def remove_credo_credit_card(path: str, name: str) -> bool:
         return cursor.rowcount > 0
 
 
+def _credo_credit_card_from_row(row: sqlite3.Row | tuple) -> CredoCreditCard:
+    return CredoCreditCard(
+        name=row[0],
+        photo_file_id=row[1],
+        logo_file_id=row[2],
+        capacity=float(row[3] or 0),
+        added_at=row[4],
+        card_last4=row[5] if len(row) > 5 else None,
+        sort_code=row[6] if len(row) > 6 else None,
+        account_number=row[7] if len(row) > 7 else None,
+    )
+
+
 def list_credo_credit_cards(path: str) -> list[CredoCreditCard]:
     with _connect(path) as conn:
         rows = conn.execute(
             """
             SELECT name, photo_file_id, logo_file_id, COALESCE(capacity, 0), added_at,
-                   card_last4
+                   card_last4, sort_code, account_number
             FROM credo_credit_cards
             ORDER BY added_at ASC, name ASC
             """
         ).fetchall()
-    return [
-        CredoCreditCard(
-            name=row[0],
-            photo_file_id=row[1],
-            logo_file_id=row[2],
-            capacity=float(row[3] or 0),
-            added_at=row[4],
-            card_last4=row[5] if len(row) > 5 else None,
-        )
-        for row in rows
-    ]
+    return [_credo_credit_card_from_row(row) for row in rows]
 
 
 def get_credo_credit_card(path: str, name: str) -> CredoCreditCard | None:
@@ -2922,7 +2949,7 @@ def get_credo_credit_card(path: str, name: str) -> CredoCreditCard | None:
         row = conn.execute(
             """
             SELECT name, photo_file_id, logo_file_id, COALESCE(capacity, 0), added_at,
-                   card_last4
+                   card_last4, sort_code, account_number
             FROM credo_credit_cards
             WHERE name = ? COLLATE NOCASE
             """,
@@ -2930,14 +2957,7 @@ def get_credo_credit_card(path: str, name: str) -> CredoCreditCard | None:
         ).fetchone()
     if row is None:
         return None
-    return CredoCreditCard(
-        name=row[0],
-        photo_file_id=row[1],
-        logo_file_id=row[2],
-        capacity=float(row[3] or 0),
-        added_at=row[4],
-        card_last4=row[5] if len(row) > 5 else None,
-    )
+    return _credo_credit_card_from_row(row)
 
 
 def get_credo_credit_card_by_last4(path: str, last4: str) -> CredoCreditCard | None:
@@ -2948,7 +2968,7 @@ def get_credo_credit_card_by_last4(path: str, last4: str) -> CredoCreditCard | N
         row = conn.execute(
             """
             SELECT name, photo_file_id, logo_file_id, COALESCE(capacity, 0), added_at,
-                   card_last4
+                   card_last4, sort_code, account_number
             FROM credo_credit_cards
             WHERE card_last4 = ?
             ORDER BY added_at ASC, name ASC
@@ -2958,14 +2978,7 @@ def get_credo_credit_card_by_last4(path: str, last4: str) -> CredoCreditCard | N
         ).fetchone()
     if row is None:
         return None
-    return CredoCreditCard(
-        name=row[0],
-        photo_file_id=row[1],
-        logo_file_id=row[2],
-        capacity=float(row[3] or 0),
-        added_at=row[4],
-        card_last4=row[5] if len(row) > 5 else None,
-    )
+    return _credo_credit_card_from_row(row)
 
 
 def sum_credo_card_usage(path: str, card_name: str) -> float:
