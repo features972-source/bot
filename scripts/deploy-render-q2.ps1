@@ -178,4 +178,6 @@ if ($RestoreDb) {
 
 Write-Host ""
 Write-Host "Done. Q2 URL: $baseUrl" -ForegroundColor Green
+Write-Host "Every git push to main also auto-deploys Q1 (q1-call-manager-eu)."
+Write-Host "Verify both: powershell -File scripts/deploy-render-both.ps1 -VerifyOnly"
 Write-Host "In the Q2 group run /setnotify and /setnotifypayments once if needed."

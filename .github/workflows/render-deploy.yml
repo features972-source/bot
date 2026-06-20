@@ -1,0 +1,114 @@
+# Ensure every push to main deploys Q1 and Q2 on Render.
+# Render auto-deploys all services on the repo; this workflow triggers both explicitly
+# and fails CI if either service is missing or not on the pushed commit.
+name: Deploy Q1 and Q2 to Render
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trigger Q1 and Q2 deploys
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          GITHUB_REPO: https://github.com/${{ github.repository }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RENDER_API_KEY:-}" ]; then
+            echo "RENDER_API_KEY not set — skipping explicit deploy trigger."
+            echo "Render auto-deploy should still run for services linked to this repo."
+            exit 0
+          fi
+
+          api() {
+            curl -fsS -H "Authorization: Bearer $RENDER_API_KEY" -H "Accept: application/json" "$@"
+          }
+
+          services_json="$(api "https://api.render.com/v1/services?limit=100")"
+          q1_id="$(echo "$services_json" | python3 -c "
+          import json, sys
+          repo = sys.argv[1]
+          data = json.load(sys.stdin)
+          for row in data:
+              s = row.get('service') or row
+              if s.get('repo') != repo or s.get('branch') != 'main': continue
+              if s.get('suspended') != 'not_suspended': continue
+              slug = s.get('slug', '')
+              if slug == 'q1-call-manager-eu' or ('q1' in slug and 'q2' not in slug and 'australia' not in slug and not slug.startswith('botq')):
+                  print(s['id']); break
+          " "$GITHUB_REPO")"
+          q2_id="$(echo "$services_json" | python3 -c "
+          import json, sys
+          repo = sys.argv[1]
+          data = json.load(sys.stdin)
+          for row in data:
+              s = row.get('service') or row
+              if s.get('repo') != repo or s.get('branch') != 'main': continue
+              if s.get('suspended') != 'not_suspended': continue
+              slug = s.get('slug', '')
+              if slug == 'q2-telegram-bot' or ('q2' in slug and not slug.startswith('botq')):
+                  print(s['id']); break
+          " "$GITHUB_REPO")"
+
+          if [ -z "$q1_id" ] || [ -z "$q2_id" ]; then
+            echo "Could not find active Q1 and Q2 services for $GITHUB_REPO"
+            exit 1
+          fi
+
+          echo "Q1 service: $q1_id"
+          echo "Q2 service: $q2_id"
+
+          for id in "$q1_id" "$q2_id"; do
+            curl -fsS -X POST "https://api.render.com/v1/services/$id/deploys" \
+              -H "Authorization: Bearer $RENDER_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d '{"clearCache":"do_not_clear"}'
+            echo ""
+          done
+
+          wait_live() {
+            local url="$1"
+            local want_id="$2"
+            local i
+            for i in $(seq 1 60); do
+              body="$(curl -fsS "$url/health" 2>/dev/null || true)"
+              if echo "$body" | grep -q "\"ok\":true" && echo "$body" | grep -q "\"id\":\"$want_id\""; then
+                echo "$body"
+                return 0
+              fi
+              echo "waiting for $url ($i/60) ..."
+              sleep 20
+            done
+            echo "Timed out waiting for $url"
+            return 1
+          }
+
+          wait_live "https://q1-call-manager-eu.onrender.com" "q1"
+          wait_live "https://q2-telegram-bot.onrender.com" "q2"
+
+          for id in "$q1_id" "$q2_id"; do
+            deploy_json="$(api "https://api.render.com/v1/services/$id/deploys?limit=1")"
+            commit="$(echo "$deploy_json" | python3 -c "
+          import json, sys
+          expected = sys.argv[1]
+          data = json.load(sys.stdin)
+          row = data[0]
+          dep = row.get('deploy') or row
+          commit = (dep.get('commit') or {}).get('id', '')
+          status = dep.get('status', '')
+          print(commit)
+          if status != 'live':
+              raise SystemExit(f'deploy not live: {status}')
+          if not commit.startswith(expected[:7]):
+              raise SystemExit(f'commit mismatch: {commit} vs {expected}')
+          " "$EXPECTED_COMMIT")"
+            echo "Service $id live on $commit"
+          done
+
+          echo "Q1 and Q2 deployed for commit ${EXPECTED_COMMIT:0:7}"

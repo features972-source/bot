@@ -2,6 +2,29 @@
 
 Run all bots on Render instead of your PC. Each bot (Q1, Q2, Q1 Australia) is a **separate Web Service** with its own token, env vars, and persistent disk.
 
+## Q1 + Q2 — every push deploys both
+
+**One GitHub repo (`features972-source/bot`), branch `main`.** Render auto-deploys **every Web Service** connected to that repo on each push.
+
+| Service | URL | Instance |
+|---------|-----|----------|
+| Q1 Call Manager | https://q1-call-manager-eu.onrender.com | `q1` |
+| Q2 Call Manager | https://q2-telegram-bot.onrender.com | `q2` |
+
+After `git push origin main`, both should show the same commit in Render → each service → **Events**.
+
+**Verify or force redeploy both:**
+
+```powershell
+$env:RENDER_API_KEY = "rnd_..."
+powershell -File scripts/deploy-render-both.ps1
+powershell -File scripts/deploy-render-both.ps1 -VerifyOnly   # check only, no new deploy
+```
+
+**GitHub Actions:** `.github/workflows/render-deploy.yml` triggers Q1 + Q2 on every push to `main` when `RENDER_API_KEY` is set in repo secrets (Settings → Secrets → Actions). Without the secret, Render auto-deploy still applies.
+
+Do **not** use old duplicate services (`botq1`, `botq2`) — only `q1-call-manager-eu` and `q2-telegram-bot`.
+
 ## 24/7 requirements
 
 1. **Starter plan or higher** on each service — free tier sleeps after inactivity
