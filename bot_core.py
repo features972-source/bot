@@ -22,7 +22,6 @@ from handlers.admin_panel import build_admin_handlers
 from handlers.bot_commands import build_bot_handlers
 from handlers.credo import build_add_card_handlers
 from handlers.mailer import build_mailer_handlers
-from handlers.pass_queue import build_pass_queue_notes_handler
 from handlers.payments import build_payment_message_handlers
 from handlers.ready_check import build_ready_check_handlers, ready_check_shift_loop
 from mailer_bridge import init_mailer_bridge
@@ -91,7 +90,6 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         )
         from handlers.credo import credo_reminder_loop
         from handlers.nemesis import nemesis_loop
-        from handlers.pass_queue import pass_reminder_loop
 
         asyncio.create_task(
             credo_reminder_loop(app.bot, settings, app.bot_data),
@@ -100,10 +98,6 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         asyncio.create_task(
             nemesis_loop(app.bot, settings, app.bot_data),
             name=f"nemesis-{instance_id}",
-        )
-        asyncio.create_task(
-            pass_reminder_loop(app.bot, settings, app.bot_data),
-            name=f"pass-reminder-{instance_id}",
         )
         asyncio.create_task(
             ready_check_shift_loop(app.bot, settings, app.bot_data),
@@ -155,7 +149,6 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         tg_app.add_handler(handler, group=-1)
     for handler in build_mailer_handlers():
         tg_app.add_handler(handler, group=-1)
-    tg_app.add_handler(build_pass_queue_notes_handler(), group=-2)
     for handler in build_admin_handlers():
         tg_app.add_handler(handler)
     for handler in build_ready_check_handlers():

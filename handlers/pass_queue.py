@@ -1,4 +1,7 @@
-"""Pass queue — finishers join with /joinqueue; starters post notes for handoff."""
+"""Pass queue — finishers join with /joinqueue; starters post notes for handoff.
+
+Disabled in bot_core / bot_commands until re-enabled. Module and tests kept for later.
+"""
 
 from __future__ import annotations
 

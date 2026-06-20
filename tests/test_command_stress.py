@@ -68,8 +68,6 @@ COMMAND_SCENARIOS: dict[str, list[list[str]]] = {
     "unblacklist": [[], ["@baduser"]],
     "clearalldata": [[], ["2026-01-01"], ["not-a-date"]],
     "removeexpense": [[], ["1"], ["99999"]],
-    "addvip": [[], [str(ADMIN_ID)]],
-    "removevip": [[], [str(ADMIN_ID)]],
     "addadmin": [[]],
     "removeadmin": [[]],
     "addcredouser": [[], ["@cuser"]],
@@ -78,10 +76,6 @@ COMMAND_SCENARIOS: dict[str, list[list[str]]] = {
     "addpremium": [[], [str(ADMIN_ID)]],
     "removepremium": [[], [str(ADMIN_ID)]],
     "mail": [[], ["test subject"]],
-    "joinqueue": [[]],
-    "leavequeue": [[]],
-    "queue": [[]],
-    "clearnotes": [[]],
     "panel": [[]],
     "ready": [[]],
     "panic": [[]],
@@ -111,9 +105,6 @@ COMMAND_SCENARIOS: dict[str, list[list[str]]] = {
 
 # Commands hammered repeatedly (simulates busy group during pass queue load).
 RAPID_REPEAT_COMMANDS = (
-    "joinqueue",
-    "leavequeue",
-    "queue",
     "help",
     "payments",
     "out",
@@ -445,40 +436,7 @@ class CommandStressTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_pass_queue_commands_while_finishers_busy(self):
-        """Queue commands while all finishers have active passes."""
-        db = self.settings.database_path
-        for i in range(5):
-            join_pass_queue(
-                db,
-                telegram_user_id=FINISHER_BASE + 100 + i,
-                telegram_username=f"busy{i}",
-                display_name=f"Busy {i}",
-            )
-            create_pass_offer(
-                db,
-                chat_id=CHAT_GROUP,
-                notes_message_id=4000 + i,
-                starter_user_id=9100 + i,
-                starter_username=f"s{i}",
-                starter_display_name=f"S{i}",
-                assigned_user_id=FINISHER_BASE + 100 + i,
-                assigned_username=f"busy{i}",
-                assigned_display_name=f"Busy {i}",
-                notes_text=f"Notes {i}\n01/01/1990\nbarclays\ncurrent {7000 + i}",
-            )
-        queue_cmds = ("joinqueue", "leavequeue", "queue", "clearnotes")
-        failures: list[str] = []
-        for command in queue_cmds:
-            callback = self.commands[command]
-            for _ in range(5):
-                try:
-                    await _invoke(self.settings, command, callback)
-                except Exception as exc:
-                    failures.append(f"/{command} -> {type(exc).__name__}: {exc}")
-        if failures:
-            self.fail(
-                f"{len(failures)} busy-queue failure(s):\n" + "\n".join(failures)
-            )
+        self.skipTest("Pass queue disabled")
 
 
 if __name__ == "__main__":
