@@ -63,6 +63,10 @@ CREDO_GROUP_COMMANDS = [
     BotCommand("finished", "End active credo session"),
 ]
 
+EXPENSE_GROUP_COMMANDS = CREDO_GROUP_COMMANDS + [
+    BotCommand("expense", "Log expense (who · amount · where)"),
+]
+
 
 def _payment_group_chat_ids(settings: Settings) -> set[int]:
     from database import get_payment_notify_chat_id
@@ -75,6 +79,19 @@ def _payment_group_chat_ids(settings: Settings) -> set[int]:
         ids.add(payment_notify_id)
     if settings.copy_to_chat_id is not None:
         ids.add(settings.copy_to_chat_id)
+    return ids
+
+
+def _expense_group_chat_ids(settings: Settings) -> set[int]:
+    from database import get_expense_logging_chat_id, get_expense_report_chat_id
+
+    ids: set[int] = set()
+    for chat_id in (
+        get_expense_logging_chat_id(settings.database_path),
+        get_expense_report_chat_id(settings.database_path),
+    ):
+        if chat_id is not None:
+            ids.add(chat_id)
     return ids
 
 
@@ -139,6 +156,8 @@ async def sync_bot_command_menu(bot: Bot, settings: Settings) -> None:
             scopes_to_clear.append(BotCommandScopeChat(chat_id=settings.notify_chat_id))
         for chat_id in _payment_group_chat_ids(settings):
             scopes_to_clear.append(BotCommandScopeChat(chat_id=chat_id))
+        for chat_id in _expense_group_chat_ids(settings):
+            scopes_to_clear.append(BotCommandScopeChat(chat_id=chat_id))
 
         for scope in scopes_to_clear:
             await _clear_command_scope(bot, scope)
@@ -158,8 +177,20 @@ async def sync_bot_command_menu(bot: Bot, settings: Settings) -> None:
         )
 
         for chat_id in _payment_group_chat_ids(settings):
+            cmds = (
+                EXPENSE_GROUP_COMMANDS
+                if chat_id in _expense_group_chat_ids(settings)
+                else CREDO_GROUP_COMMANDS
+            )
             await bot.set_my_commands(
-                CREDO_GROUP_COMMANDS,
+                cmds,
+                scope=BotCommandScopeChat(chat_id=chat_id),
+            )
+        for chat_id in _expense_group_chat_ids(settings):
+            if chat_id in _payment_group_chat_ids(settings):
+                continue
+            await bot.set_my_commands(
+                EXPENSE_GROUP_COMMANDS,
                 scope=BotCommandScopeChat(chat_id=chat_id),
             )
         try:

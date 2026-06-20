@@ -13,13 +13,13 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 from config import Settings
 from database import (
-    clear_expense_notify_message_id,
-    get_expense_notify_chat_id,
-    get_expense_notify_message_id,
-    get_expense_totals,
+    clear_expense_report_message_id,
+    get_expense_report_chat_id,
+    get_expense_report_message_id,
     list_expenses_since,
-    set_expense_notify_chat_id,
-    set_expense_notify_message_id,
+    set_expense_report_chat_id,
+    set_expense_report_message_id,
+    get_expense_totals,
 )
 from handlers.admin_access import require_admin
 from handlers.expense_table import LIVE_EXPENSE_ROW_LIMIT, format_expense_subtitle
@@ -122,7 +122,7 @@ def build_expense_report_empty_text(settings: Settings) -> str:
         f"<b>{html.escape(title)}</b>\n"
         f"<i>{html.escape(format_expense_subtitle(period_label))}</i>\n\n"
         "No expenses logged this week yet.\n\n"
-        "Post lines like <code>£132 blast</code> — amount then reason.\n"
+        "Post lines like <code>£132 blast</code> or <code>/expense</code> — step-by-step.\n"
         "<i>New week every Sunday.</i>"
     )
 
@@ -152,13 +152,13 @@ async def _run_pending_refresh(key: str) -> None:
 
 
 async def refresh_expense_report(bot, settings: Settings) -> None:
-    chat_id = get_expense_notify_chat_id(settings.database_path)
+    chat_id = get_expense_report_chat_id(settings.database_path)
     if chat_id is None:
         return
 
     lock = _REFRESH_LOCKS[settings.database_path]
     async with lock:
-        message_id = get_expense_notify_message_id(settings.database_path)
+        message_id = get_expense_report_message_id(settings.database_path)
         image_bytes = await asyncio.to_thread(build_expense_report_image, settings)
 
         if image_bytes is None:
@@ -183,7 +183,7 @@ async def refresh_expense_report(bot, settings: Settings) -> None:
                 sent = await bot.send_message(
                     chat_id=chat_id, text=text, parse_mode="HTML"
                 )
-                set_expense_notify_message_id(settings.database_path, sent.message_id)
+                set_expense_report_message_id(settings.database_path, sent.message_id)
             except Exception:
                 logger.exception("Failed to post empty expense report")
             return
@@ -197,7 +197,7 @@ async def refresh_expense_report(bot, settings: Settings) -> None:
             sent = await bot.send_photo(
                 chat_id=chat_id, photo=_photo_file(image_bytes)
             )
-            set_expense_notify_message_id(settings.database_path, sent.message_id)
+            set_expense_report_message_id(settings.database_path, sent.message_id)
         except Exception:
             logger.exception(
                 "Failed to post expense report image for %s to chat %s",
@@ -259,7 +259,8 @@ async def setexpenses_command(
         "🧾 **Live expense table**\n\n"
         "Choose **Q1** or **Q2**. The bot posts **one table** in this group and "
         "**updates the same image** whenever an expense is logged.\n\n"
-        "Post expenses like: `£132 blast` (amount + reason)\n"
+        "Run **/setnotifyexpenses** first in the group where people log expenses.\n"
+        "Post expenses like: `£132 blast` or use **/expense** (step-by-step)\n"
         "New week every **Sunday**.",
         parse_mode="Markdown",
         reply_markup=_instance_picker_keyboard(instance_id),
@@ -287,17 +288,21 @@ async def setexpenses_callback(
     target_settings = get_instance(instance_id) or settings_ctx
 
     await query.answer()
-    old_chat_id = get_expense_notify_chat_id(target_settings.database_path)
-    set_expense_notify_chat_id(target_settings.database_path, chat.id)
+    old_chat_id = get_expense_report_chat_id(target_settings.database_path)
+    set_expense_report_chat_id(target_settings.database_path, chat.id)
     if old_chat_id is None or old_chat_id != chat.id:
-        clear_expense_notify_message_id(target_settings.database_path)
+        clear_expense_report_message_id(target_settings.database_path)
 
     if query.message:
         await query.edit_message_text(
             f"✅ **{expense_report_title(target_settings.bot_display_name)}** is live in this group.\n\n"
             f"Chat id: `{chat.id}`\n\n"
-            "Post expenses like `£132 blast` — the table updates automatically.",
+            "The table below updates when expenses are logged "
+            "(in the group set with **/setnotifyexpenses**).",
             parse_mode="Markdown",
         )
 
     schedule_expense_report_refresh(context.bot, target_settings)
+    from handlers.admin_access import sync_bot_command_menu
+
+    await sync_bot_command_menu(context.bot, target_settings)

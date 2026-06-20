@@ -564,45 +564,86 @@ def clear_payment_notify_message_id(path: str) -> None:
         conn.commit()
 
 
+EXPENSE_LOGGING_CHAT_ID_KEY = "expense_logging_chat_id"
+EXPENSE_REPORT_CHAT_ID_KEY = "expense_report_chat_id"
+EXPENSE_REPORT_MESSAGE_ID_KEY = "expense_report_message_id"
+# Legacy keys (read as fallback until groups are re-configured)
 EXPENSE_NOTIFY_CHAT_ID_KEY = "expense_notify_chat_id"
 EXPENSE_NOTIFY_MESSAGE_ID_KEY = "expense_notify_message_id"
 
 
-def get_expense_notify_chat_id(path: str) -> int | None:
-    raw = _get_bot_setting(path, EXPENSE_NOTIFY_CHAT_ID_KEY)
+def _parse_stored_chat_id(raw: str | None) -> int | None:
     if not raw:
         return None
     try:
         return int(raw.strip())
     except ValueError:
         return None
+
+
+def get_expense_logging_chat_id(path: str) -> int | None:
+    chat_id = _parse_stored_chat_id(_get_bot_setting(path, EXPENSE_LOGGING_CHAT_ID_KEY))
+    if chat_id is not None:
+        return chat_id
+    return _parse_stored_chat_id(_get_bot_setting(path, EXPENSE_NOTIFY_CHAT_ID_KEY))
+
+
+def set_expense_logging_chat_id(path: str, chat_id: int) -> None:
+    _set_bot_setting(path, EXPENSE_LOGGING_CHAT_ID_KEY, str(chat_id))
+
+
+def get_expense_report_chat_id(path: str) -> int | None:
+    chat_id = _parse_stored_chat_id(_get_bot_setting(path, EXPENSE_REPORT_CHAT_ID_KEY))
+    if chat_id is not None:
+        return chat_id
+    return _parse_stored_chat_id(_get_bot_setting(path, EXPENSE_NOTIFY_CHAT_ID_KEY))
+
+
+def set_expense_report_chat_id(path: str, chat_id: int) -> None:
+    _set_bot_setting(path, EXPENSE_REPORT_CHAT_ID_KEY, str(chat_id))
+
+
+def get_expense_report_message_id(path: str) -> int | None:
+    message_id = _parse_stored_chat_id(
+        _get_bot_setting(path, EXPENSE_REPORT_MESSAGE_ID_KEY)
+    )
+    if message_id is not None:
+        return message_id
+    return _parse_stored_chat_id(_get_bot_setting(path, EXPENSE_NOTIFY_MESSAGE_ID_KEY))
+
+
+def set_expense_report_message_id(path: str, message_id: int) -> None:
+    _set_bot_setting(path, EXPENSE_REPORT_MESSAGE_ID_KEY, str(message_id))
+
+
+def clear_expense_report_message_id(path: str) -> None:
+    with _connect(path) as conn:
+        conn.execute(
+            "DELETE FROM bot_settings WHERE key IN (?, ?)",
+            (EXPENSE_REPORT_MESSAGE_ID_KEY, EXPENSE_NOTIFY_MESSAGE_ID_KEY),
+        )
+        conn.commit()
+
+
+def get_expense_notify_chat_id(path: str) -> int | None:
+    """Legacy alias — prefer get_expense_logging_chat_id or get_expense_report_chat_id."""
+    return get_expense_logging_chat_id(path)
 
 
 def set_expense_notify_chat_id(path: str, chat_id: int) -> None:
-    _set_bot_setting(path, EXPENSE_NOTIFY_CHAT_ID_KEY, str(chat_id))
+    set_expense_logging_chat_id(path, chat_id)
 
 
 def get_expense_notify_message_id(path: str) -> int | None:
-    raw = _get_bot_setting(path, EXPENSE_NOTIFY_MESSAGE_ID_KEY)
-    if not raw:
-        return None
-    try:
-        return int(raw.strip())
-    except ValueError:
-        return None
+    return get_expense_report_message_id(path)
 
 
 def set_expense_notify_message_id(path: str, message_id: int) -> None:
-    _set_bot_setting(path, EXPENSE_NOTIFY_MESSAGE_ID_KEY, str(message_id))
+    set_expense_report_message_id(path, message_id)
 
 
 def clear_expense_notify_message_id(path: str) -> None:
-    with _connect(path) as conn:
-        conn.execute(
-            "DELETE FROM bot_settings WHERE key = ?",
-            (EXPENSE_NOTIFY_MESSAGE_ID_KEY,),
-        )
-        conn.commit()
+    clear_expense_report_message_id(path)
 
 
 def _get_bot_setting(path: str, key: str) -> str | None:

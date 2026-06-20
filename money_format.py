@@ -11,6 +11,7 @@ PAYMENT_AMOUNT = ""
 PAYMENT_OUT_PATTERN: re.Pattern[str] | None = None
 INLINE_PAYMENT_OUT_PATTERN: re.Pattern[str] | None = None
 EXPENSE_LINE_PATTERN: re.Pattern[str] | None = None
+STANDALONE_AMOUNT_PATTERN: re.Pattern[str] | None = None
 
 
 def init_currency(symbol: str) -> None:
@@ -43,7 +44,8 @@ def _currency_regex_fragment() -> str:
 
 
 def _rebuild_patterns() -> None:
-    global PAYMENT_AMOUNT, PAYMENT_OUT_PATTERN, INLINE_PAYMENT_OUT_PATTERN, EXPENSE_LINE_PATTERN
+    global PAYMENT_AMOUNT, PAYMENT_OUT_PATTERN, INLINE_PAYMENT_OUT_PATTERN
+    global EXPENSE_LINE_PATTERN, STANDALONE_AMOUNT_PATTERN
     PAYMENT_AMOUNT = (
         _currency_regex_fragment()
         + r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*"
@@ -60,6 +62,10 @@ def _rebuild_patterns() -> None:
     )
     EXPENSE_LINE_PATTERN = re.compile(
         rf"^\s*{PAYMENT_AMOUNT}\s+(\S.+?)\s*$",
+        re.IGNORECASE,
+    )
+    STANDALONE_AMOUNT_PATTERN = re.compile(
+        rf"^\s*{PAYMENT_AMOUNT}\s*$",
         re.IGNORECASE,
     )
 
@@ -98,6 +104,24 @@ def parse_expense_line(text: str) -> tuple[float, str, str] | None:
     if amount <= 0:
         return None
     return amount, reason, stripped
+
+
+def parse_expense_amount(text: str) -> tuple[float, str] | None:
+    """Parse a standalone amount like 132, £132, or £1.5k."""
+    if STANDALONE_AMOUNT_PATTERN is None:
+        return None
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    normalized = re.sub(r"\s+", " ", stripped)
+    normalized = re.sub(r"(?<=\d),(?=\d)", "", normalized)
+    match = STANDALONE_AMOUNT_PATTERN.match(normalized)
+    if match is None:
+        return None
+    amount = _amount_from_match(match)
+    if amount <= 0:
+        return None
+    return amount, stripped
 
 
 def parse_amount_candidates(stripped: str, normalized: str) -> list[str]:

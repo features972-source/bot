@@ -6,6 +6,7 @@ from database import (
     ExtensionLink,
     link_extension,
     list_links,
+    set_expense_logging_chat_id,
     set_notify_chat_id,
     unlink_by_telegram_user_id,
     unlink_extension,
@@ -19,7 +20,7 @@ from handlers.call_stats import build_call_stats_handlers
 from handlers.chat_blacklist import build_chat_blacklist_handlers
 from handlers.credo import build_credo_handlers
 from handlers.expense_reports import build_expense_report_handlers
-from handlers.expenses import build_expense_message_handlers
+from handlers.expenses import build_expense_command_handlers, build_expense_message_handlers
 from handlers.payments import (
     build_payment_command_handlers,
     build_payment_message_handlers,
@@ -34,6 +35,7 @@ def build_bot_handlers() -> list:
     return [
         *build_panic_handlers(),
         *build_payment_command_handlers(),
+        *build_expense_command_handlers(),
         # Payment outs before expenses — "933 out" must not be logged as an expense.
         *build_payment_message_handlers(),
         *build_expense_message_handlers(),
@@ -49,6 +51,7 @@ def build_bot_handlers() -> list:
         CommandHandler("links", links_command),
         CommandHandler("users", users_command),
         CommandHandler("setnotify", set_notify_command),
+        CommandHandler("setnotifyexpenses", set_notify_expenses_command),
         *build_admin_access_handlers(),
         *build_premium_access_handlers(),
         *build_nemesis_handlers(),
@@ -94,7 +97,9 @@ def _format_help_text(
             "/link — link extension (reply to user) · /unlink · /links · /users\n"
             "/setnotify — set announcement group\n"
             "/setnotifypayments — live payment list in a group (pick Q1/Q2, auto-updates)\n"
-            "/setexpenses — live expense table in a group (pick Q1/Q2, auto-updates)\n\n"
+            "/setnotifyexpenses — set expenses logging group\n"
+            "/setexpenses — live expense table in a group (pick Q1/Q2, auto-updates)\n"
+            "/expense — log an expense step-by-step (who · amount · where)\n\n"
             "<b>👑 Admins</b>\n"
             "/admin · /addadmin · /removeadmin — manage bot admins\n\n"
             "<b>🚫 Blacklist</b>\n"
@@ -310,6 +315,33 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "Linked users:\n"
         + "\n".join(lines)
         + "\n\nRemove: /unlink 101 or reply to a user with /unlink"
+    )
+
+
+async def set_notify_expenses_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not await require_admin(update, settings):
+        return
+
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.effective_message.reply_text(
+            "Run this command inside your expenses group."
+        )
+        return
+
+    set_expense_logging_chat_id(settings.database_path, chat.id)
+    from handlers.admin_access import sync_bot_command_menu
+
+    await sync_bot_command_menu(context.bot, settings)
+    await update.effective_message.reply_text(
+        f"**Expense logging** will use this group.\n"
+        f"Chat id: `{chat.id}`\n\n"
+        "Use **/expense** or post lines like `£132 Tesco` here.\n\n"
+        "For the live table image, run **/setexpenses** in the group where you want it posted.",
+        parse_mode="Markdown",
     )
 
 

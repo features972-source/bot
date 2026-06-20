@@ -6,7 +6,7 @@ from database import ExpenseRecord, list_links
 from handlers.payment_table import format_payment_date, sheet_user_label
 from money_format import format_amount
 
-EXPENSE_HEADERS = ("#", "Amount", "Date", "User", "Reason")
+EXPENSE_HEADERS = ("#", "Amount", "Date", "User", "Where")
 LIVE_EXPENSE_ROW_LIMIT = 12
 
 
