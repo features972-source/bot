@@ -39,13 +39,13 @@ from handlers.profit_export import build_profit_export_handlers
 def build_bot_handlers() -> list:
     return [
         *build_panic_handlers(),
+        *build_pass_queue_handlers(),
         *build_payment_command_handlers(),
         *build_profit_export_handlers(),
         *build_expense_command_handlers(),
         # Expense wizard before payment outs — catch step replies in shared groups.
         *build_expense_message_handlers(),
         *build_payment_message_handlers(),
-        *build_pass_queue_handlers(),
         *build_credo_handlers(),
         *build_expense_report_handlers(),
         *build_payment_report_handlers(),
@@ -112,7 +112,8 @@ def _format_help_text(
             "/export — jobs payout %, owed per user, expenses & net profit (today · 7 · all)\n\n"
             "<b>🎯 Pass queue</b>\n"
             "/joinqueue — join queue for the next pass\n"
-            "/leavequeue — leave the queue · /queue — who's waiting\n\n"
+            "/leavequeue — leave the queue · /queue — who's waiting\n"
+            "/pass — reply to notes to offer pass (if auto-detect misses)\n\n"
             "<b>👑 Admins</b>\n"
             "/admin · /addadmin · /removeadmin — manage bot admins\n\n"
             "<b>🚫 Blacklist</b>\n"

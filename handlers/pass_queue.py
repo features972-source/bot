@@ -39,9 +39,10 @@ def build_pass_queue_handlers() -> list:
         CommandHandler("joinqueue", joinqueue_command),
         CommandHandler("leavequeue", leavequeue_command),
         CommandHandler("queue", queue_command),
+        CommandHandler("pass", pass_command),
         CallbackQueryHandler(pass_callback, pattern=rf"^{re.escape(CALLBACK_PREFIX)}"),
         MessageHandler(
-            filters.ChatType.GROUPS & (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
+            filters.ChatType.GROUPS & ~filters.COMMAND,
             notes_message_handler,
             block=False,
         ),
@@ -96,6 +97,10 @@ def _format_queue_line(entry: PassQueueEntry, *, position: int) -> str:
     return f"{position}. {html.escape(_user_label(entry.user_id, entry.telegram_username, entry.display_name))}"
 
 
+def _pass_queue_chat_allowed(chat) -> bool:
+    return chat is not None and chat.type in ("group", "supergroup")
+
+
 async def joinqueue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     user = update.effective_user
@@ -114,7 +119,8 @@ async def joinqueue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if joined:
         await message.reply_text(
             f"✅ You're in the pass queue (#{position}).\n"
-            "You'll get @mentioned when a starter posts notes.",
+            "You'll get @mentioned when a starter posts notes.\n\n"
+            "<i>Starters: post notes, or reply to them with /pass</i>",
             parse_mode="HTML",
         )
     else:
@@ -156,9 +162,42 @@ async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
-def _pass_queue_chat_allowed(chat) -> bool:
-    """Notes handoff runs wherever /joinqueue works (any team group)."""
-    return chat is not None and chat.type in ("group", "supergroup")
+async def pass_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manual trigger — reply to notes with /pass if auto-detect misses them."""
+    settings: Settings = context.bot_data["settings"]
+    user = update.effective_user
+    message = update.effective_message
+    chat = update.effective_chat
+    if not user or not message or not chat:
+        return
+    if not _pass_queue_chat_allowed(chat):
+        await message.reply_text("Use /pass in your team group.")
+        return
+
+    reply = message.reply_to_message
+    if reply is not None and not reply.from_user.is_bot:
+        notes_text = (reply.text or reply.caption or "").strip()
+        notes_message = reply
+        starter = reply.from_user
+    else:
+        notes_text = (message.text or message.caption or "").strip()
+        notes_text = re.sub(r"^/\w+(?:@\w+)?\s*", "", notes_text, count=1).strip()
+        notes_message = message
+        starter = user
+
+    if not notes_text:
+        await message.reply_text(
+            "Reply to the notes message with /pass to offer them to the queue."
+        )
+        return
+
+    await _offer_pass(
+        update,
+        context,
+        notes_text=notes_text,
+        notes_message=notes_message,
+        starter=starter,
+    )
 
 
 async def notes_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -171,10 +210,43 @@ async def notes_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if not _pass_queue_chat_allowed(chat):
         return
 
-    text = message.text or message.caption or ""
-    if not looks_like_notes(text):
+    text = (message.text or message.caption or "").strip()
+    if not text or text.startswith("/"):
+        return
+
+    queue = list_pass_queue(settings.database_path)
+    queue_waiting = bool(queue)
+    if not looks_like_notes(text, queue_waiting=queue_waiting):
         return
     if pass_offer_for_notes(settings.database_path, chat.id, message.message_id):
+        return
+
+    await _offer_pass(
+        update,
+        context,
+        notes_text=text,
+        notes_message=message,
+        starter=user,
+    )
+
+
+async def _offer_pass(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    notes_text: str,
+    notes_message,
+    starter,
+) -> None:
+    settings: Settings = context.bot_data["settings"]
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat or starter is None:
+        return
+
+    if pass_offer_for_notes(
+        settings.database_path, chat.id, notes_message.message_id
+    ):
         return
 
     queue = list_pass_queue(settings.database_path)
@@ -186,42 +258,51 @@ async def notes_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     assigned = queue[0]
-    offer_id = create_pass_offer(
-        settings.database_path,
-        chat_id=chat.id,
-        notes_message_id=message.message_id,
-        starter_user_id=user.id,
-        starter_username=user.username,
-        starter_display_name=_display_name(user),
-        assigned_user_id=assigned.user_id,
-        assigned_username=assigned.telegram_username,
-        assigned_display_name=assigned.display_name,
-        notes_text=text.strip(),
-    )
-
-    mention = _mention_html(
-        assigned.user_id,
-        assigned.telegram_username,
-        assigned.display_name,
-    )
-    offer_message = await message.reply_text(
-        f"{mention} — <b>take this pass</b>",
-        parse_mode="HTML",
-        reply_markup=_pass_keyboard(offer_id),
-    )
-    update_pass_offer(
-        settings.database_path,
-        offer_id,
-        offer_message_id=offer_message.message_id,
-    )
-    logger.info(
-        "pass offer chat=%s notes_msg=%s starter=%s assigned=%s offer=%s",
-        chat.id,
-        message.message_id,
-        user.id,
-        assigned.user_id,
-        offer_id,
-    )
+    try:
+        offer_id = create_pass_offer(
+            settings.database_path,
+            chat_id=chat.id,
+            notes_message_id=notes_message.message_id,
+            starter_user_id=starter.id,
+            starter_username=getattr(starter, "username", None),
+            starter_display_name=_display_name(starter),
+            assigned_user_id=assigned.user_id,
+            assigned_username=assigned.telegram_username,
+            assigned_display_name=assigned.display_name,
+            notes_text=notes_text.strip(),
+        )
+        mention = _mention_html(
+            assigned.user_id,
+            assigned.telegram_username,
+            assigned.display_name,
+        )
+        offer_message = await notes_message.reply_text(
+            f"{mention} — <b>take this pass</b>",
+            parse_mode="HTML",
+            reply_markup=_pass_keyboard(offer_id),
+        )
+        update_pass_offer(
+            settings.database_path,
+            offer_id,
+            offer_message_id=offer_message.message_id,
+        )
+        logger.info(
+            "pass offer chat=%s notes_msg=%s starter=%s assigned=%s offer=%s",
+            chat.id,
+            notes_message.message_id,
+            starter.id,
+            assigned.user_id,
+            offer_id,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to create pass offer chat=%s notes_msg=%s",
+            chat.id,
+            notes_message.message_id,
+        )
+        await message.reply_text(
+            "Could not offer this pass — try replying to the notes with /pass."
+        )
 
 
 async def pass_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

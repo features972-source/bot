@@ -132,6 +132,7 @@ COMMAND_ARGS: dict[str, list[str]] = {
     "nemesis": ["@someone"],
     "clearalldata": ["2026-06-17"],
     "removeexpense": ["1"],
+    "pass": [],
 }
 
 

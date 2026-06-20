@@ -1,8 +1,4 @@
-"""Detect starter notes messages for pass-queue handoff.
-
-Team notes are almost always multi-line blocks (name, DOB, bank, balances).
-Prefer catching real notes over missing them — only reject obvious non-notes.
-"""
+"""Detect starter notes messages for pass-queue handoff."""
 
 from __future__ import annotations
 
@@ -70,9 +66,17 @@ CHAT_LINE = re.compile(
     r")[\s!.]*$"
 )
 
+NOT_NAME_PHRASE = re.compile(
+    r"(?i)^(see you|thank|thanks|hey there|good morning|good night|how are)\b"
+)
+
 PERSON_NAME_LINE = re.compile(
     r"^[A-Za-z][A-Za-z'\-]+(?:\s+[A-Za-z][A-Za-z'\-\.]+)+$"
 )
+
+
+def _non_empty_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
 
 
 def _structured_notes(lines: list[str]) -> bool:
@@ -82,11 +86,6 @@ def _structured_notes(lines: list[str]) -> bool:
     if label_hits >= 1 and len(lines) >= 2:
         return True
     return label_hits >= 2
-
-
-NOT_NAME_PHRASE = re.compile(
-    r"(?i)^(see you|thank|thanks|hey there|good morning|good night|how are)\b"
-)
 
 
 def _person_name_first(line: str) -> bool:
@@ -138,6 +137,17 @@ def _looks_like_casual_chat(lines: list[str]) -> bool:
     return informal >= len(lines)
 
 
+def _queue_waiting_notes(lines: list[str], cleaned: str) -> bool:
+    """When someone is waiting in queue, treat obvious multi-line blocks as notes."""
+    if len(lines) < 2 or len(cleaned) < 12:
+        return False
+    if _looks_like_casual_chat(lines):
+        return False
+    if len(lines) >= 2:
+        return True
+    return False
+
+
 def _freeform_notes(text: str, lines: list[str]) -> bool:
     line_count = len(lines)
     if line_count < 2:
@@ -167,7 +177,7 @@ def _freeform_notes(text: str, lines: list[str]) -> bool:
     return False
 
 
-def looks_like_notes(text: str | None) -> bool:
+def looks_like_notes(text: str | None, *, queue_waiting: bool = False) -> bool:
     if not text:
         return False
     cleaned = text.strip()
@@ -176,9 +186,12 @@ def looks_like_notes(text: str | None) -> bool:
     if cleaned.startswith("/"):
         return False
 
-    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    lines = _non_empty_lines(cleaned)
     if not lines:
         return False
+
+    if queue_waiting and _queue_waiting_notes(lines, cleaned):
+        return True
 
     if _structured_notes(lines):
         return True

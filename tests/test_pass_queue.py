@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -31,6 +34,72 @@ from database import (  # noqa: E402
     update_pass_offer,
 )
 from notes_detect import looks_like_notes  # noqa: E402
+from handlers import pass_queue  # noqa: E402
+
+
+class PassQueueHandlerTests(unittest.IsolatedAsyncioTestCase):
+    EXAMPLE = """Frank Williams
+
+23/02/1943
+
+barclays
+
+balance 20,000
+
+savers with 30k
+
+also has hsbc"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db_path = os.path.join(
+            tempfile.gettempdir(), f"pass_handler_test_{uuid.uuid4().hex}.db"
+        )
+        init_db(cls.db_path)
+        join_pass_queue(
+            cls.db_path,
+            telegram_user_id=111,
+            telegram_username="finisher",
+            display_name="Finisher",
+        )
+
+    async def test_notes_handler_offers_pass(self):
+        from config import load_settings
+
+        os.environ["DATABASE_PATH"] = self.db_path
+        settings = load_settings()
+
+        user = SimpleNamespace(
+            id=222,
+            username="starter",
+            first_name="Starter",
+            last_name="",
+            is_bot=False,
+        )
+        chat = SimpleNamespace(id=-100, type="supergroup")
+        notes_message = MagicMock()
+        notes_message.message_id = 501
+        notes_message.text = self.EXAMPLE
+        notes_message.caption = None
+        notes_message.chat = chat
+        notes_message.from_user = user
+        notes_message.reply_text = AsyncMock(
+            return_value=SimpleNamespace(message_id=502)
+        )
+
+        update = MagicMock()
+        update.effective_user = user
+        update.effective_chat = chat
+        update.effective_message = notes_message
+
+        context = MagicMock()
+        context.bot_data = {"settings": settings}
+
+        await pass_queue.notes_message_handler(update, context)
+
+        notes_message.reply_text.assert_awaited()
+        args, kwargs = notes_message.reply_text.await_args
+        self.assertIn("take this pass", kwargs.get("text", args[0] if args else ""))
 
 
 class NotesDetectTests(unittest.TestCase):
@@ -105,6 +174,22 @@ also has hsbc"""
     def test_rejects_casual_chat(self):
         self.assertFalse(
             looks_like_notes("See you tomorrow\nThanks\nOk cool")
+        )
+
+    def test_queue_waiting_accepts_frank_notes(self):
+        self.assertTrue(
+            looks_like_notes(
+                self.EXAMPLE_4,
+                queue_waiting=True,
+            )
+        )
+
+    def test_queue_waiting_rejects_casual(self):
+        self.assertFalse(
+            looks_like_notes(
+                "See you tomorrow\nThanks",
+                queue_waiting=True,
+            )
         )
 
     def test_short_two_line_with_dob_and_bank(self):
