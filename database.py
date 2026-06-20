@@ -30,6 +30,14 @@ class Q1PremiumUser:
 
 
 @dataclass
+class PassQueueVip:
+    telegram_user_id: int
+    telegram_username: str | None
+    display_name: str | None
+    added_at: str
+
+
+@dataclass
 class ChatBlacklistEntry:
     chat_id: int
     telegram_username: str
@@ -171,6 +179,7 @@ class PassQueueEntry:
     telegram_username: str | None
     display_name: str | None
     joined_at: str
+    is_vip: bool = False
 
 
 @dataclass
@@ -540,6 +549,16 @@ def init_db(path: str) -> None:
                 telegram_username TEXT,
                 display_name TEXT,
                 joined_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pass_queue_vips (
+                telegram_user_id INTEGER PRIMARY KEY,
+                telegram_username TEXT,
+                display_name TEXT,
+                added_at TEXT NOT NULL
             )
             """
         )
@@ -1987,7 +2006,164 @@ def _pass_queue_entry_from_row(row) -> PassQueueEntry:
         telegram_username=row[1],
         display_name=row[2],
         joined_at=row[3],
+        is_vip=bool(row[4]) if len(row) > 4 else False,
     )
+
+
+_PASS_QUEUE_SELECT = """
+    SELECT
+        pq.telegram_user_id,
+        pq.telegram_username,
+        pq.display_name,
+        pq.joined_at,
+        CASE WHEN v.telegram_user_id IS NOT NULL THEN 1 ELSE 0 END AS is_vip
+    FROM pass_queue pq
+    LEFT JOIN pass_queue_vips v ON v.telegram_user_id = pq.telegram_user_id
+"""
+
+
+def _parse_queue_timestamp(value: str) -> datetime:
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _timestamp_between(start: datetime, end: datetime) -> str:
+    if end <= start:
+        return (start + timedelta(microseconds=500)).isoformat()
+    gap = (end - start).total_seconds()
+    if gap > 1:
+        return (start + timedelta(seconds=gap / 2)).isoformat()
+    return (start + timedelta(microseconds=max(1, int(gap * 500_000)))).isoformat()
+
+
+def _vip_join_timestamp(path: str, *, exclude_user_id: int | None = None) -> str:
+    """Place a VIP at the end of the VIP tier (after VIPs, before standard users)."""
+    now = datetime.now(timezone.utc)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            f"""
+            {_PASS_QUEUE_SELECT}
+            ORDER BY
+                CASE WHEN v.telegram_user_id IS NOT NULL THEN 0 ELSE 1 END,
+                pq.joined_at ASC,
+                pq.telegram_user_id ASC
+            """
+        ).fetchall()
+    entries = [_pass_queue_entry_from_row(row) for row in rows]
+    vips = [
+        entry
+        for entry in entries
+        if entry.is_vip and entry.user_id != exclude_user_id
+    ]
+    standards = [entry for entry in entries if not entry.is_vip]
+    if not standards:
+        return now.isoformat()
+    first_standard = _parse_queue_timestamp(standards[0].joined_at)
+    if not vips:
+        return (first_standard - timedelta(seconds=1)).isoformat()
+    last_vip = _parse_queue_timestamp(vips[-1].joined_at)
+    return _timestamp_between(last_vip, first_standard)
+
+
+def _rotate_to_back_timestamp(path: str, telegram_user_id: int) -> str:
+    """Move a queue member to the back of their tier (VIP or standard)."""
+    now = datetime.now(timezone.utc)
+    if is_pass_queue_vip(path, telegram_user_id):
+        return _vip_join_timestamp(path, exclude_user_id=telegram_user_id)
+    return now.isoformat()
+
+
+def is_pass_queue_vip(path: str, telegram_user_id: int) -> bool:
+    with _connect(path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM pass_queue_vips WHERE telegram_user_id = ?",
+            (telegram_user_id,),
+        ).fetchone()
+    return row is not None
+
+
+def add_pass_queue_vip(
+    path: str,
+    *,
+    telegram_user_id: int,
+    telegram_username: str | None,
+    display_name: str | None,
+) -> None:
+    added_at = datetime.now(timezone.utc).isoformat()
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO pass_queue_vips (telegram_user_id, telegram_username, display_name, added_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(telegram_user_id) DO UPDATE SET
+                telegram_username = excluded.telegram_username,
+                display_name = excluded.display_name
+            """,
+            (telegram_user_id, telegram_username, display_name, added_at),
+        )
+        conn.commit()
+    with _connect(path) as conn:
+        in_queue = conn.execute(
+            "SELECT 1 FROM pass_queue WHERE telegram_user_id = ?",
+            (telegram_user_id,),
+        ).fetchone()
+        if in_queue:
+            conn.execute(
+                """
+                UPDATE pass_queue
+                SET joined_at = ?
+                WHERE telegram_user_id = ?
+                """,
+                (_vip_join_timestamp(path, exclude_user_id=telegram_user_id), telegram_user_id),
+            )
+            conn.commit()
+
+
+def remove_pass_queue_vip(path: str, telegram_user_id: int) -> bool:
+    with _connect(path) as conn:
+        cursor = conn.execute(
+            "DELETE FROM pass_queue_vips WHERE telegram_user_id = ?",
+            (telegram_user_id,),
+        )
+        removed = cursor.rowcount > 0
+        if removed:
+            in_queue = conn.execute(
+                "SELECT 1 FROM pass_queue WHERE telegram_user_id = ?",
+                (telegram_user_id,),
+            ).fetchone()
+            if in_queue:
+                conn.execute(
+                    """
+                    UPDATE pass_queue
+                    SET joined_at = ?
+                    WHERE telegram_user_id = ?
+                    """,
+                    (datetime.now(timezone.utc).isoformat(), telegram_user_id),
+                )
+        conn.commit()
+        return removed
+
+
+def list_pass_queue_vips(path: str) -> list[PassQueueVip]:
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT telegram_user_id, telegram_username, display_name, added_at
+            FROM pass_queue_vips
+            ORDER BY added_at ASC, telegram_user_id ASC
+            """
+        ).fetchall()
+    return [
+        PassQueueVip(
+            telegram_user_id=int(row[0]),
+            telegram_username=row[1],
+            display_name=row[2],
+            added_at=row[3],
+        )
+        for row in rows
+    ]
 
 
 _PASS_OFFER_SELECT = """
@@ -2037,7 +2213,12 @@ def join_pass_queue(
     display_name: str | None,
 ) -> bool:
     """Return True if newly joined, False if already in queue."""
-    now = datetime.now(timezone.utc).isoformat()
+    is_vip = is_pass_queue_vip(path, telegram_user_id)
+    joined_at = (
+        _vip_join_timestamp(path)
+        if is_vip
+        else datetime.now(timezone.utc).isoformat()
+    )
     with _connect(path) as conn:
         existing = conn.execute(
             "SELECT 1 FROM pass_queue WHERE telegram_user_id = ?",
@@ -2059,7 +2240,7 @@ def join_pass_queue(
             INSERT INTO pass_queue (telegram_user_id, telegram_username, display_name, joined_at)
             VALUES (?, ?, ?, ?)
             """,
-            (telegram_user_id, telegram_username, display_name, now),
+            (telegram_user_id, telegram_username, display_name, joined_at),
         )
         conn.commit()
         return True
@@ -2078,10 +2259,12 @@ def leave_pass_queue(path: str, telegram_user_id: int) -> bool:
 def list_pass_queue(path: str) -> list[PassQueueEntry]:
     with _connect(path) as conn:
         rows = conn.execute(
-            """
-            SELECT telegram_user_id, telegram_username, display_name, joined_at
-            FROM pass_queue
-            ORDER BY joined_at ASC, telegram_user_id ASC
+            f"""
+            {_PASS_QUEUE_SELECT}
+            ORDER BY
+                CASE WHEN v.telegram_user_id IS NOT NULL THEN 0 ELSE 1 END,
+                pq.joined_at ASC,
+                pq.telegram_user_id ASC
             """
         ).fetchall()
     return [_pass_queue_entry_from_row(row) for row in rows]
@@ -2096,7 +2279,7 @@ def get_pass_queue_position(path: str, telegram_user_id: int) -> int:
 
 
 def rotate_pass_queue_user_to_back(path: str, telegram_user_id: int) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    joined_at = _rotate_to_back_timestamp(path, telegram_user_id)
     with _connect(path) as conn:
         row = conn.execute(
             """
@@ -2117,7 +2300,7 @@ def rotate_pass_queue_user_to_back(path: str, telegram_user_id: int) -> None:
             INSERT INTO pass_queue (telegram_user_id, telegram_username, display_name, joined_at)
             VALUES (?, ?, ?, ?)
             """,
-            (telegram_user_id, row[0], row[1], now),
+            (telegram_user_id, row[0], row[1], joined_at),
         )
         conn.commit()
 
@@ -2203,6 +2386,53 @@ def list_pending_pass_offers(path: str) -> list[PassOffer]:
             """
         ).fetchall()
     return [_pass_offer_from_row(row) for row in rows]
+
+
+def pending_pass_assignee_user_ids(
+    path: str,
+    *,
+    chat_id: int | None = None,
+    exclude_offer_id: int | None = None,
+) -> set[int]:
+    """User ids that already have a pending take/brush pass offer."""
+    clauses = ["status = 'pending'"]
+    params: list[object] = []
+    if chat_id is not None:
+        clauses.append("chat_id = ?")
+        params.append(chat_id)
+    if exclude_offer_id is not None:
+        clauses.append("id != ?")
+        params.append(exclude_offer_id)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT assigned_user_id
+            FROM pass_offers
+            WHERE {' AND '.join(clauses)}
+            """,
+            params,
+        ).fetchall()
+    return {int(row[0]) for row in rows}
+
+
+def get_active_pass_offer(path: str, *, chat_id: int | None = None) -> PassOffer | None:
+    """Return the oldest pending pass offer, if any."""
+    clauses = ["status = 'pending'"]
+    params: list[object] = []
+    if chat_id is not None:
+        clauses.append("chat_id = ?")
+        params.append(chat_id)
+    with _connect(path) as conn:
+        row = conn.execute(
+            f"""
+            {_PASS_OFFER_SELECT}
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            """,
+            params,
+        ).fetchone()
+    return _pass_offer_from_row(row) if row else None
 
 
 def update_pass_offer(
@@ -3263,6 +3493,9 @@ _DATA_TABLES = (
     "quiet_win_log",
     "ready_check_sent",
     "payment_nemesis",
+    "pass_queue",
+    "pass_queue_vips",
+    "pass_offers",
 )
 
 

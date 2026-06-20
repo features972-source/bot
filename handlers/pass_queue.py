@@ -16,17 +16,22 @@ from config import Settings
 from database import (
     PassOffer,
     PassQueueEntry,
+    add_pass_queue_vip,
     create_pass_offer,
     get_pass_offer,
     get_pass_queue_position,
+    is_pass_queue_vip,
     join_pass_queue,
     leave_pass_queue,
     list_pass_queue,
     list_pending_pass_offers,
     pass_offer_for_notes,
+    pending_pass_assignee_user_ids,
+    remove_pass_queue_vip,
     rotate_pass_queue_user_to_back,
     update_pass_offer,
 )
+from handlers.admin_access import require_admin
 from notes_detect import looks_like_notes
 
 logger = logging.getLogger(__name__)
@@ -90,23 +95,8 @@ async def _send_pass_reminder(bot, settings: Settings, offer_id: int) -> None:
     if not pass_reminder_due(offer):
         return
 
-    text = _pass_offer_text(offer, reminder=True)
-    reply_to = offer.offer_message_id or offer.notes_message_id
     try:
-        if offer.offer_message_id is not None:
-            await bot.edit_message_text(
-                text,
-                chat_id=offer.chat_id,
-                message_id=offer.offer_message_id,
-                parse_mode="HTML",
-                reply_markup=_pass_keyboard(offer.id),
-            )
-        await bot.send_message(
-            chat_id=offer.chat_id,
-            text=text,
-            parse_mode="HTML",
-            reply_to_message_id=reply_to,
-        )
+        await _ping_assignee(bot, offer, reminder=True)
         update_pass_offer(
             settings.database_path,
             offer.id,
@@ -129,6 +119,8 @@ def build_pass_queue_handlers() -> list:
         CommandHandler("joinqueue", joinqueue_command),
         CommandHandler("leavequeue", leavequeue_command),
         CommandHandler("queue", queue_command),
+        CommandHandler("addvip", addvip_command),
+        CommandHandler("removevip", removevip_command),
         CallbackQueryHandler(pass_callback, pattern=rf"^{re.escape(CALLBACK_PREFIX)}"),
     ]
 
@@ -187,11 +179,65 @@ def _pass_keyboard(offer_id: int) -> InlineKeyboardMarkup:
 
 
 def _format_queue_line(entry: PassQueueEntry, *, position: int) -> str:
-    return f"{position}. {html.escape(_user_label(entry.user_id, entry.telegram_username, entry.display_name))}"
+    vip = " ⭐" if entry.is_vip else ""
+    return (
+        f"{position}. {html.escape(_user_label(entry.user_id, entry.telegram_username, entry.display_name))}{vip}"
+    )
 
 
 def _pass_queue_chat_allowed(chat) -> bool:
     return chat is not None and chat.type in ("group", "supergroup")
+
+
+def _next_queue_assignee(
+    queue: list[PassQueueEntry],
+    *,
+    exclude_user_id: int | None = None,
+    busy_user_ids: set[int] | frozenset[int] | None = None,
+) -> PassQueueEntry | None:
+    busy = busy_user_ids or frozenset()
+    for entry in queue:
+        if exclude_user_id is not None and entry.user_id == exclude_user_id:
+            continue
+        if entry.user_id in busy:
+            continue
+        return entry
+    return None
+
+
+def _busy_pass_assignees(settings: Settings, chat_id: int, *, exclude_offer_id: int | None = None) -> set[int]:
+    return pending_pass_assignee_user_ids(
+        settings.database_path,
+        chat_id=chat_id,
+        exclude_offer_id=exclude_offer_id,
+    )
+
+
+async def _ping_assignee(
+    bot,
+    offer: PassOffer,
+    *,
+    reminder: bool = False,
+) -> None:
+    text = _pass_offer_text(offer, reminder=reminder)
+    reply_to = offer.offer_message_id or offer.notes_message_id
+    if offer.offer_message_id is not None:
+        try:
+            await bot.edit_message_text(
+                text,
+                chat_id=offer.chat_id,
+                message_id=offer.offer_message_id,
+                parse_mode="HTML",
+                reply_markup=_pass_keyboard(offer.id),
+            )
+        except BadRequest:
+            logger.warning("Could not edit pass offer message %s", offer.offer_message_id)
+    await bot.send_message(
+        chat_id=offer.chat_id,
+        text=text,
+        parse_mode="HTML",
+        reply_to_message_id=reply_to,
+    )
 
 
 async def joinqueue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -209,17 +255,98 @@ async def joinqueue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         display_name=_display_name(user),
     )
     position = get_pass_queue_position(path, user.id)
+    vip_note = " ⭐ VIP — ahead of standard finishers." if is_pass_queue_vip(path, user.id) else ""
     if joined:
         await message.reply_text(
-            f"✅ You're in the pass queue (#{position}).\n"
+            f"✅ You're in the pass queue (#{position}).{vip_note}\n"
             "You'll get @mentioned when a starter posts notes.",
             parse_mode="HTML",
         )
     else:
         await message.reply_text(
-            f"You're already in the queue (#{position}).",
+            f"You're already in the queue (#{position}).{vip_note}",
             parse_mode="HTML",
         )
+
+
+async def addvip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not await require_admin(update, settings, deny_message="Admin only."):
+        return
+
+    message = update.effective_message
+    if not message:
+        return
+
+    target_id: int | None = None
+    target_username: str | None = None
+    target_display: str | None = None
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        if not target.is_bot:
+            target_id = target.id
+            target_username = target.username
+            target_display = _display_name(target)
+    elif context.args and context.args[0].lstrip("-").isdigit():
+        target_id = int(context.args[0])
+
+    if target_id is None:
+        await message.reply_text(
+            "Reply to a user's message with /addvip, or use /addvip &lt;telegram_user_id&gt;.",
+            parse_mode="HTML",
+        )
+        return
+
+    path = settings.database_path
+    add_pass_queue_vip(
+        path,
+        telegram_user_id=target_id,
+        telegram_username=target_username,
+        display_name=target_display,
+    )
+    label = (
+        f"@{target_username}"
+        if target_username
+        else (target_display or str(target_id))
+    )
+    in_queue = any(entry.user_id == target_id for entry in list_pass_queue(path))
+    queue_note = " Moved to VIP front of queue." if in_queue else ""
+    await message.reply_text(
+        f"⭐ {label} is now a pass-queue VIP.{queue_note}\n"
+        "They join ahead of standard finishers but stay behind other VIPs.",
+        parse_mode="HTML",
+    )
+
+
+async def removevip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not await require_admin(update, settings, deny_message="Admin only."):
+        return
+
+    message = update.effective_message
+    if not message:
+        return
+
+    target_id: int | None = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        if not target.is_bot:
+            target_id = target.id
+    elif context.args and context.args[0].lstrip("-").isdigit():
+        target_id = int(context.args[0])
+
+    if target_id is None:
+        await message.reply_text(
+            "Reply to a user with /removevip, or use /removevip &lt;telegram_user_id&gt;.",
+            parse_mode="HTML",
+        )
+        return
+
+    if remove_pass_queue_vip(settings.database_path, target_id):
+        await message.reply_text(f"Removed VIP status for user {target_id}.")
+    else:
+        await message.reply_text("That user is not a pass-queue VIP.")
 
 
 async def leavequeue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -314,7 +441,17 @@ async def _offer_pass(
         )
         return
 
-    assigned = queue[0]
+    busy = _busy_pass_assignees(settings, chat.id)
+    assigned = _next_queue_assignee(queue, busy_user_ids=busy)
+    if assigned is None:
+        if busy:
+            await message.reply_text(
+                "📝 Notes detected — everyone in queue already has a pass pending.\n"
+                "Waiting for take or brush before the next assignment.",
+                parse_mode="HTML",
+            )
+        return
+
     try:
         offer_id = create_pass_offer(
             settings.database_path,
@@ -459,19 +596,24 @@ async def _handle_brush_pass(
     path = settings.database_path
     rotate_pass_queue_user_to_back(path, user.id)
     queue = list_pass_queue(path)
-    if not queue:
+    busy = _busy_pass_assignees(settings, offer.chat_id, exclude_offer_id=offer.id)
+    next_user = _next_queue_assignee(
+        queue,
+        exclude_user_id=user.id,
+        busy_user_ids=busy,
+    )
+    if next_user is None:
         update_pass_offer(path, offer.id, status=PASS_STATUS_BRUSHED)
         try:
             await query.edit_message_text(
-                "Pass brushed — queue is now empty.\n\nFinishers: /joinqueue",
+                "Pass brushed — no one else free in queue.\n\nFinishers: /joinqueue",
                 parse_mode="HTML",
             )
         except BadRequest:
             pass
-        await query.answer("Brushed — no one else in queue.")
+        await query.answer("Brushed — no one else free.")
         return
 
-    next_user = queue[0]
     update_pass_offer(
         path,
         offer.id,
@@ -483,11 +625,16 @@ async def _handle_brush_pass(
     refreshed = get_pass_offer(path, offer.id)
     assert refreshed is not None
     try:
-        await query.edit_message_text(
-            _pass_offer_text(refreshed),
-            parse_mode="HTML",
-            reply_markup=_pass_keyboard(offer.id),
-        )
+        await _ping_assignee(context.bot, refreshed)
     except BadRequest:
-        pass
+        try:
+            await query.edit_message_text(
+                _pass_offer_text(refreshed),
+                parse_mode="HTML",
+                reply_markup=_pass_keyboard(offer.id),
+            )
+        except BadRequest:
+            pass
+    except Exception:
+        logger.exception("Failed to hand off pass %s to user %s", offer.id, next_user.user_id)
     await query.answer("Brushed — offered to next in queue.")
