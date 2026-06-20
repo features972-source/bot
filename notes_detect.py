@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import html
 import re
+from dataclasses import dataclass
 
 NOTES_MARKER = re.compile(r"(?i)^(?:📝\s*)?notes?\b")
 
@@ -237,3 +239,109 @@ def looks_like_notes(text: str | None, *, queue_waiting: bool = False) -> bool:
     if _structured_notes(lines):
         return True
     return _freeform_notes(cleaned, lines)
+
+
+BANK_NAME = re.compile(
+    r"(?i)\b("
+    r"barclay(?:card|s)?|hsbc|natwest|lloyds|santander|halifax|monzo|"
+    r"revolut|starling|nationwide|tsb|metro|capital\s*one"
+    r")\b"
+)
+
+BALANCE_SNIPPET = re.compile(
+    r"(?i)(?:"
+    rf"{BALANCE_KEYWORD}\s*[:.\-]?\s*{BALANCE_AMOUNT}"
+    rf"|{BALANCE_AMOUNT}\s+{BALANCE_KEYWORD}\b"
+    r"|£\s*\d[\d,.\s]*(?:\.\d{1,2})?(?:\s*(?:k|m))?\b"
+    r"|savers?\s+with\s+£?\s*\d[\d,.\s]*(?:k|m)?"
+    r")"
+)
+
+ONLINE_STATUS_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"no\s+online\s+banking", re.I), "No online banking"),
+    (re.compile(r"no\s+online", re.I), "No online"),
+    (re.compile(r"no\s+app", re.I), "No app"),
+    (re.compile(r"online(?:\s+banking)?\s*[-:]\s*no", re.I), "No online banking"),
+    (re.compile(r"banking\s*[-:]\s*no", re.I), "No online banking"),
+    (re.compile(r"online(?:\s+banking)?\s*[-:]\s*yes", re.I), "Online banking"),
+    (re.compile(r"has\s+online(?:\s+banking)?", re.I), "Has online banking"),
+)
+
+
+@dataclass
+class NotesPassSummary:
+    balance: str | None = None
+    dob: str | None = None
+    bank: str | None = None
+    online: str | None = None
+
+
+def _extract_balance_summary(text: str) -> str | None:
+    seen: set[str] = set()
+    parts: list[str] = []
+    for line in _non_empty_lines(text):
+        stripped = line.strip()
+        if STANDALONE_MONEY_LINE.match(stripped):
+            key = stripped.lower()
+            if key not in seen:
+                seen.add(key)
+                parts.append(stripped)
+            continue
+        for match in BALANCE_SNIPPET.finditer(stripped):
+            snippet = match.group(0).strip()
+            key = snippet.lower()
+            if key not in seen:
+                seen.add(key)
+                parts.append(snippet)
+    return " · ".join(parts) if parts else None
+
+
+def _extract_dob(text: str) -> str | None:
+    match = DOB_PATTERN.search(text)
+    return match.group(0) if match else None
+
+
+def _extract_bank(text: str) -> str | None:
+    for line in _non_empty_lines(text):
+        if re.fullmatch(r"(?i)bk", line.strip()):
+            return "Bk"
+    match = BANK_NAME.search(text)
+    if not match:
+        return None
+    bank = match.group(1)
+    if bank.lower().startswith("barclay"):
+        return "Barclaycard" if "card" in bank.lower() else "Barclays"
+    return bank.title()
+
+
+def _extract_online_status(text: str) -> str | None:
+    for pattern, label in ONLINE_STATUS_PATTERNS:
+        if pattern.search(text):
+            return label
+    return None
+
+
+def extract_notes_pass_summary(text: str | None) -> NotesPassSummary:
+    if not text:
+        return NotesPassSummary()
+    cleaned = text.strip()
+    return NotesPassSummary(
+        balance=_extract_balance_summary(cleaned),
+        dob=_extract_dob(cleaned),
+        bank=_extract_bank(cleaned),
+        online=_extract_online_status(cleaned),
+    )
+
+
+def format_notes_summary_html(text: str | None) -> str:
+    summary = extract_notes_pass_summary(text)
+    lines: list[str] = []
+    if summary.balance:
+        lines.append(f"<b>Balance:</b> {html.escape(summary.balance)}")
+    if summary.dob:
+        lines.append(f"<b>DOB:</b> {html.escape(summary.dob)}")
+    if summary.bank:
+        lines.append(f"<b>Bank:</b> {html.escape(summary.bank)}")
+    if summary.online:
+        lines.append(f"<b>Online:</b> {html.escape(summary.online)}")
+    return "\n".join(lines)

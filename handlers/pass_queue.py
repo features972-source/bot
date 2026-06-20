@@ -37,7 +37,12 @@ from database import (
     upsert_pending_pass_note,
 )
 from handlers.admin_access import require_admin
-from notes_detect import looks_like_notes, notes_balance_only, notes_has_balance
+from notes_detect import (
+    format_notes_summary_html,
+    looks_like_notes,
+    notes_balance_only,
+    notes_has_balance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +58,25 @@ PASS_EXPIRE_SECONDS = 600
 PASS_NOTES_FILTER = filters.ChatType.GROUPS & ~filters.COMMAND
 
 
+def _pass_summary_block(notes_text: str) -> str:
+    summary = format_notes_summary_html(notes_text)
+    if not summary:
+        return ""
+    return f"{summary}\n\n"
+
+
+def _pass_read_line() -> str:
+    return "<i>Read notes before taking pass.</i>"
+
+
 def _pass_offer_text(offer: PassOffer, *, reminder: bool = False) -> str:
     suffix = " ⏰" if reminder else ""
+    summary = _pass_summary_block(offer.notes_text)
+    read_line = _pass_read_line()
     if offer.manual_override:
         return (
             f"🚨 <b>Manual override open</b>{suffix} — anyone in queue can take this pass.\n\n"
-            "<i>Read notes before taking pass.</i>"
+            f"{summary}{read_line}"
         )
     mention = _mention_html(
         offer.assigned_user_id,
@@ -67,28 +85,29 @@ def _pass_offer_text(offer: PassOffer, *, reminder: bool = False) -> str:
     )
     return (
         f"{mention} — <b>take this pass</b>{suffix}\n\n"
-        "<i>Read notes before taking pass.</i>"
+        f"{summary}{read_line}"
     )
 
 
-def _manual_override_text(queue: list[PassQueueEntry], *, starter_user_id: int, reminder: bool = False) -> str:
+def _manual_override_text(
+    queue: list[PassQueueEntry],
+    *,
+    starter_user_id: int,
+    notes_text: str,
+    reminder: bool = False,
+) -> str:
+    summary = _pass_summary_block(notes_text)
+    read_line = _pass_read_line()
     finishers = [entry for entry in queue if entry.user_id != starter_user_id]
+    suffix = " ⏰" if reminder else ""
+    header = f"🚨 <b>Manual override open</b>{suffix} — anyone in queue can take this pass."
     if not finishers:
-        suffix = " ⏰" if reminder else ""
-        return (
-            f"🚨 <b>Manual override open</b>{suffix} — anyone in queue can take this pass.\n\n"
-            "<i>Read notes before taking pass.</i>"
-        )
+        return f"{header}\n\n{summary}{read_line}"
     mentions = ", ".join(
         _mention_html(entry.user_id, entry.telegram_username, entry.display_name)
         for entry in finishers
     )
-    suffix = " ⏰" if reminder else ""
-    return (
-        f"{mentions}\n\n"
-        f"🚨 <b>Manual override open</b>{suffix} — anyone in queue can take this pass.\n\n"
-        "<i>Read notes before taking pass.</i>"
-    )
+    return f"{mentions}\n\n{header}\n\n{summary}{read_line}"
 
 
 def _pass_brushed_text(user) -> str:
@@ -313,6 +332,7 @@ async def _ping_manual_override(
     text = _manual_override_text(
         queue,
         starter_user_id=offer.starter_user_id,
+        notes_text=offer.notes_text,
         reminder=reminder,
     )
     reply_to = offer.offer_message_id or offer.notes_message_id
@@ -368,7 +388,11 @@ async def _activate_manual_override(
     refreshed = get_pass_offer(path, offer.id)
     assert refreshed is not None
     queue = list_pass_queue(path)
-    text = _manual_override_text(queue, starter_user_id=offer.starter_user_id)
+    text = _manual_override_text(
+        queue,
+        starter_user_id=offer.starter_user_id,
+        notes_text=offer.notes_text,
+    )
     if brushed_text:
         text = f"{brushed_text}\n\n{text}"
     reply_to = reply_to_message_id or offer.notes_message_id

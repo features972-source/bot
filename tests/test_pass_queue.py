@@ -51,7 +51,13 @@ from handlers.pass_queue import (  # noqa: E402
     pass_offer_expired,
     pass_reminder_due,
 )
-from notes_detect import looks_like_notes, notes_balance_only, notes_has_balance  # noqa: E402
+from notes_detect import (  # noqa: E402
+    extract_notes_pass_summary,
+    format_notes_summary_html,
+    looks_like_notes,
+    notes_balance_only,
+    notes_has_balance,
+)
 
 
 class PassReminderTests(unittest.TestCase):
@@ -158,7 +164,10 @@ also has hsbc"""
 
         notes_message.reply_text.assert_awaited()
         args, kwargs = notes_message.reply_text.await_args
-        self.assertIn("take this pass", kwargs.get("text", args[0] if args else ""))
+        text = kwargs.get("text", args[0] if args else "")
+        self.assertIn("take this pass", text)
+        self.assertIn("Balance:", text)
+        self.assertIn("DOB:", text)
 
     async def test_notes_handler_assigns_second_note_to_next_free_finisher(self):
         from config import load_settings
@@ -695,6 +704,40 @@ also has hsbc"""
         self.assertFalse(notes_has_balance("50\nJannett Burt\n14/09/67"))
         self.assertTrue(notes_balance_only("£5000"))
         self.assertFalse(notes_balance_only(notes))
+
+    def test_notes_pass_summary_frank_example(self):
+        summary = extract_notes_pass_summary(self.EXAMPLE)
+        self.assertIn("balance", (summary.balance or "").lower())
+        self.assertEqual(summary.dob, "23/02/1943")
+        self.assertEqual(summary.bank, "Barclays")
+
+    def test_notes_pass_summary_ian_davis(self):
+        summary = extract_notes_pass_summary(self.EXAMPLE_1)
+        self.assertEqual(summary.online, "No online banking")
+        self.assertEqual(summary.bank, "Barclaycard")
+
+    def test_notes_pass_summary_jaqueline(self):
+        summary = extract_notes_pass_summary(self.EXAMPLE_2)
+        self.assertEqual(summary.dob, "15/09/1967")
+        self.assertEqual(summary.online, "Online banking")
+
+    def test_notes_pass_summary_jannett_burt(self):
+        notes = "50\nJannett Burt\n14/09/67\n£5000"
+        summary = extract_notes_pass_summary(notes)
+        self.assertEqual(summary.dob, "14/09/67")
+        self.assertIn("£5000", summary.balance or "")
+        html_summary = format_notes_summary_html(notes)
+        self.assertIn("<b>Balance:</b>", html_summary)
+        self.assertIn("<b>DOB:</b>", html_summary)
+
+    def test_format_notes_summary_html(self):
+        html_summary = format_notes_summary_html(
+            "David rechard\n20/03/56\nBk\n£3737.38 current"
+        )
+        self.assertIn("<b>Balance:</b>", html_summary)
+        self.assertIn("<b>DOB:</b>", html_summary)
+        self.assertIn("<b>Bank:</b>", html_summary)
+        self.assertIn("Bk", html_summary)
 
     def test_notes_missing_balance(self):
         self.assertFalse(notes_has_balance("james adams 31/01/2000 bk"))
