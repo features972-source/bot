@@ -368,6 +368,67 @@ def _allocate_card_name(database_path: str, desired: str) -> str:
         n += 1
 
 
+def _resolve_credo_cards_for_removal(
+    database_path: str,
+    query: str,
+) -> tuple[list[str], str | None]:
+    """Map /removecredo argument to DB card name(s). Returns (names, error_hint)."""
+    cleaned = query.strip()
+    if not cleaned:
+        return [], (
+            "Usage: `/removecredo Lloyds #1`\n\n"
+            "Use **/listcredocards** to see exact names."
+        )
+
+    cards = [c for c in list_credo_credit_cards(database_path) if c.photo_file_id]
+    if not cards:
+        return [], "No credo cards on the list."
+
+    labels = _card_display_labels(database_path)
+
+    if re.search(r"#\s*\d", cleaned, flags=re.IGNORECASE):
+        for card in cards:
+            if card.name.lower() == cleaned.lower():
+                return [card.name], None
+        for db_name, label in labels.items():
+            if label.lower() == cleaned.lower():
+                return [db_name], None
+    else:
+        base = _base_card_name(cleaned)
+        matching = [
+            card
+            for card in cards
+            if _base_card_name(card.name).lower() == base.lower()
+        ]
+        if len(matching) > 1:
+            lines = [
+                f"• `/removecredo {labels.get(card.name, card.name)}`"
+                for card in sorted(
+                    matching,
+                    key=lambda c: (c.added_at or "", labels.get(c.name, c.name).lower()),
+                )
+            ]
+            return [], (
+                f"**{base}** has {len(matching)} cards on the list. "
+                "Remove one specifically:\n\n" + "\n".join(lines)
+            )
+        if len(matching) == 1:
+            return [matching[0].name], None
+
+    for card in cards:
+        if card.name.lower() == cleaned.lower():
+            return [card.name], None
+
+    for db_name, label in labels.items():
+        if label.lower() == cleaned.lower():
+            return [db_name], None
+
+    return [], (
+        f"**{cleaned}** was not on the list.\n\n"
+        "Use **/listcredocards** for exact names (e.g. `Lloyds #1`, `Lloyds #2`)."
+    )
+
+
 def _card_balance(settings: Settings, card_name: str) -> tuple[float, float, float]:
     """Return (used, capacity, remaining) for a card."""
     card = get_credo_credit_card(settings.database_path, card_name)
@@ -1319,17 +1380,40 @@ async def removecredocard_command(update: Update, context: ContextTypes.DEFAULT_
 
     name = " ".join(context.args).strip()
     if not name:
-        await update.effective_message.reply_text("Usage: /removecredo Visa")
+        await update.effective_message.reply_text(
+            "Usage: `/removecredo Lloyds #1`\n\n"
+            "When several cards share a bank (e.g. two Lloyds), use the **# number** "
+            "from the picker or **/listcredocards**.",
+            parse_mode="Markdown",
+        )
         return
 
-    if not remove_credo_credit_card(settings.database_path, name):
+    matches, hint = _resolve_credo_cards_for_removal(settings.database_path, name)
+    if hint:
+        await update.effective_message.reply_text(hint, parse_mode="Markdown")
+        return
+
+    removed: list[str] = []
+    for db_name in matches:
+        label = _format_card_label(settings.database_path, db_name)
+        if remove_credo_credit_card(settings.database_path, db_name):
+            removed.append(label)
+
+    if not removed:
         await update.effective_message.reply_text(
             f"**{name}** was not on the list.", parse_mode="Markdown"
         )
         return
 
+    if len(removed) == 1:
+        await update.effective_message.reply_text(
+            f"❌ Removed **{removed[0]}** from credo cards.", parse_mode="Markdown"
+        )
+        return
+
+    joined = ", ".join(f"**{label}**" for label in removed)
     await update.effective_message.reply_text(
-        f"❌ Removed **{name}** from credo cards.", parse_mode="Markdown"
+        f"❌ Removed {len(removed)} credo cards: {joined}.", parse_mode="Markdown"
     )
 
 
@@ -1343,8 +1427,18 @@ async def listcredocards_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.effective_message.reply_text(NO_CARDS)
         return
 
+    labels = _card_display_labels(settings.database_path)
+    lines = [
+        _format_card_capacity(settings, name) for name in cards
+    ]
+    remove_hints = [
+        f"   → remove: `/removecredo {labels.get(name, name)}`" for name in cards
+    ]
+    body = "\n".join(
+        f"{line}\n{hint}" for line, hint in zip(lines, remove_hints, strict=True)
+    )
     await update.effective_message.reply_text(
-        "💳 **Credo credit cards**\n\n" + _format_cards_list(settings, cards),
+        "💳 **Credo credit cards**\n\n" + body,
         parse_mode="Markdown",
     )
 
