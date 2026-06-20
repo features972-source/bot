@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,6 +23,7 @@ os.environ.setdefault("CLOUD_DEPLOYED", "true")
 os.environ.setdefault("BOT_INSTANCE_ID", "q2")
 
 from database import (  # noqa: E402
+    PassOffer,
     create_pass_offer,
     get_pass_offer,
     get_pass_queue_position,
@@ -33,8 +35,52 @@ from database import (  # noqa: E402
     rotate_pass_queue_user_to_back,
     update_pass_offer,
 )
-from notes_detect import looks_like_notes  # noqa: E402
 from handlers import pass_queue  # noqa: E402
+from handlers.pass_queue import pass_reminder_due  # noqa: E402
+from notes_detect import looks_like_notes  # noqa: E402
+
+
+class PassReminderTests(unittest.TestCase):
+    def test_reminder_not_due_immediately(self):
+        offer = PassOffer(
+            id=1,
+            chat_id=-100,
+            notes_message_id=1,
+            offer_message_id=2,
+            starter_user_id=10,
+            starter_username=None,
+            starter_display_name=None,
+            assigned_user_id=20,
+            assigned_username="fin",
+            assigned_display_name="Fin",
+            notes_text="notes",
+            status="pending",
+            created_at=datetime.now(timezone.utc).isoformat(),
+            last_reminder_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self.assertFalse(pass_reminder_due(offer))
+
+    def test_reminder_due_after_minute(self):
+        from datetime import timedelta
+
+        past = (datetime.now(timezone.utc) - timedelta(seconds=61)).isoformat()
+        offer = PassOffer(
+            id=1,
+            chat_id=-100,
+            notes_message_id=1,
+            offer_message_id=2,
+            starter_user_id=10,
+            starter_username=None,
+            starter_display_name=None,
+            assigned_user_id=20,
+            assigned_username="fin",
+            assigned_display_name="Fin",
+            notes_text="notes",
+            status="pending",
+            created_at=past,
+            last_reminder_at=past,
+        )
+        self.assertTrue(pass_reminder_due(offer))
 
 
 class PassQueueHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -250,6 +296,7 @@ class PassQueueDbTests(unittest.TestCase):
         self.assertIsNotNone(offer)
         assert offer is not None
         self.assertEqual(offer.status, "pending")
+        self.assertIsNotNone(offer.last_reminder_at)
         update_pass_offer(self.db_path, offer_id, status="taken", offer_message_id=99)
         offer = get_pass_offer(self.db_path, offer_id)
         assert offer is not None

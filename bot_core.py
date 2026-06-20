@@ -88,6 +88,7 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         )
         from handlers.credo import credo_reminder_loop
         from handlers.nemesis import nemesis_loop
+        from handlers.pass_queue import pass_reminder_loop
 
         asyncio.create_task(
             credo_reminder_loop(app.bot, settings, app.bot_data),
@@ -96,6 +97,10 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         asyncio.create_task(
             nemesis_loop(app.bot, settings, app.bot_data),
             name=f"nemesis-{instance_id}",
+        )
+        asyncio.create_task(
+            pass_reminder_loop(app.bot, settings, app.bot_data),
+            name=f"pass-reminder-{instance_id}",
         )
         from onedrive_cloud_sync import remember_excel_web_url
 

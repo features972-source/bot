@@ -188,6 +188,7 @@ class PassOffer:
     notes_text: str
     status: str
     created_at: str
+    last_reminder_at: str | None = None
 
 
 @dataclass
@@ -558,10 +559,12 @@ def init_db(path: str) -> None:
                 notes_text TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL,
+                last_reminder_at TEXT,
                 UNIQUE(chat_id, notes_message_id)
             )
             """
         )
+        _ensure_pass_offer_columns(conn)
         conn.commit()
 
 
@@ -870,6 +873,14 @@ def _ensure_payment_out_columns(conn: sqlite3.Connection) -> None:
         WHERE telegram_message_id IS NOT NULL
         """
     )
+
+
+def _ensure_pass_offer_columns(conn: sqlite3.Connection) -> None:
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(pass_offers)").fetchall()
+    }
+    if "last_reminder_at" not in columns:
+        conn.execute("ALTER TABLE pass_offers ADD COLUMN last_reminder_at TEXT")
 
 
 def link_extension(
@@ -1979,6 +1990,26 @@ def _pass_queue_entry_from_row(row) -> PassQueueEntry:
     )
 
 
+_PASS_OFFER_SELECT = """
+    SELECT
+        id,
+        chat_id,
+        notes_message_id,
+        offer_message_id,
+        starter_user_id,
+        starter_username,
+        starter_display_name,
+        assigned_user_id,
+        assigned_username,
+        assigned_display_name,
+        notes_text,
+        status,
+        created_at,
+        last_reminder_at
+    FROM pass_offers
+"""
+
+
 def _pass_offer_from_row(row) -> PassOffer:
     return PassOffer(
         id=int(row[0]),
@@ -1994,6 +2025,7 @@ def _pass_offer_from_row(row) -> PassOffer:
         notes_text=row[10],
         status=row[11],
         created_at=row[12],
+        last_reminder_at=row[13],
     )
 
 
@@ -2130,8 +2162,9 @@ def create_pass_offer(
                 assigned_display_name,
                 notes_text,
                 status,
-                created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                created_at,
+                last_reminder_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
             (
                 chat_id,
@@ -2144,6 +2177,7 @@ def create_pass_offer(
                 assigned_display_name,
                 notes_text,
                 now,
+                now,
             ),
         )
         conn.commit()
@@ -2153,27 +2187,22 @@ def create_pass_offer(
 def get_pass_offer(path: str, offer_id: int) -> PassOffer | None:
     with _connect(path) as conn:
         row = conn.execute(
-            """
-            SELECT
-                id,
-                chat_id,
-                notes_message_id,
-                offer_message_id,
-                starter_user_id,
-                starter_username,
-                starter_display_name,
-                assigned_user_id,
-                assigned_username,
-                assigned_display_name,
-                notes_text,
-                status,
-                created_at
-            FROM pass_offers
-            WHERE id = ?
-            """,
+            f"{_PASS_OFFER_SELECT} WHERE id = ?",
             (offer_id,),
         ).fetchone()
     return _pass_offer_from_row(row) if row else None
+
+
+def list_pending_pass_offers(path: str) -> list[PassOffer]:
+    with _connect(path) as conn:
+        rows = conn.execute(
+            f"""
+            {_PASS_OFFER_SELECT}
+            WHERE status = 'pending'
+            ORDER BY created_at ASC, id ASC
+            """
+        ).fetchall()
+    return [_pass_offer_from_row(row) for row in rows]
 
 
 def update_pass_offer(
@@ -2185,6 +2214,8 @@ def update_pass_offer(
     assigned_username: str | None = None,
     assigned_display_name: str | None = None,
     status: str | None = None,
+    last_reminder_at: str | None = None,
+    reset_reminder: bool = False,
 ) -> None:
     fields: list[str] = []
     params: list[object] = []
@@ -2203,6 +2234,12 @@ def update_pass_offer(
     if status is not None:
         fields.append("status = ?")
         params.append(status)
+    if reset_reminder:
+        fields.append("last_reminder_at = ?")
+        params.append(datetime.now(timezone.utc).isoformat())
+    elif last_reminder_at is not None:
+        fields.append("last_reminder_at = ?")
+        params.append(last_reminder_at)
     if not fields:
         return
     params.append(offer_id)

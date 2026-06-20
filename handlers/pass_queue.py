@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
+from datetime import datetime, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden
@@ -20,6 +22,7 @@ from database import (
     join_pass_queue,
     leave_pass_queue,
     list_pass_queue,
+    list_pending_pass_offers,
     pass_offer_for_notes,
     rotate_pass_queue_user_to_back,
     update_pass_offer,
@@ -32,8 +35,93 @@ CALLBACK_PREFIX = "pass:"
 PASS_STATUS_PENDING = "pending"
 PASS_STATUS_TAKEN = "taken"
 PASS_STATUS_BRUSHED = "brushed"
+PASS_REMINDER_SECONDS = 60
+PASS_REMINDER_POLL_SECONDS = 15
 
 PASS_NOTES_FILTER = filters.ChatType.GROUPS & ~filters.COMMAND
+
+
+def _pass_offer_text(offer: PassOffer, *, reminder: bool = False) -> str:
+    mention = _mention_html(
+        offer.assigned_user_id,
+        offer.assigned_username,
+        offer.assigned_display_name,
+    )
+    suffix = " ⏰" if reminder else ""
+    return f"{mention} — <b>take this pass</b>{suffix}"
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def pass_reminder_due(offer: PassOffer, *, now: datetime | None = None) -> bool:
+    if offer.status != PASS_STATUS_PENDING:
+        return False
+    now = now or datetime.now(timezone.utc)
+    anchor = offer.last_reminder_at or offer.created_at
+    elapsed = (now - _parse_iso_datetime(anchor)).total_seconds()
+    return elapsed >= PASS_REMINDER_SECONDS
+
+
+async def pass_reminder_loop(bot, settings: Settings, bot_data: dict) -> None:
+    """Ping assigned users every minute until they take or brush the pass."""
+    while True:
+        try:
+            await asyncio.sleep(PASS_REMINDER_POLL_SECONDS)
+            now = datetime.now(timezone.utc)
+            for offer in list_pending_pass_offers(settings.database_path):
+                if not pass_reminder_due(offer, now=now):
+                    continue
+                await _send_pass_reminder(bot, settings, offer.id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Pass reminder loop error")
+
+
+async def _send_pass_reminder(bot, settings: Settings, offer_id: int) -> None:
+    offer = get_pass_offer(settings.database_path, offer_id)
+    if offer is None or offer.status != PASS_STATUS_PENDING:
+        return
+    if not pass_reminder_due(offer):
+        return
+
+    text = _pass_offer_text(offer, reminder=True)
+    reply_to = offer.offer_message_id or offer.notes_message_id
+    try:
+        if offer.offer_message_id is not None:
+            await bot.edit_message_text(
+                text,
+                chat_id=offer.chat_id,
+                message_id=offer.offer_message_id,
+                parse_mode="HTML",
+                reply_markup=_pass_keyboard(offer.id),
+            )
+        await bot.send_message(
+            chat_id=offer.chat_id,
+            text=text,
+            parse_mode="HTML",
+            reply_to_message_id=reply_to,
+        )
+        update_pass_offer(
+            settings.database_path,
+            offer.id,
+            last_reminder_at=datetime.now(timezone.utc).isoformat(),
+        )
+        logger.info(
+            "pass reminder chat=%s offer=%s assigned=%s",
+            offer.chat_id,
+            offer.id,
+            offer.assigned_user_id,
+        )
+    except BadRequest:
+        logger.warning("Pass reminder failed for offer %s (message gone?)", offer.id)
+    except Exception:
+        logger.exception("Pass reminder failed for offer %s", offer.id)
 
 
 def build_pass_queue_handlers() -> list:
@@ -240,13 +328,10 @@ async def _offer_pass(
             assigned_display_name=assigned.display_name,
             notes_text=notes_text.strip(),
         )
-        mention = _mention_html(
-            assigned.user_id,
-            assigned.telegram_username,
-            assigned.display_name,
-        )
+        created = get_pass_offer(settings.database_path, offer_id)
+        assert created is not None
         offer_message = await notes_message.reply_text(
-            f"{mention} — <b>take this pass</b>",
+            _pass_offer_text(created),
             parse_mode="HTML",
             reply_markup=_pass_keyboard(offer_id),
         )
@@ -393,15 +478,13 @@ async def _handle_brush_pass(
         assigned_user_id=next_user.user_id,
         assigned_username=next_user.telegram_username,
         assigned_display_name=next_user.display_name,
+        reset_reminder=True,
     )
-    mention = _mention_html(
-        next_user.user_id,
-        next_user.telegram_username,
-        next_user.display_name,
-    )
+    refreshed = get_pass_offer(path, offer.id)
+    assert refreshed is not None
     try:
         await query.edit_message_text(
-            f"{mention} — <b>take this pass</b>",
+            _pass_offer_text(refreshed),
             parse_mode="HTML",
             reply_markup=_pass_keyboard(offer.id),
         )
