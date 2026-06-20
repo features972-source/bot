@@ -201,6 +201,18 @@ class PassOffer:
 
 
 @dataclass
+class PendingPassNote:
+    id: int
+    chat_id: int
+    notes_message_id: int
+    starter_user_id: int
+    starter_username: str | None
+    starter_display_name: str | None
+    notes_text: str
+    created_at: str
+
+
+@dataclass
 class CompletedCall:
     id: int
     extension: str
@@ -579,6 +591,21 @@ def init_db(path: str) -> None:
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL,
                 last_reminder_at TEXT,
+                UNIQUE(chat_id, notes_message_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pass_notes_pending (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                notes_message_id INTEGER NOT NULL,
+                starter_user_id INTEGER NOT NULL,
+                starter_username TEXT,
+                starter_display_name TEXT,
+                notes_text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
                 UNIQUE(chat_id, notes_message_id)
             )
             """
@@ -2317,6 +2344,129 @@ def pass_offer_for_notes(path: str, chat_id: int, notes_message_id: int) -> bool
     return row is not None
 
 
+_PENDING_PASS_NOTE_SELECT = """
+    SELECT
+        id,
+        chat_id,
+        notes_message_id,
+        starter_user_id,
+        starter_username,
+        starter_display_name,
+        notes_text,
+        created_at
+    FROM pass_notes_pending
+"""
+
+
+def _pending_pass_note_from_row(row) -> PendingPassNote:
+    return PendingPassNote(
+        id=int(row[0]),
+        chat_id=int(row[1]),
+        notes_message_id=int(row[2]),
+        starter_user_id=int(row[3]),
+        starter_username=row[4],
+        starter_display_name=row[5],
+        notes_text=row[6],
+        created_at=row[7],
+    )
+
+
+def upsert_pending_pass_note(
+    path: str,
+    *,
+    chat_id: int,
+    notes_message_id: int,
+    starter_user_id: int,
+    starter_username: str | None,
+    starter_display_name: str | None,
+    notes_text: str,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO pass_notes_pending (
+                chat_id,
+                notes_message_id,
+                starter_user_id,
+                starter_username,
+                starter_display_name,
+                notes_text,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, notes_message_id) DO UPDATE SET
+                starter_user_id = excluded.starter_user_id,
+                starter_username = excluded.starter_username,
+                starter_display_name = excluded.starter_display_name,
+                notes_text = excluded.notes_text,
+                created_at = excluded.created_at
+            """,
+            (
+                chat_id,
+                notes_message_id,
+                starter_user_id,
+                starter_username,
+                starter_display_name,
+                notes_text.strip(),
+                now,
+            ),
+        )
+        conn.commit()
+
+
+def list_pending_pass_notes(path: str) -> list[PendingPassNote]:
+    with _connect(path) as conn:
+        rows = conn.execute(
+            f"{_PENDING_PASS_NOTE_SELECT} ORDER BY created_at ASC, id ASC"
+        ).fetchall()
+    return [_pending_pass_note_from_row(row) for row in rows]
+
+
+def delete_pending_pass_note(path: str, chat_id: int, notes_message_id: int) -> None:
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            DELETE FROM pass_notes_pending
+            WHERE chat_id = ? AND notes_message_id = ?
+            """,
+            (chat_id, notes_message_id),
+        )
+        conn.commit()
+
+
+def assign_pending_pass_to_user(
+    path: str,
+    *,
+    assigned_user_id: int,
+    assigned_username: str | None,
+    assigned_display_name: str | None,
+) -> PassOffer | None:
+    """Offer oldest waiting notes to a finisher who just joined (or became free)."""
+    if assigned_user_id in pending_pass_assignee_user_ids(path):
+        return None
+    for pending in list_pending_pass_notes(path):
+        if pending.starter_user_id == assigned_user_id:
+            continue
+        if pass_offer_for_notes(path, pending.chat_id, pending.notes_message_id):
+            delete_pending_pass_note(path, pending.chat_id, pending.notes_message_id)
+            continue
+        offer_id = create_pass_offer(
+            path,
+            chat_id=pending.chat_id,
+            notes_message_id=pending.notes_message_id,
+            starter_user_id=pending.starter_user_id,
+            starter_username=pending.starter_username,
+            starter_display_name=pending.starter_display_name,
+            assigned_user_id=assigned_user_id,
+            assigned_username=assigned_username,
+            assigned_display_name=assigned_display_name,
+            notes_text=pending.notes_text,
+        )
+        delete_pending_pass_note(path, pending.chat_id, pending.notes_message_id)
+        return get_pass_offer(path, offer_id)
+    return None
+
+
 def create_pass_offer(
     path: str,
     *,
@@ -3496,6 +3646,7 @@ _DATA_TABLES = (
     "pass_queue",
     "pass_queue_vips",
     "pass_offers",
+    "pass_notes_pending",
 )
 
 

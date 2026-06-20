@@ -74,11 +74,25 @@ PERSON_NAME_LINE = re.compile(
     r"^[A-Za-z][A-Za-z'\-]+(?:\s+[A-Za-z][A-Za-z'\-\.]+)+$"
 )
 
+BALANCE_AMOUNT = r"£?\s*\d[\d,.\s]*(?:k|m)?"
+BALANCE_KEYWORD = r"(?:current|savings?|balance|bala)"
+
 BALANCE_IN_NOTES = re.compile(
     r"(?i)(?:"
-    r"(?:current|savings?|balance)\s*[:.]?\s*£?\s*\d[\d,.\s]*(?:k|m)?"
+    rf"{BALANCE_KEYWORD}\s*[:.\-]?\s*{BALANCE_AMOUNT}"
+    r"|(?:lt|last\s+transaction)\s*[:.\-]?\s*£?\s*\d[\d,.\s]*(?:k|m)?"
     r"|savers?\s+with\s+£?\s*\d[\d,.\s]*(?:k|m)?"
+    rf"|{BALANCE_AMOUNT}\s+{BALANCE_KEYWORD}\b"
     r")"
+)
+
+BALANCE_ONLY_LINE = re.compile(
+    r"(?i)^(?:"
+    rf"{BALANCE_KEYWORD}\s*[:.\-]?\s*{BALANCE_AMOUNT}\s*"
+    rf"|{BALANCE_AMOUNT}\s+{BALANCE_KEYWORD}\b\s*"
+    r"|(?:lt|last\s+transaction)\s*[:.\-]?\s*£?\s*\d[\d,.\s]*(?:k|m)?\s*"
+    r"|savers?\s+with\s+£?\s*\d[\d,.\s]*(?:k|m)?\s*"
+    r")$"
 )
 
 
@@ -86,6 +100,16 @@ def notes_has_balance(text: str | None) -> bool:
     if not text:
         return False
     return bool(BALANCE_IN_NOTES.search(text.strip()))
+
+
+def notes_balance_only(text: str | None) -> bool:
+    """True when the message is only balance lines with no full customer notes."""
+    if not text or not notes_has_balance(text):
+        return False
+    lines = _non_empty_lines(text.strip())
+    if not lines:
+        return False
+    return all(BALANCE_ONLY_LINE.match(line) for line in lines)
 
 
 def _non_empty_lines(text: str) -> list[str]:
@@ -151,9 +175,11 @@ def _looks_like_casual_chat(lines: list[str]) -> bool:
 
 
 def _queue_waiting_notes(lines: list[str], cleaned: str) -> bool:
-    """Someone is waiting — any non-chat multi-line paste is notes."""
-    if len(lines) < 2 or len(cleaned) < 10:
+    """Someone is waiting — multi-line paste or single-line notes with balance."""
+    if len(cleaned) < 10:
         return False
+    if len(lines) == 1:
+        return notes_has_balance(cleaned) and bool(_has_content_signal(cleaned))
     return not _looks_like_casual_chat(lines)
 
 
@@ -191,6 +217,9 @@ def looks_like_notes(text: str | None, *, queue_waiting: bool = False) -> bool:
         return False
 
     if queue_waiting and _queue_waiting_notes(lines, cleaned):
+        return True
+
+    if len(lines) == 1 and notes_has_balance(cleaned) and _has_content_signal(cleaned):
         return True
 
     if _structured_notes(lines):
