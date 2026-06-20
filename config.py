@@ -140,6 +140,7 @@ class Settings:
     persistent_data: bool
     skip_instance_lock: bool
     public_base_url: str | None
+    credo_only_mode: bool
 
     @property
     def threex_enabled(self) -> bool:
@@ -331,6 +332,12 @@ def load_settings(env_prefix: str = "", *, optional: bool = False) -> Settings |
         "yes",
     } or cloud_deployed
 
+    credo_only_mode = getenv("CREDO_ONLY_MODE", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
     persistent_data = database_path.replace("\\", "/").startswith("/data/")
 
     webhook_port_raw = os.getenv("PORT", "").strip() or getenv("WEBHOOK_PORT", "8080")
@@ -375,4 +382,5 @@ def load_settings(env_prefix: str = "", *, optional: bool = False) -> Settings |
         persistent_data=persistent_data,
         skip_instance_lock=skip_instance_lock,
         public_base_url=public_base_url,
+        credo_only_mode=credo_only_mode,
     )

@@ -34,6 +34,16 @@ from handlers.nemesis import build_nemesis_handlers
 from handlers.profit_export import build_profit_export_handlers
 
 
+def build_credo_bot_handlers() -> list:
+    """Handlers for the credo-only bot (cc / card management, no payments or calls)."""
+    return [
+        *build_credo_handlers(credo_only=True),
+        CommandHandler("start", start_command),
+        CommandHandler("help", help_command),
+        *build_admin_access_handlers(),
+    ]
+
+
 def build_bot_handlers() -> list:
     return [
         *build_panic_handlers(),
@@ -59,6 +69,42 @@ def build_bot_handlers() -> list:
         *build_premium_access_handlers(),
         *build_nemesis_handlers(),
     ]
+
+
+def _format_credo_only_help_text(*, admin: bool, credo: bool, bot_name: str) -> str:
+    if admin:
+        return (
+            f"💳 <b>{bot_name} — credo commands</b>\n\n"
+            "<b>Cards</b>\n"
+            "/cc — view cards & pick one (group or DM)\n"
+            "(also /creditcard, /credo, /credos)\n"
+            "/activeccs · /usingcc — see which cards are in use\n"
+            "/finished — end your active card session\n"
+            "/cancel — cancel an in-progress flow\n\n"
+            "<b>Admin</b>\n"
+            "/addcredo — add a card (DM wizard)\n"
+            "/listcredocards — list all cards\n"
+            "/setlimit — set amount left (e.g. /setlimit Lloyds #2 10000)\n"
+            "/removecredo — remove a card\n"
+            "/addcredouser · /removecredouser · /credousers — credo whitelist\n"
+            "/admin · /addadmin · /removeadmin — bot admins"
+        )
+
+    if credo:
+        return (
+            f"💳 <b>{bot_name}</b>\n\n"
+            "/cc — view cards & pick one (group or DM)\n"
+            "(also /creditcard, /credo, /credos)\n"
+            "/activeccs · /usingcc — see which cards are in use\n"
+            "/finished — when done (works in group or DM)\n"
+            "/cancel — cancel an in-progress flow"
+        )
+
+    return (
+        f"💳 <b>{bot_name}</b>\n\n"
+        "This bot is for credo cards only.\n\n"
+        "Ask an admin to add you with /addcredouser."
+    )
 
 
 def _format_help_text(
@@ -153,14 +199,22 @@ async def _send_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     admin = is_bot_admin(settings, settings.database_path, user.id)
     credo = is_credo_allowed(settings, settings.database_path, user.id)
-    await message.reply_text(
-        _format_help_text(
+    if settings.credo_only_mode:
+        text = _format_credo_only_help_text(
+            admin=admin,
+            credo=credo,
+            bot_name=settings.bot_display_name,
+        )
+    else:
+        text = _format_help_text(
             admin=admin,
             credo=credo,
             bot_name=settings.bot_display_name,
             mailer_name=settings.mailer_display_name,
             onedrive=bool(settings.payments_onedrive_path),
-        ),
+        )
+    await message.reply_text(
+        text,
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
@@ -182,7 +236,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     bot_name = settings.bot_display_name
     admin = is_bot_admin(settings, settings.database_path, user.id)
-    if admin:
+    if settings.credo_only_mode:
+        from handlers.credo import is_credo_allowed
+
+        if admin:
+            text = (
+                f"💳 <b>{bot_name}</b>\n\n"
+                "Credo card bot — manage cards and whitelist.\n\n"
+                "Send /help for the full command list."
+            )
+        elif is_credo_allowed(settings, settings.database_path, user.id):
+            text = (
+                "💳 <b>Credos</b>\n\n"
+                "Send /cc (or /credos) to view cards and capacity, or /help for commands."
+            )
+        else:
+            text = (
+                f"💳 <b>{bot_name}</b>\n\n"
+                "This bot is for credo cards only.\n\n"
+                "Ask an admin to add you with /addcredouser."
+            )
+    elif admin:
         text = (
             f"📱 <b>{bot_name}</b>\n\n"
             "Call announcements post to your group automatically.\n\n"

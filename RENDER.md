@@ -10,6 +10,7 @@ Run all bots on Render instead of your PC. Each bot (Q1, Q2, Q1 Australia) is a 
 |---------|-----|----------|
 | Q1 Call Manager | https://q1-call-manager-eu.onrender.com | `q1` |
 | Q2 Call Manager | https://q2-telegram-bot.onrender.com | `q2` |
+| Credo Bot (cc only) | https://credo-telegram-bot.onrender.com | `credo` |
 
 After `git push origin main`, both should show the same commit in Render → each service → **Events**.
 
@@ -95,6 +96,50 @@ Q1 and Q2 share **one GitHub repo** — every push to `main` deploys the same co
 8. In the **Q2 payment group**, admin runs **`/setnotify`** and **`/setnotifypayments`** once.
 
 Or use **New → Blueprint** with `render.yaml` to create Q1 + Q2 services together.
+
+---
+
+## Credo Bot (cc commands only — separate Web Service)
+
+A dedicated bot for credo/card commands only — no payments, calls, or mailer. Uses `bot_credo.py` and its own database at `/data/links-credo.db`.
+
+### Create Credo Bot on Render (one time)
+
+**Option A — Blueprint:** `render.yaml` includes `credo-telegram-bot`. Sync the blueprint or add the service from the repo.
+
+**Option B — Script (recommended):**
+
+```powershell
+# Copy .env.credo.example -> .env.credo, fill BOT_TOKEN + ADMIN_CHAT_ID
+$env:RENDER_API_KEY = "rnd_..."
+powershell -File scripts/deploy-render-credo.ps1
+```
+
+**Option C — Manual:**
+
+1. **New → Web Service** → same GitHub repo (`features972-source/bot`).
+2. **Name:** `credo-telegram-bot` · **Runtime:** Docker · **Branch:** `main`
+3. **Docker command:** `python bot_credo.py` (overrides Dockerfile CMD)
+4. **Health check:** `/health` · **Plan:** Starter (required for 24/7)
+5. **Disk:** mount `/data`, 1 GB (name: `credo-bot-data`)
+6. **Environment:** copy from `.env.render.credo.example`:
+   - `BOT_TOKEN` — **Credo bot token only** (from @BotFather)
+   - `ADMIN_CHAT_ID` — your Telegram user ID
+   - `CREDO_ONLY_MODE=true`
+   - `DATABASE_PATH=/data/links-credo.db`
+   - `BOT_INSTANCE_ID=credo`
+   - `BOT_DISPLAY_NAME=Credo Bot`
+   - `DATA_DIR=/data`, `CLOUD_DEPLOYED=true`
+   - `READY_CHECK_ENABLED=false`
+7. Deploy. Open `https://credo-telegram-bot.onrender.com/health` — expect:
+   ```json
+   {"ok":true,"id":"credo","bot":"Credo Bot","persistent_data":true}
+   ```
+8. DM the bot `/start`, then `/addcredo` to add cards (separate DB from Q1/Q2).
+
+Every push to `main` auto-deploys this service if it is linked to the repo.
+
+---
 
 ### Restore Q2 database (if empty)
 

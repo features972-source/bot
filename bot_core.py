@@ -19,8 +19,8 @@ from config import Settings
 from database import get_notify_chat_id, init_db, set_notify_chat_id
 from handlers.admin_access import sync_bot_command_menu
 from handlers.admin_panel import build_admin_handlers
-from handlers.bot_commands import build_bot_handlers
-from handlers.credo import build_add_card_handlers
+from handlers.bot_commands import build_bot_handlers, build_credo_bot_handlers
+from handlers.credo import build_add_card_handlers, build_credo_active_guard_handlers
 from handlers.mailer import build_mailer_handlers
 from handlers.payments import build_payment_message_handlers
 from handlers.ready_check import build_ready_check_handlers, ready_check_shift_loop
@@ -161,6 +161,78 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         settings=settings,
         application=tg_app,
         notify_chat_id=runtime_notify_chat_id,
+    )
+
+
+def prepare_credo_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
+    """Minimal runtime for the credo-only bot (cc commands, no 3CX/payments/mailer)."""
+    apply_bot_bold_patch()
+    if settings.cloud_deployed and not settings.persistent_data:
+        logger.warning(
+            "[%s] DATA NOT PERSISTENT — database is at %s.",
+            instance_id,
+            settings.database_path,
+        )
+    elif settings.persistent_data:
+        logger.info("[%s] Using persistent database at %s", instance_id, settings.database_path)
+
+    init_db(settings.database_path)
+
+    if not settings.skip_instance_lock:
+        acquire_single_instance_lock(settings.database_path)
+
+    register_instance(instance_id, settings)
+
+    async def on_startup(app: Application) -> None:
+        app.bot_data["instance_id"] = instance_id
+        register_bot(instance_id, app.bot)
+        ensure_telegram_send_worker(app.bot_data)
+        asyncio.create_task(
+            sync_bot_command_menu(app.bot, settings),
+            name=f"sync-bot-command-menu-{instance_id}",
+        )
+        from handlers.credo import credo_reminder_loop
+
+        asyncio.create_task(
+            credo_reminder_loop(app.bot, settings, app.bot_data),
+            name=f"credo-reminder-{instance_id}",
+        )
+
+    async def on_error(update: object, context) -> None:
+        err = context.error
+        if isinstance(err, Conflict):
+            logger.critical(
+                "[%s] Telegram Conflict: another process is polling this bot token.",
+                instance_id,
+            )
+            raise SystemExit(1) from err
+        logger.exception("[%s] Telegram handler error", instance_id, exc_info=err)
+
+    tg_app = (
+        Application.builder()
+        .token(settings.bot_token)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
+        .concurrent_updates(32)
+        .post_init(on_startup)
+        .build()
+    )
+    tg_app.add_error_handler(on_error)
+    tg_app.bot_data["settings"] = settings
+
+    for handler in build_add_card_handlers():
+        tg_app.add_handler(handler, group=-1)
+    for handler in build_credo_active_guard_handlers():
+        tg_app.add_handler(handler, group=-1)
+    for handler in build_credo_bot_handlers():
+        tg_app.add_handler(handler)
+
+    return BotRuntime(
+        instance_id=instance_id,
+        settings=settings,
+        application=tg_app,
+        notify_chat_id=None,
     )
 
 

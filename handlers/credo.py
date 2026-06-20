@@ -78,6 +78,21 @@ CREDO_ACTIVE_ALLOWED_COMMANDS = frozenset({
     "alltime",
 })
 
+CREDO_ONLY_ACTIVE_ALLOWED_COMMANDS = frozenset({
+    "finished",
+    "addcredo",
+    "cancel",
+    "activeccs",
+    "usingccs",
+    "usingcc",
+    "help",
+    "start",
+    "cc",
+    "creditcard",
+    "credo",
+    "credos",
+})
+
 UNAUTHORIZED = (
     "You are not on the credo whitelist. Ask an admin to add you with /addcredouser."
 )
@@ -355,8 +370,13 @@ def _command_name(text: str) -> str:
     return part.lstrip("/").lower()
 
 
-def is_credo_active_command_allowed(command_text: str) -> bool:
-    return _command_name(command_text) in CREDO_ACTIVE_ALLOWED_COMMANDS
+def is_credo_active_command_allowed(
+    command_text: str, settings: Settings | None = None
+) -> bool:
+    name = _command_name(command_text)
+    if settings is not None and settings.credo_only_mode:
+        return name in CREDO_ONLY_ACTIVE_ALLOWED_COMMANDS
+    return name in CREDO_ACTIVE_ALLOWED_COMMANDS
 
 
 def is_credo_allowed(settings: Settings, database_path: str, user_id: int) -> bool:
@@ -921,18 +941,22 @@ async def credo_active_command_guard(
         return
     if not has_active_credo_session(context.application.bot_data, user.id):
         return
-    if is_credo_active_command_allowed(message.text):
+    settings: Settings = context.bot_data["settings"]
+    if is_credo_active_command_allowed(message.text, settings):
         return
 
     session = get_active_credo_session(context.application.bot_data, user.id)
-    settings: Settings = context.bot_data["settings"]
     card_label = (
         _format_card_label(settings.database_path, session.card_name)
         if session
         else "a card"
     )
+    if settings.credo_only_mode:
+        hint = "only **/finished** works until you're done."
+    else:
+        hint = "only **/mail** and **/finished** work until you're done."
     await message.reply_text(
-        f"**{card_label}** is active — only **/mail** and **/finished** work until you're done.",
+        f"**{card_label}** is active — {hint}",
         parse_mode="Markdown",
     )
     raise ApplicationHandlerStop
@@ -1052,14 +1076,17 @@ def build_add_card_handlers() -> list:
     ]
 
 
-def build_credo_handlers() -> list:
+def build_credo_active_guard_handlers() -> list:
+    """Block unrelated commands while a credo session is active (credo-only bot)."""
+    from telegram.ext import MessageHandler, filters
+
+    return [
+        MessageHandler(filters.COMMAND, credo_active_command_guard, block=False),
+    ]
+
+
+def build_credo_handlers(*, credo_only: bool = False) -> list:
     from handlers.bot_commands import help_conversation_fallback
-    from handlers.payments import (
-        alltimepayments_conversation_fallback,
-        leaderboard_conversation_fallback,
-        out_conversation_fallback,
-        payments_conversation_fallback,
-    )
 
     menu_fallbacks = [
         CommandHandler("cancel", credo_cancel),
@@ -1070,14 +1097,24 @@ def build_credo_handlers() -> list:
         ],
         CommandHandler("start", help_conversation_fallback),
         CommandHandler("help", help_conversation_fallback),
-        CommandHandler("out", out_conversation_fallback),
-        CommandHandler("payments", payments_conversation_fallback),
-        CommandHandler("leaderboard", leaderboard_conversation_fallback),
-        CommandHandler("outstats", leaderboard_conversation_fallback),
-        CommandHandler("outleaderboard", leaderboard_conversation_fallback),
-        CommandHandler("alltimepayments", alltimepayments_conversation_fallback),
-        CommandHandler("alltime", alltimepayments_conversation_fallback),
     ]
+    if not credo_only:
+        from handlers.payments import (
+            alltimepayments_conversation_fallback,
+            leaderboard_conversation_fallback,
+            out_conversation_fallback,
+            payments_conversation_fallback,
+        )
+
+        menu_fallbacks.extend([
+            CommandHandler("out", out_conversation_fallback),
+            CommandHandler("payments", payments_conversation_fallback),
+            CommandHandler("leaderboard", leaderboard_conversation_fallback),
+            CommandHandler("outstats", leaderboard_conversation_fallback),
+            CommandHandler("outleaderboard", leaderboard_conversation_fallback),
+            CommandHandler("alltimepayments", alltimepayments_conversation_fallback),
+            CommandHandler("alltime", alltimepayments_conversation_fallback),
+        ])
     user_conversation = ConversationHandler(
         entry_points=[
             CommandHandler(command, credos_start)

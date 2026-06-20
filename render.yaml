@@ -1,5 +1,5 @@
 # Render Blueprint — 3CX Telegram bots (24/7 on Render)
-# One Web Service per bot (Q1, Q2, Q1 Australia). Each needs its own BOT_TOKEN and disk.
+# One Web Service per bot (Q1, Q2, Q1 Australia, Credo). Each needs its own BOT_TOKEN and disk.
 #
 # Before deploy: stop bots on your PC. Fill secrets in the Render dashboard after blueprint sync.
 # Paid Starter+ plan recommended (free tier sleeps).
@@ -183,4 +183,41 @@ services:
       - key: TELETHON_API_ID
         sync: false
       - key: TELETHON_API_HASH
+        sync: false
+
+  - type: web
+    name: credo-telegram-bot
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    dockerCommand: python bot_credo.py
+    disk:
+      name: credo-bot-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: CLOUD_DEPLOYED
+        value: "true"
+      - key: CREDO_ONLY_MODE
+        value: "true"
+      - key: DATABASE_PATH
+        value: /data/links-credo.db
+      - key: WEBHOOK_HOST
+        value: 0.0.0.0
+      - key: BOT_DISPLAY_NAME
+        value: Credo Bot
+      - key: BOT_INSTANCE_ID
+        value: credo
+      - key: STATS_TIMEZONE
+        value: Europe/London
+      - key: READY_CHECK_ENABLED
+        value: "false"
+      - key: BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: ADMIN_CHAT_ID
         sync: false

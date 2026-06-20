@@ -48,6 +48,25 @@ CREDO_USER_COMMANDS = MENU_BOT_COMMANDS + [
     BotCommand("finished", "End active credo session"),
 ]
 
+CREDO_ONLY_GROUP_COMMANDS = [
+    BotCommand("help", "Command list"),
+    BotCommand("start", "Bot info"),
+    BotCommand("cc", "Pick a credo card"),
+    BotCommand("credos", "Pick a credo card"),
+    BotCommand("usingcc", "See which cards are in use"),
+    BotCommand("finished", "End active credo session"),
+]
+
+CREDO_ONLY_ADMIN_COMMANDS = CREDO_USER_COMMANDS + [
+    BotCommand("addcredo", "Add a credo card (DM)"),
+    BotCommand("listcredocards", "List credo cards"),
+    BotCommand("setlimit", "Set card amount left"),
+    BotCommand("removecredo", "Remove a credo card"),
+    BotCommand("addcredouser", "Whitelist user for credos"),
+    BotCommand("removecredouser", "Remove credo whitelist"),
+    BotCommand("credousers", "List credo whitelist"),
+]
+
 CREDO_GROUP_COMMANDS = [
     BotCommand("help", "Command list"),
     BotCommand("start", "Bot info"),
@@ -143,6 +162,9 @@ async def _clear_command_scope(bot: Bot, scope) -> None:
 
 async def sync_bot_command_menu(bot: Bot, settings: Settings) -> None:
     """Private chats get full menus; groups show the main command set."""
+    if settings.credo_only_mode:
+        await sync_credo_only_bot_command_menu(bot, settings)
+        return
     try:
         scopes_to_clear = [
             BotCommandScopeDefault(),
@@ -217,6 +239,57 @@ async def sync_bot_command_menu(bot: Bot, settings: Settings) -> None:
                 logger.warning("Could not set credo commands for user %s", user_id)
     except NetworkError as exc:
         logger.warning("Telegram network error syncing command menu (will retry on next deploy): %s", exc)
+
+
+async def sync_credo_only_bot_command_menu(bot: Bot, settings: Settings) -> None:
+    """Command menus for the credo-only bot (no payments, mailer, or call features)."""
+    try:
+        scopes_to_clear = [
+            BotCommandScopeDefault(),
+            BotCommandScopeAllPrivateChats(),
+            BotCommandScopeAllGroupChats(),
+            BotCommandScopeAllChatAdministrators(),
+        ]
+        if settings.notify_chat_id is not None:
+            scopes_to_clear.append(BotCommandScopeChat(chat_id=settings.notify_chat_id))
+
+        for scope in scopes_to_clear:
+            await _clear_command_scope(bot, scope)
+
+        await bot.set_my_commands(
+            CREDO_USER_COMMANDS,
+            scope=BotCommandScopeAllPrivateChats(),
+        )
+        await bot.set_my_commands(
+            CREDO_ONLY_GROUP_COMMANDS,
+            scope=BotCommandScopeAllGroupChats(),
+        )
+        try:
+            await bot.set_my_commands(
+                CREDO_ONLY_GROUP_COMMANDS,
+                scope=BotCommandScopeAllChatAdministrators(),
+            )
+        except BadRequest:
+            logger.warning("Could not set credo-only group command menu")
+
+        for user_id in iter_bot_admin_user_ids(settings, settings.database_path):
+            scope = BotCommandScopeChat(chat_id=user_id)
+            try:
+                await bot.set_my_commands(CREDO_ONLY_ADMIN_COMMANDS, scope=scope)
+            except BadRequest:
+                logger.warning("Could not set credo-only admin commands for user %s", user_id)
+
+        for user_id in iter_credo_only_user_ids(settings, settings.database_path):
+            scope = BotCommandScopeChat(chat_id=user_id)
+            try:
+                await bot.set_my_commands(CREDO_USER_COMMANDS, scope=scope)
+            except BadRequest:
+                logger.warning("Could not set credo-only user commands for user %s", user_id)
+    except NetworkError as exc:
+        logger.warning(
+            "Telegram network error syncing credo-only command menu (will retry on next deploy): %s",
+            exc,
+        )
 
 
 async def revoke_bot_command_menu(bot: Bot, user_id: int) -> None:
