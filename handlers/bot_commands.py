@@ -17,6 +17,7 @@ from database import (
 from handlers.admin_access import (
     build_admin_access_handlers,
     is_bot_admin,
+    is_primary_admin,
     require_admin,
 )
 from handlers.call_stats import build_call_stats_handlers
@@ -71,7 +72,21 @@ def build_bot_handlers() -> list:
     ]
 
 
-def _format_credo_only_help_text(*, admin: bool, credo: bool, bot_name: str) -> str:
+def _format_credo_only_help_text(*, admin: bool, credo: bool, bot_name: str, primary: bool = False) -> str:
+    if primary:
+        return (
+            f"💳 <b>{bot_name} — owner</b>\n\n"
+            "<b>Subscription</b>\n"
+            "/genkey — create a 4-week license key\n"
+            "/addadmin &lt;key&gt; — grant admin (reply to user)\n"
+            "/redeemkey &lt;key&gt; — extend bot 4 weeks only\n"
+            "/subscription · /keys — status &amp; unused keys\n\n"
+            "<b>Cards</b>\n"
+            "/cc — view cards &amp; pick one\n"
+            "/addcredo · /listcredocards · /setlimit · /removecredo\n"
+            "/addcredouser · /removecredouser · /credousers"
+        )
+
     if admin:
         return (
             f"💳 <b>{bot_name} — credo commands</b>\n\n"
@@ -81,13 +96,13 @@ def _format_credo_only_help_text(*, admin: bool, credo: bool, bot_name: str) -> 
             "/activeccs · /usingcc — see which cards are in use\n"
             "/finished — end your active card session\n"
             "/cancel — cancel an in-progress flow\n\n"
-            "<b>Admin</b>\n"
+            "<b>Admin</b> (expires with your key)\n"
             "/addcredo — add a card (DM wizard)\n"
             "/listcredocards — list all cards\n"
             "/setlimit — set amount left (e.g. /setlimit Lloyds #2 10000)\n"
             "/removecredo — remove a card\n"
-            "/addcredouser · /removecredouser · /credousers — credo whitelist\n"
-            "/admin · /addadmin · /removeadmin — bot admins"
+            "/addcredouser · /removecredouser · /credousers\n"
+            "/subscription — your admin &amp; bot expiry"
         )
 
     if credo:
@@ -204,6 +219,7 @@ async def _send_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             admin=admin,
             credo=credo,
             bot_name=settings.bot_display_name,
+            primary=is_primary_admin(settings, user.id),
         )
     else:
         text = _format_help_text(

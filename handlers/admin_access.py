@@ -21,6 +21,7 @@ from telegram.ext import CommandHandler, ContextTypes
 from config import Settings
 from database import (
     add_bot_admin,
+    is_delegated_admin_active,
     list_bot_admins,
     list_credo_whitelist,
     list_links,
@@ -58,6 +59,8 @@ CREDO_ONLY_GROUP_COMMANDS = [
 ]
 
 CREDO_ONLY_ADMIN_COMMANDS = CREDO_USER_COMMANDS + [
+    BotCommand("genkey", "Create a 4-week admin key"),
+    BotCommand("subscription", "Bot subscription status"),
     BotCommand("addcredo", "Add a credo card (DM)"),
     BotCommand("listcredocards", "List credo cards"),
     BotCommand("setlimit", "Set card amount left"),
@@ -127,7 +130,10 @@ def build_admin_access_handlers() -> list:
 def is_bot_admin(settings: Settings, database_path: str, user_id: int) -> bool:
     if settings.admin_chat_id is not None and user_id == settings.admin_chat_id:
         return True
-    return any(admin.telegram_user_id == user_id for admin in list_bot_admins(database_path))
+    for admin in list_bot_admins(database_path):
+        if admin.telegram_user_id == user_id:
+            return is_delegated_admin_active(admin)
+    return False
 
 
 def is_primary_admin(settings: Settings, user_id: int) -> bool:
@@ -314,6 +320,15 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
+    if settings.credo_only_mode:
+        if not is_primary_admin(settings, update.effective_user.id if update.effective_user else 0):
+            await update.effective_message.reply_text(
+                "Only the primary admin can add admins on the credo bot."
+            )
+            return
+        await _addadmin_credo_command(update, context, settings)
+        return
+
     if not await require_admin(update, settings, deny_message="Admin only."):
         return
 
@@ -339,6 +354,54 @@ async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await sync_bot_command_menu(context.bot, settings)
     await update.effective_message.reply_text(
         f"✅ {_user_label(target)} can now use all admin commands."
+    )
+
+
+async def _addadmin_credo_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, settings: Settings
+) -> None:
+    from handlers.credo_subscription import redeem_key_for_admin
+
+    args = list(context.args or [])
+    if not args:
+        await update.effective_message.reply_text(
+            "Grant admin with a license key (4 weeks):\n"
+            "• Reply to their message: /addadmin <key>\n"
+            "• Or: /addadmin <telegram_user_id> <key>\n\n"
+            "Create a key first with /genkey"
+        )
+        return
+
+    key = args[-1].strip()
+    lookup_args = args[:-1]
+    target = _resolve_target_user(update, lookup_args, database_path=settings.database_path)
+    if target is None:
+        await update.effective_message.reply_text(
+            "Reply to the user you want to make admin, then send:\n"
+            "/addadmin <key>\n\n"
+            "Or: /addadmin <telegram_user_id> <key>"
+        )
+        return
+
+    if is_primary_admin(settings, target.id):
+        await update.effective_message.reply_text(
+            "The primary admin already has permanent access."
+        )
+        return
+
+    try:
+        subscription_until, admin_until = redeem_key_for_admin(
+            settings, key=key, target_user=target
+        )
+    except ValueError:
+        await update.effective_message.reply_text("Invalid or already used key.")
+        return
+
+    await sync_bot_command_menu(context.bot, settings)
+    await update.effective_message.reply_text(
+        f"✅ {_user_label(target)} is admin until "
+        f"{admin_until.astimezone().strftime('%d %b %Y')}.\n"
+        f"Bot active until {subscription_until.astimezone().strftime('%d %b %Y')}."
     )
 
 
@@ -387,14 +450,26 @@ async def admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         for admin in delegated:
             label = _stored_user_label(admin.telegram_username, admin.display_name, admin.telegram_user_id)
-            lines.append(f"• {label} · id `{admin.telegram_user_id}`")
+            expiry = ""
+            if admin.expires_at:
+                expiry = f" · until `{admin.expires_at[:10]}`"
+            lines.append(f"• {label} · id `{admin.telegram_user_id}`{expiry}")
 
-    lines.extend(
-        [
-            "",
-            "Reply to someone with /addadmin or /removeadmin to change access.",
-        ]
-    )
+    if settings.credo_only_mode:
+        lines.extend(
+            [
+                "",
+                "Primary admin adds others with /genkey then /addadmin <key> (4 weeks each).",
+                "/subscription — bot status · /redeemkey — extend bot without new admin",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Reply to someone with /addadmin or /removeadmin to change access.",
+            ]
+        )
     await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 

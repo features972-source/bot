@@ -21,6 +21,7 @@ from handlers.admin_access import sync_bot_command_menu
 from handlers.admin_panel import build_admin_handlers
 from handlers.bot_commands import build_bot_handlers, build_credo_bot_handlers
 from handlers.credo import build_add_card_handlers, build_credo_active_guard_handlers
+from handlers.credo_subscription import build_credo_subscription_handlers
 from handlers.mailer import build_mailer_handlers
 from handlers.payments import build_payment_message_handlers
 from handlers.ready_check import build_ready_check_handlers, ready_check_shift_loop
@@ -223,6 +224,8 @@ def prepare_credo_runtime(settings: Settings, *, instance_id: str) -> BotRuntime
 
     for handler in build_add_card_handlers():
         tg_app.add_handler(handler, group=-1)
+    for handler in build_credo_subscription_handlers():
+        tg_app.add_handler(handler, group=-2)
     for handler in build_credo_active_guard_handlers():
         tg_app.add_handler(handler, group=-1)
     for handler in build_credo_bot_handlers():

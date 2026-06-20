@@ -11,6 +11,18 @@ class BotAdmin:
     telegram_username: str | None
     display_name: str | None
     added_at: str
+    expires_at: str | None = None
+
+
+@dataclass
+class AdminLicenseKey:
+    id: int
+    key_hint: str
+    created_by_user_id: int
+    created_at: str
+    redeemed_by_user_id: int | None
+    redeemed_at: str | None
+    admin_expires_at: str | None
 
 
 @dataclass
@@ -624,6 +636,21 @@ def init_db(path: str) -> None:
             """
         )
         _ensure_pass_offer_columns(conn)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admin_license_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_hash TEXT NOT NULL UNIQUE,
+                key_hint TEXT NOT NULL,
+                created_by_user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                redeemed_by_user_id INTEGER,
+                redeemed_at TEXT,
+                admin_expires_at TEXT
+            )
+            """
+        )
+        _ensure_bot_admin_columns(conn)
         conn.commit()
 
 
@@ -851,6 +878,14 @@ def get_excel_web_url(path: str) -> str | None:
 
 def set_excel_web_url(path: str, url: str) -> None:
     _set_bot_setting(path, EXCEL_WEB_URL_KEY, url.strip())
+
+
+def _ensure_bot_admin_columns(conn: sqlite3.Connection) -> None:
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(bot_admins)").fetchall()
+    }
+    if "expires_at" not in columns:
+        conn.execute("ALTER TABLE bot_admins ADD COLUMN expires_at TEXT")
 
 
 def _ensure_chat_blacklist_columns(conn: sqlite3.Connection) -> None:
@@ -1193,18 +1228,20 @@ def add_bot_admin(
     telegram_user_id: int,
     telegram_username: str | None,
     display_name: str | None,
+    expires_at: str | None = None,
 ) -> None:
     added_at = datetime.now(timezone.utc).isoformat()
     with _connect(path) as conn:
         conn.execute(
             """
-            INSERT INTO bot_admins (telegram_user_id, telegram_username, display_name, added_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO bot_admins (telegram_user_id, telegram_username, display_name, added_at, expires_at)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(telegram_user_id) DO UPDATE SET
                 telegram_username = excluded.telegram_username,
-                display_name = excluded.display_name
+                display_name = excluded.display_name,
+                expires_at = excluded.expires_at
             """,
-            (telegram_user_id, telegram_username, display_name, added_at),
+            (telegram_user_id, telegram_username, display_name, added_at, expires_at),
         )
         conn.commit()
 
@@ -1223,7 +1260,7 @@ def list_bot_admins(path: str) -> list[BotAdmin]:
     with _connect(path) as conn:
         rows = conn.execute(
             """
-            SELECT telegram_user_id, telegram_username, display_name, added_at
+            SELECT telegram_user_id, telegram_username, display_name, added_at, expires_at
             FROM bot_admins
             ORDER BY added_at ASC
             """
@@ -1234,9 +1271,169 @@ def list_bot_admins(path: str) -> list[BotAdmin]:
             telegram_username=row[1],
             display_name=row[2],
             added_at=row[3],
+            expires_at=row[4],
         )
         for row in rows
     ]
+
+
+CREDO_SUBSCRIPTION_ACTIVE_UNTIL_KEY = "credo_subscription_active_until"
+ADMIN_LICENSE_WEEKS = 4
+ADMIN_LICENSE_DAYS = ADMIN_LICENSE_WEEKS * 7
+
+
+def _parse_stored_datetime(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        text = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        return None
+
+
+def get_credo_subscription_active_until(path: str) -> datetime | None:
+    return _parse_stored_datetime(_get_bot_setting(path, CREDO_SUBSCRIPTION_ACTIVE_UNTIL_KEY))
+
+
+def is_credo_subscription_active(path: str) -> bool:
+    active_until = get_credo_subscription_active_until(path)
+    if active_until is None:
+        return True
+    return datetime.now(timezone.utc) < active_until
+
+
+def extend_credo_subscription(path: str, *, days: int = ADMIN_LICENSE_DAYS) -> datetime:
+    now = datetime.now(timezone.utc)
+    current = get_credo_subscription_active_until(path)
+    base = current if current is not None and current > now else now
+    new_until = base + timedelta(days=days)
+    _set_bot_setting(path, CREDO_SUBSCRIPTION_ACTIVE_UNTIL_KEY, new_until.isoformat())
+    return new_until
+
+
+def is_delegated_admin_active(admin: BotAdmin) -> bool:
+    if not admin.expires_at:
+        return True
+    expires = _parse_stored_datetime(admin.expires_at)
+    if expires is None:
+        return True
+    return datetime.now(timezone.utc) < expires
+
+
+def get_delegated_admin_expires_at(path: str, telegram_user_id: int) -> datetime | None:
+    for admin in list_bot_admins(path):
+        if admin.telegram_user_id == telegram_user_id:
+            return _parse_stored_datetime(admin.expires_at)
+    return None
+
+
+def _hash_license_key(key: str) -> str:
+    import hashlib
+
+    normalized = key.strip().lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def create_admin_license_key(path: str, *, created_by_user_id: int) -> str:
+    import secrets
+
+    plain = f"credo-{secrets.token_urlsafe(12)}"
+    key_hash = _hash_license_key(plain)
+    key_hint = plain[-8:]
+    created_at = datetime.now(timezone.utc).isoformat()
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO admin_license_keys (
+                key_hash, key_hint, created_by_user_id, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (key_hash, key_hint, created_by_user_id, created_at),
+        )
+        conn.commit()
+    return plain
+
+
+def list_unredeemed_admin_license_keys(path: str) -> list[AdminLicenseKey]:
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, key_hint, created_by_user_id, created_at,
+                   redeemed_by_user_id, redeemed_at, admin_expires_at
+            FROM admin_license_keys
+            WHERE redeemed_at IS NULL
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+    return [
+        AdminLicenseKey(
+            id=row[0],
+            key_hint=row[1],
+            created_by_user_id=row[2],
+            created_at=row[3],
+            redeemed_by_user_id=row[4],
+            redeemed_at=row[5],
+            admin_expires_at=row[6],
+        )
+        for row in rows
+    ]
+
+
+def redeem_admin_license_key(
+    path: str,
+    *,
+    key: str,
+    redeemed_by_user_id: int,
+    grant_admin: bool,
+    telegram_username: str | None = None,
+    display_name: str | None = None,
+) -> tuple[datetime, datetime | None]:
+    """Redeem a license key. Extends bot subscription; optionally grants admin access."""
+    key_hash = _hash_license_key(key)
+    now = datetime.now(timezone.utc)
+    admin_expires = now + timedelta(days=ADMIN_LICENSE_DAYS)
+    admin_expires_iso = admin_expires.isoformat()
+
+    with _connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT id FROM admin_license_keys
+            WHERE key_hash = ? AND redeemed_at IS NULL
+            """,
+            (key_hash,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("invalid_or_used_key")
+
+        conn.execute(
+            """
+            UPDATE admin_license_keys
+            SET redeemed_by_user_id = ?,
+                redeemed_at = ?,
+                admin_expires_at = ?
+            WHERE id = ?
+            """,
+            (redeemed_by_user_id, now.isoformat(), admin_expires_iso, row[0]),
+        )
+        conn.commit()
+
+    subscription_until = extend_credo_subscription(path, days=ADMIN_LICENSE_DAYS)
+
+    if grant_admin:
+        add_bot_admin(
+            path,
+            telegram_user_id=redeemed_by_user_id,
+            telegram_username=telegram_username,
+            display_name=display_name,
+            expires_at=admin_expires_iso,
+        )
+        return subscription_until, admin_expires
+
+    return subscription_until, None
 
 
 def _cleared_from_db(value: object) -> bool | None:
