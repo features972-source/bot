@@ -198,6 +198,7 @@ class PassOffer:
     status: str
     created_at: str
     last_reminder_at: str | None = None
+    manual_override: bool = False
 
 
 @dataclass
@@ -610,6 +611,16 @@ def init_db(path: str) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pass_offer_brushed (
+                offer_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                brushed_at TEXT NOT NULL,
+                PRIMARY KEY (offer_id, user_id)
+            )
+            """
+        )
         _ensure_pass_offer_columns(conn)
         conn.commit()
 
@@ -927,6 +938,10 @@ def _ensure_pass_offer_columns(conn: sqlite3.Connection) -> None:
     }
     if "last_reminder_at" not in columns:
         conn.execute("ALTER TABLE pass_offers ADD COLUMN last_reminder_at TEXT")
+    if "manual_override" not in columns:
+        conn.execute(
+            "ALTER TABLE pass_offers ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def link_extension(
@@ -2208,7 +2223,8 @@ _PASS_OFFER_SELECT = """
         notes_text,
         status,
         created_at,
-        last_reminder_at
+        last_reminder_at,
+        manual_override
     FROM pass_offers
 """
 
@@ -2229,6 +2245,7 @@ def _pass_offer_from_row(row) -> PassOffer:
         status=row[11],
         created_at=row[12],
         last_reminder_at=row[13],
+        manual_override=bool(row[14]),
     )
 
 
@@ -2467,6 +2484,31 @@ def assign_pending_pass_to_user(
     return None
 
 
+def record_pass_offer_brush(path: str, offer_id: int, user_id: int) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO pass_offer_brushed (offer_id, user_id, brushed_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(offer_id, user_id) DO NOTHING
+            """,
+            (offer_id, user_id, now),
+        )
+        conn.commit()
+
+
+def get_pass_offer_brushed_user_ids(path: str, offer_id: int) -> set[int]:
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT user_id FROM pass_offer_brushed WHERE offer_id = ?
+            """,
+            (offer_id,),
+        ).fetchall()
+    return {int(row[0]) for row in rows}
+
+
 def create_pass_offer(
     path: str,
     *,
@@ -2595,6 +2637,7 @@ def update_pass_offer(
     assigned_display_name: str | None = None,
     status: str | None = None,
     last_reminder_at: str | None = None,
+    manual_override: bool | None = None,
     reset_reminder: bool = False,
 ) -> None:
     fields: list[str] = []
@@ -2614,6 +2657,9 @@ def update_pass_offer(
     if status is not None:
         fields.append("status = ?")
         params.append(status)
+    if manual_override is not None:
+        fields.append("manual_override = ?")
+        params.append(1 if manual_override else 0)
     if reset_reminder:
         fields.append("last_reminder_at = ?")
         params.append(datetime.now(timezone.utc).isoformat())
@@ -3647,6 +3693,7 @@ _DATA_TABLES = (
     "pass_queue_vips",
     "pass_offers",
     "pass_notes_pending",
+    "pass_offer_brushed",
 )
 
 

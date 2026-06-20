@@ -65,6 +65,34 @@ def build_bot_handlers() -> list:
     ]
 
 
+def _pass_queue_help_block(*, admin: bool) -> str:
+    vip_line = (
+        "/addvip · /removevip — VIP finishers jump ahead of standard queue\n"
+        if admin
+        else ""
+    )
+    return (
+        "<b>🎯 Pass queue</b> — starter notes → finisher handoff\n"
+        "/joinqueue — join queue; get @mentioned when notes are posted\n"
+        "/leavequeue — leave the queue\n"
+        "/queue — who's waiting (VIPs listed first)\n"
+        f"{vip_line}\n"
+        "<i>Notes (auto-detected in group):</i>\n"
+        "• Post full notes: name, DOB, bank + balance\n"
+        "• Balance required — e.g. <code>current 5600</code>, "
+        "<code>savings 3400</code>, <code>£3737 current</code>, <code>£5000</code>, <code>bala 3222</code>\n"
+        "• Balance-only posts are rejected — send full notes, not just the balance\n"
+        "• Reply to incomplete notes with the balance line to complete them\n"
+        "• If no finisher is free, notes are saved and offered when someone /joinqueue\n"
+        "• Starters can't take their own pass — another finisher must join\n\n"
+        "<i>When assigned:</i>\n"
+        "• Take pass — notes sent to your DM (read notes before taking)\n"
+        "• Brush pass — skip and offer to the next finisher in queue\n"
+        "• If everyone brushes, manual override opens — all finishers tagged, anyone can take\n"
+        "• 1-minute reminders until take/brush; pass expires after 10 minutes with no taker"
+    )
+
+
 def _format_help_text(
     *,
     admin: bool,
@@ -110,10 +138,7 @@ def _format_help_text(
             "/removeexpense — remove an expense (# or reply)\n\n"
             "<b>📊 Profit</b>\n"
             "/export — jobs payout %, owed per user, expenses & net profit (today · 7 · all)\n\n"
-            "<b>🎯 Pass queue</b>\n"
-            "/joinqueue — join queue for the next pass\n"
-            "/leavequeue — leave the queue · /queue — who's waiting\n"
-            "/addvip · /removevip — VIP priority in pass queue\n\n"
+            f"{_pass_queue_help_block(admin=True)}\n\n"
             "<b>👑 Admins</b>\n"
             "/admin · /addadmin · /removeadmin — manage bot admins\n\n"
             "<b>🚫 Blacklist</b>\n"
@@ -135,9 +160,8 @@ def _format_help_text(
             "/cc — view cards & pick one (group or DM)\n"
             "(also /creditcard, /credo, /credos)\n"
             "/activeccs · /usingcc — see which cards are in use\n"
-            "/finished — when done (works in group or DM)\n"
-            "/joinqueue — wait for the next starter pass\n"
-            "/queue — see who's in the pass queue\n"
+            "/finished — when done (works in group or DM)\n\n"
+            f"{_pass_queue_help_block(admin=False)}\n\n"
             f"/mail — open {mailer_name} (multi-step flow works best in DM)\n"
             "/maildone — end mailer session\n"
             "/cancel — cancel an in-progress flow"

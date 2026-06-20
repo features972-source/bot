@@ -83,7 +83,15 @@ BALANCE_IN_NOTES = re.compile(
     r"|(?:lt|last\s+transaction)\s*[:.\-]?\s*£?\s*\d[\d,.\s]*(?:k|m)?"
     r"|savers?\s+with\s+£?\s*\d[\d,.\s]*(?:k|m)?"
     rf"|{BALANCE_AMOUNT}\s+{BALANCE_KEYWORD}\b"
+    r"|£\s*\d[\d,.\s]*(?:\.\d{1,2})?(?:\s*(?:k|m))?\b"
     r")"
+)
+
+STANDALONE_MONEY_LINE = re.compile(
+    r"(?i)^(?:"
+    r"£\s*\d[\d,.\s]*(?:\.\d{1,2})?(?:\s*(?:k|m))?\s*"
+    r"|\d{3,}[\d,.\s]*(?:\.\d{1,2})?(?:\s*(?:k|m))?\s*"
+    r")$"
 )
 
 BALANCE_ONLY_LINE = re.compile(
@@ -92,6 +100,7 @@ BALANCE_ONLY_LINE = re.compile(
     rf"|{BALANCE_AMOUNT}\s+{BALANCE_KEYWORD}\b\s*"
     r"|(?:lt|last\s+transaction)\s*[:.\-]?\s*£?\s*\d[\d,.\s]*(?:k|m)?\s*"
     r"|savers?\s+with\s+£?\s*\d[\d,.\s]*(?:k|m)?\s*"
+    r"|£\s*\d[\d,.\s]*(?:\.\d{1,2})?(?:\s*(?:k|m))?\s*"
     r")$"
 )
 
@@ -99,7 +108,10 @@ BALANCE_ONLY_LINE = re.compile(
 def notes_has_balance(text: str | None) -> bool:
     if not text:
         return False
-    return bool(BALANCE_IN_NOTES.search(text.strip()))
+    cleaned = text.strip()
+    if BALANCE_IN_NOTES.search(cleaned):
+        return True
+    return any(STANDALONE_MONEY_LINE.match(line) for line in _non_empty_lines(cleaned))
 
 
 def notes_balance_only(text: str | None) -> bool:

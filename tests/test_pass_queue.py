@@ -29,6 +29,7 @@ from database import (  # noqa: E402
     create_pass_offer,
     get_active_pass_offer,
     get_pass_offer,
+    get_pass_offer_brushed_user_ids,
     get_pass_queue_position,
     init_db,
     is_pass_queue_vip,
@@ -38,13 +39,18 @@ from database import (  # noqa: E402
     list_pending_pass_notes,
     pass_offer_for_notes,
     pending_pass_assignee_user_ids,
+    record_pass_offer_brush,
     remove_pass_queue_vip,
     rotate_pass_queue_user_to_back,
     update_pass_offer,
     upsert_pending_pass_note,
 )
 from handlers import pass_queue  # noqa: E402
-from handlers.pass_queue import _next_queue_assignee, pass_reminder_due  # noqa: E402
+from handlers.pass_queue import (  # noqa: E402
+    _next_queue_assignee,
+    pass_offer_expired,
+    pass_reminder_due,
+)
 from notes_detect import looks_like_notes, notes_balance_only, notes_has_balance  # noqa: E402
 
 
@@ -681,6 +687,15 @@ also has hsbc"""
         self.assertTrue(notes_has_balance("james adams\nbala 3222"))
         self.assertTrue(notes_has_balance("james adams\nLT - 23232"))
 
+    def test_notes_has_balance_plain_gbp_line(self):
+        notes = "50\nJannett Burt\n14/09/67\n£5000"
+        self.assertTrue(notes_has_balance(notes))
+        self.assertTrue(notes_has_balance("£5000"))
+        self.assertTrue(notes_has_balance("5000"))
+        self.assertFalse(notes_has_balance("50\nJannett Burt\n14/09/67"))
+        self.assertTrue(notes_balance_only("£5000"))
+        self.assertFalse(notes_balance_only(notes))
+
     def test_notes_missing_balance(self):
         self.assertFalse(notes_has_balance("james adams 31/01/2000 bk"))
         self.assertFalse(notes_has_balance("Frank\n23/02/1943\nbarclays"))
@@ -864,6 +879,66 @@ class PassQueueDbTests(unittest.TestCase):
         self.assertIsNotNone(next_user)
         assert next_user is not None
         self.assertEqual(next_user.user_id, 402)
+
+    def test_next_queue_assignee_skips_brushed_users(self):
+        join_pass_queue(
+            self.db_path,
+            telegram_user_id=501,
+            telegram_username="first",
+            display_name="First",
+        )
+        join_pass_queue(
+            self.db_path,
+            telegram_user_id=502,
+            telegram_username="second",
+            display_name="Second",
+        )
+        queue = list_pass_queue(self.db_path)
+        next_user = _next_queue_assignee(queue, exclude_user_ids={501})
+        self.assertIsNotNone(next_user)
+        assert next_user is not None
+        self.assertEqual(next_user.user_id, 502)
+        self.assertIsNone(_next_queue_assignee(queue, exclude_user_ids={501, 502}))
+
+    def test_record_pass_offer_brush(self):
+        offer_id = create_pass_offer(
+            self.db_path,
+            chat_id=-100,
+            notes_message_id=1,
+            starter_user_id=10,
+            starter_username="starter",
+            starter_display_name="Starter",
+            assigned_user_id=20,
+            assigned_username="a",
+            assigned_display_name="A",
+            notes_text="notes",
+        )
+        record_pass_offer_brush(self.db_path, offer_id, 20)
+        record_pass_offer_brush(self.db_path, offer_id, 20)
+        self.assertEqual(get_pass_offer_brushed_user_ids(self.db_path, offer_id), {20})
+
+    def test_pass_offer_expired(self):
+        from datetime import timedelta
+
+        past = (datetime.now(timezone.utc) - timedelta(seconds=601)).isoformat()
+        offer = PassOffer(
+            id=1,
+            chat_id=-100,
+            notes_message_id=1,
+            offer_message_id=2,
+            starter_user_id=10,
+            starter_username=None,
+            starter_display_name=None,
+            assigned_user_id=20,
+            assigned_username="fin",
+            assigned_display_name="Fin",
+            notes_text="notes",
+            status="pending",
+            created_at=past,
+            last_reminder_at=past,
+        )
+        self.assertTrue(pass_offer_expired(offer))
+        self.assertFalse(pass_reminder_due(offer))
 
     def test_pending_pass_assignee_user_ids(self):
         self.assertEqual(pending_pass_assignee_user_ids(self.db_path), set())

@@ -21,6 +21,7 @@ from database import (
     create_pass_offer,
     delete_pending_pass_note,
     get_pass_offer,
+    get_pass_offer_brushed_user_ids,
     get_pass_queue_position,
     is_pass_queue_vip,
     join_pass_queue,
@@ -29,6 +30,7 @@ from database import (
     list_pending_pass_offers,
     pass_offer_for_notes,
     pending_pass_assignee_user_ids,
+    record_pass_offer_brush,
     remove_pass_queue_vip,
     rotate_pass_queue_user_to_back,
     update_pass_offer,
@@ -43,21 +45,48 @@ CALLBACK_PREFIX = "pass:"
 PASS_STATUS_PENDING = "pending"
 PASS_STATUS_TAKEN = "taken"
 PASS_STATUS_BRUSHED = "brushed"
+PASS_STATUS_EXPIRED = "expired"
 PASS_REMINDER_SECONDS = 60
 PASS_REMINDER_POLL_SECONDS = 15
+PASS_EXPIRE_SECONDS = 600
 
 PASS_NOTES_FILTER = filters.ChatType.GROUPS & ~filters.COMMAND
 
 
 def _pass_offer_text(offer: PassOffer, *, reminder: bool = False) -> str:
+    suffix = " ⏰" if reminder else ""
+    if offer.manual_override:
+        return (
+            f"🚨 <b>Manual override open</b>{suffix} — anyone in queue can take this pass.\n\n"
+            "<i>Read notes before taking pass.</i>"
+        )
     mention = _mention_html(
         offer.assigned_user_id,
         offer.assigned_username,
         offer.assigned_display_name,
     )
-    suffix = " ⏰" if reminder else ""
     return (
         f"{mention} — <b>take this pass</b>{suffix}\n\n"
+        "<i>Read notes before taking pass.</i>"
+    )
+
+
+def _manual_override_text(queue: list[PassQueueEntry], *, starter_user_id: int, reminder: bool = False) -> str:
+    finishers = [entry for entry in queue if entry.user_id != starter_user_id]
+    if not finishers:
+        suffix = " ⏰" if reminder else ""
+        return (
+            f"🚨 <b>Manual override open</b>{suffix} — anyone in queue can take this pass.\n\n"
+            "<i>Read notes before taking pass.</i>"
+        )
+    mentions = ", ".join(
+        _mention_html(entry.user_id, entry.telegram_username, entry.display_name)
+        for entry in finishers
+    )
+    suffix = " ⏰" if reminder else ""
+    return (
+        f"{mentions}\n\n"
+        f"🚨 <b>Manual override open</b>{suffix} — anyone in queue can take this pass.\n\n"
         "<i>Read notes before taking pass.</i>"
     )
 
@@ -75,12 +104,20 @@ def _parse_iso_datetime(value: str) -> datetime:
 
 
 def pass_reminder_due(offer: PassOffer, *, now: datetime | None = None) -> bool:
-    if offer.status != PASS_STATUS_PENDING:
+    if offer.status != PASS_STATUS_PENDING or pass_offer_expired(offer, now=now):
         return False
     now = now or datetime.now(timezone.utc)
     anchor = offer.last_reminder_at or offer.created_at
     elapsed = (now - _parse_iso_datetime(anchor)).total_seconds()
     return elapsed >= PASS_REMINDER_SECONDS
+
+
+def pass_offer_expired(offer: PassOffer, *, now: datetime | None = None) -> bool:
+    if offer.status != PASS_STATUS_PENDING:
+        return False
+    now = now or datetime.now(timezone.utc)
+    elapsed = (now - _parse_iso_datetime(offer.created_at)).total_seconds()
+    return elapsed >= PASS_EXPIRE_SECONDS
 
 
 async def pass_reminder_loop(bot, settings: Settings, bot_data: dict) -> None:
@@ -90,6 +127,9 @@ async def pass_reminder_loop(bot, settings: Settings, bot_data: dict) -> None:
             await asyncio.sleep(PASS_REMINDER_POLL_SECONDS)
             now = datetime.now(timezone.utc)
             for offer in list_pending_pass_offers(settings.database_path):
+                if pass_offer_expired(offer, now=now):
+                    await _expire_pass_offer(bot, settings, offer.id)
+                    continue
                 if not pass_reminder_due(offer, now=now):
                     continue
                 await _send_pass_reminder(bot, settings, offer.id)
@@ -103,11 +143,17 @@ async def _send_pass_reminder(bot, settings: Settings, offer_id: int) -> None:
     offer = get_pass_offer(settings.database_path, offer_id)
     if offer is None or offer.status != PASS_STATUS_PENDING:
         return
+    if pass_offer_expired(offer):
+        await _expire_pass_offer(bot, settings, offer_id)
+        return
     if not pass_reminder_due(offer):
         return
 
     try:
-        await _ping_assignee(bot, offer, reminder=True)
+        if offer.manual_override:
+            await _ping_manual_override(bot, settings, offer, reminder=True)
+        else:
+            await _ping_assignee(bot, offer, reminder=True)
         update_pass_offer(
             settings.database_path,
             offer.id,
@@ -205,16 +251,30 @@ def _next_queue_assignee(
     queue: list[PassQueueEntry],
     *,
     exclude_user_id: int | None = None,
+    exclude_user_ids: set[int] | frozenset[int] | None = None,
     busy_user_ids: set[int] | frozenset[int] | None = None,
 ) -> PassQueueEntry | None:
     busy = busy_user_ids or frozenset()
+    excluded = set(exclude_user_ids or ())
+    if exclude_user_id is not None:
+        excluded.add(exclude_user_id)
     for entry in queue:
-        if exclude_user_id is not None and entry.user_id == exclude_user_id:
+        if entry.user_id in excluded:
             continue
         if entry.user_id in busy:
             continue
         return entry
     return None
+
+
+def _queue_finisher_ids(queue: list[PassQueueEntry], *, starter_user_id: int) -> set[int]:
+    return {entry.user_id for entry in queue if entry.user_id != starter_user_id}
+
+
+def _is_queue_finisher(path: str, user_id: int, *, starter_user_id: int) -> bool:
+    if user_id == starter_user_id:
+        return False
+    return any(entry.user_id == user_id for entry in list_pass_queue(path))
 
 
 def _busy_pass_assignees(settings: Settings, chat_id: int, *, exclude_offer_id: int | None = None) -> set[int]:
@@ -231,14 +291,109 @@ async def _send_pass_offer_message(
     *,
     reply_to_message_id: int | None = None,
     reminder: bool = False,
+    text: str | None = None,
 ):
     return await bot.send_message(
         chat_id=offer.chat_id,
-        text=_pass_offer_text(offer, reminder=reminder),
+        text=text or _pass_offer_text(offer, reminder=reminder),
         parse_mode="HTML",
         reply_markup=_pass_keyboard(offer.id),
         reply_to_message_id=reply_to_message_id,
     )
+
+
+async def _ping_manual_override(
+    bot,
+    settings: Settings,
+    offer: PassOffer,
+    *,
+    reminder: bool = False,
+) -> None:
+    queue = list_pass_queue(settings.database_path)
+    text = _manual_override_text(
+        queue,
+        starter_user_id=offer.starter_user_id,
+        reminder=reminder,
+    )
+    reply_to = offer.offer_message_id or offer.notes_message_id
+    if offer.offer_message_id is not None:
+        try:
+            await bot.edit_message_text(
+                text,
+                chat_id=offer.chat_id,
+                message_id=offer.offer_message_id,
+                parse_mode="HTML",
+                reply_markup=_pass_keyboard(offer.id),
+            )
+        except BadRequest:
+            logger.warning("Could not edit manual override message %s", offer.offer_message_id)
+    await _send_pass_offer_message(
+        bot,
+        offer,
+        reply_to_message_id=reply_to,
+        reminder=reminder,
+        text=text,
+    )
+
+
+async def _expire_pass_offer(bot, settings: Settings, offer_id: int) -> None:
+    offer = get_pass_offer(settings.database_path, offer_id)
+    if offer is None or offer.status != PASS_STATUS_PENDING:
+        return
+    update_pass_offer(settings.database_path, offer.id, status=PASS_STATUS_EXPIRED)
+    try:
+        await bot.send_message(
+            chat_id=offer.chat_id,
+            text="⏱ <b>Pass timed out</b> — no one took it within 10 minutes.",
+            parse_mode="HTML",
+            reply_to_message_id=offer.notes_message_id,
+        )
+    except BadRequest:
+        logger.warning("Could not send pass expiry notice for offer %s", offer.id)
+    except Exception:
+        logger.exception("Failed to expire pass offer %s", offer.id)
+    logger.info("pass expired chat=%s offer=%s", offer.chat_id, offer.id)
+
+
+async def _activate_manual_override(
+    bot,
+    settings: Settings,
+    offer: PassOffer,
+    *,
+    brushed_text: str | None = None,
+    reply_to_message_id: int | None = None,
+) -> None:
+    path = settings.database_path
+    update_pass_offer(path, offer.id, manual_override=True, reset_reminder=True)
+    refreshed = get_pass_offer(path, offer.id)
+    assert refreshed is not None
+    queue = list_pass_queue(path)
+    text = _manual_override_text(queue, starter_user_id=offer.starter_user_id)
+    if brushed_text:
+        text = f"{brushed_text}\n\n{text}"
+    reply_to = reply_to_message_id or offer.notes_message_id
+    try:
+        offer_message = await _send_pass_offer_message(
+            bot,
+            refreshed,
+            reply_to_message_id=reply_to,
+            text=text,
+        )
+        update_pass_offer(
+            path,
+            offer.id,
+            offer_message_id=offer_message.message_id,
+        )
+        logger.info(
+            "pass manual override chat=%s offer=%s finishers=%s",
+            offer.chat_id,
+            offer.id,
+            len(queue),
+        )
+    except BadRequest:
+        logger.warning("Failed to send manual override for offer %s", offer.id)
+    except Exception:
+        logger.exception("Failed to activate manual override for offer %s", offer.id)
 
 
 async def _ping_assignee(
@@ -531,7 +686,7 @@ async def _offer_pass(
         await notes_message.reply_text(
             f"📝 {starter_mention} — <b>add balance to your notes</b>\n\n"
             "e.g. <code>current 13004</code>, <code>savings £2834</code>, "
-            "<code>£3737.38 current</code>, <code>LT - 23232</code>, or <code>bala 3222</code>",
+            "<code>£3737.38 current</code>, <code>£5000</code>, or <code>bala 3222</code>",
             parse_mode="HTML",
         )
         return
@@ -643,10 +798,28 @@ async def pass_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if offer is None:
         await query.answer("This pass is no longer available.")
         return
+    if offer.status == PASS_STATUS_EXPIRED:
+        await query.answer("This pass timed out.", show_alert=True)
+        return
     if offer.status != PASS_STATUS_PENDING:
         await query.answer("This pass was already handled.")
         return
-    if user.id != offer.assigned_user_id:
+    if pass_offer_expired(offer):
+        await _expire_pass_offer(context.bot, settings, offer.id)
+        await query.answer("This pass timed out.", show_alert=True)
+        return
+
+    if action == "brush" and offer.manual_override:
+        await query.answer("Manual override — take the pass or wait for timeout.", show_alert=True)
+        return
+
+    if action == "take" and offer.manual_override:
+        if not _is_queue_finisher(
+            settings.database_path, user.id, starter_user_id=offer.starter_user_id
+        ):
+            await query.answer("Only finishers in the queue can take this pass.", show_alert=True)
+            return
+    elif user.id != offer.assigned_user_id:
         await query.answer("This pass is assigned to someone else.", show_alert=True)
         return
 
@@ -722,6 +895,7 @@ async def _handle_brush_pass(
 
     path = settings.database_path
     rotate_pass_queue_user_to_back(path, user.id)
+    record_pass_offer_brush(path, offer.id, user.id)
     brushed_text = _pass_brushed_text(user)
     try:
         await query.edit_message_text(
@@ -733,47 +907,61 @@ async def _handle_brush_pass(
 
     queue = list_pass_queue(path)
     busy = _busy_pass_assignees(settings, offer.chat_id, exclude_offer_id=offer.id)
+    brushed_ids = get_pass_offer_brushed_user_ids(path, offer.id)
     next_user = _next_queue_assignee(
         queue,
-        exclude_user_id=user.id,
+        exclude_user_id=offer.starter_user_id,
+        exclude_user_ids=brushed_ids,
         busy_user_ids=busy,
     )
-    if next_user is None:
-        update_pass_offer(path, offer.id, status=PASS_STATUS_BRUSHED)
-        try:
-            await query.edit_message_text(
-                f"{brushed_text}\n\nNo one else free in queue.\n\nFinishers: /joinqueue",
-                parse_mode="HTML",
-            )
-        except BadRequest:
-            pass
-        await query.answer("Brushed — no one else free.")
-        return
-
-    update_pass_offer(
-        path,
-        offer.id,
-        assigned_user_id=next_user.user_id,
-        assigned_username=next_user.telegram_username,
-        assigned_display_name=next_user.display_name,
-        reset_reminder=True,
-    )
-    refreshed = get_pass_offer(path, offer.id)
-    assert refreshed is not None
-    reply_to = offer.notes_message_id or query.message.message_id
-    try:
-        offer_message = await _send_pass_offer_message(
-            context.bot,
-            refreshed,
-            reply_to_message_id=reply_to,
-        )
+    if next_user is not None:
         update_pass_offer(
             path,
             offer.id,
-            offer_message_id=offer_message.message_id,
+            assigned_user_id=next_user.user_id,
+            assigned_username=next_user.telegram_username,
+            assigned_display_name=next_user.display_name,
+            reset_reminder=True,
+        )
+        refreshed = get_pass_offer(path, offer.id)
+        assert refreshed is not None
+        reply_to = offer.notes_message_id or query.message.message_id
+        try:
+            offer_message = await _send_pass_offer_message(
+                context.bot,
+                refreshed,
+                reply_to_message_id=reply_to,
+            )
+            update_pass_offer(
+                path,
+                offer.id,
+                offer_message_id=offer_message.message_id,
+            )
+        except BadRequest:
+            logger.warning("Failed to send brushed pass handoff for offer %s", offer.id)
+        except Exception:
+            logger.exception("Failed to hand off pass %s to user %s", offer.id, next_user.user_id)
+        await query.answer("Brushed — offered to next in queue.")
+        return
+
+    finisher_ids = _queue_finisher_ids(queue, starter_user_id=offer.starter_user_id)
+    if finisher_ids and finisher_ids <= brushed_ids:
+        await _activate_manual_override(
+            context.bot,
+            settings,
+            offer,
+            brushed_text=brushed_text,
+            reply_to_message_id=offer.notes_message_id or query.message.message_id,
+        )
+        await query.answer("Brushed — manual override open for everyone.")
+        return
+
+    update_pass_offer(path, offer.id, status=PASS_STATUS_BRUSHED)
+    try:
+        await query.edit_message_text(
+            f"{brushed_text}\n\nNo one else free in queue.\n\nFinishers: /joinqueue",
+            parse_mode="HTML",
         )
     except BadRequest:
-        logger.warning("Failed to send brushed pass handoff for offer %s", offer.id)
-    except Exception:
-        logger.exception("Failed to hand off pass %s to user %s", offer.id, next_user.user_id)
-    await query.answer("Brushed — offered to next in queue.")
+        pass
+    await query.answer("Brushed — no one else free.")
