@@ -31,6 +31,7 @@ from database import (
     list_pending_pass_offers,
     pass_offer_for_notes,
     pending_pass_assignee_user_ids,
+    pending_pass_offer_for_notes,
     record_pass_offer_brush,
     remove_pass_queue_vip,
     rotate_pass_queue_user_to_back,
@@ -312,6 +313,97 @@ async def _send_pass_offer_message(
     )
 
 
+async def _deliver_pass_offer(
+    bot,
+    path: str,
+    offer: PassOffer,
+    *,
+    reply_to_message_id: int | None = None,
+    text: str | None = None,
+    reminder: bool = False,
+) -> bool:
+    """Post a pass offer to the group; retry without reply if the notes message is gone."""
+    try:
+        offer_message = await _send_pass_offer_message(
+            bot,
+            offer,
+            reply_to_message_id=reply_to_message_id,
+            text=text,
+            reminder=reminder,
+        )
+    except BadRequest:
+        if reply_to_message_id is None:
+            logger.warning(
+                "Failed to deliver pass offer %s to chat %s",
+                offer.id,
+                offer.chat_id,
+            )
+            return False
+        try:
+            offer_message = await _send_pass_offer_message(
+                bot,
+                offer,
+                text=text,
+                reminder=reminder,
+            )
+        except BadRequest:
+            logger.warning(
+                "Failed to deliver pass offer %s to chat %s (no reply target)",
+                offer.id,
+                offer.chat_id,
+            )
+            return False
+    except Exception:
+        logger.exception("Failed to deliver pass offer %s", offer.id)
+        return False
+
+    update_pass_offer(
+        path,
+        offer.id,
+        offer_message_id=offer_message.message_id,
+    )
+    return True
+
+
+async def _try_deliver_pending_to_free_finisher(
+    bot,
+    path: str,
+    *,
+    chat_id: int | None = None,
+) -> bool:
+    """When a finisher frees up, offer the oldest waiting notes to the next free person."""
+    queue = list_pass_queue(path)
+    busy = pending_pass_assignee_user_ids(path, chat_id=chat_id)
+    for entry in queue:
+        if entry.user_id in busy:
+            continue
+        offer = assign_pending_pass_to_user(
+            path,
+            assigned_user_id=entry.user_id,
+            assigned_username=entry.telegram_username,
+            assigned_display_name=entry.display_name,
+        )
+        if offer is None:
+            continue
+        if chat_id is not None and offer.chat_id != chat_id:
+            continue
+        if await _deliver_pass_offer(
+            bot,
+            path,
+            offer,
+            reply_to_message_id=offer.notes_message_id,
+        ):
+            logger.info(
+                "pending pass auto-assigned chat=%s notes_msg=%s assigned=%s offer=%s",
+                offer.chat_id,
+                offer.notes_message_id,
+                entry.user_id,
+                offer.id,
+            )
+            return True
+    return False
+
+
 async def _ping_manual_override(
     bot,
     settings: Settings,
@@ -379,27 +471,13 @@ async def _activate_manual_override(
     if brushed_text:
         text = f"{brushed_text}\n\n{text}"
     reply_to = reply_to_message_id or offer.notes_message_id
-    try:
-        offer_message = await _send_pass_offer_message(
-            bot,
-            refreshed,
-            reply_to_message_id=reply_to,
-            text=text,
-        )
-        update_pass_offer(
-            path,
-            offer.id,
-            offer_message_id=offer_message.message_id,
-        )
-        logger.info(
-            "pass manual override chat=%s offer=%s",
-            offer.chat_id,
-            offer.id,
-        )
-    except BadRequest:
-        logger.warning("Failed to send manual override for offer %s", offer.id)
-    except Exception:
-        logger.exception("Failed to activate manual override for offer %s", offer.id)
+    await _deliver_pass_offer(
+        bot,
+        path,
+        refreshed,
+        reply_to_message_id=reply_to,
+        text=text,
+    )
 
 
 async def _ping_assignee(
@@ -445,49 +523,54 @@ async def joinqueue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     position = get_pass_queue_position(path, user.id)
     vip_note = " ⭐ VIP — ahead of standard finishers." if is_pass_queue_vip(path, user.id) else ""
-    if joined:
-        pending_offer = assign_pending_pass_to_user(
+
+    pending_offer = assign_pending_pass_to_user(
+        path,
+        assigned_user_id=user.id,
+        assigned_username=user.username,
+        assigned_display_name=_display_name(user),
+    )
+    if pending_offer is not None:
+        sent = await _deliver_pass_offer(
+            context.bot,
             path,
-            assigned_user_id=user.id,
-            assigned_username=user.username,
-            assigned_display_name=_display_name(user),
+            pending_offer,
+            reply_to_message_id=pending_offer.notes_message_id,
         )
-        if pending_offer is not None:
-            try:
-                offer_message = await _send_pass_offer_message(
-                    context.bot,
-                    pending_offer,
-                    reply_to_message_id=pending_offer.notes_message_id,
-                )
-                update_pass_offer(
-                    path,
-                    pending_offer.id,
-                    offer_message_id=offer_message.message_id,
-                )
-                logger.info(
-                    "pending pass assigned on join chat=%s notes_msg=%s assigned=%s offer=%s",
-                    pending_offer.chat_id,
-                    pending_offer.notes_message_id,
-                    user.id,
-                    pending_offer.id,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to send pending pass on join user=%s offer=%s",
-                    user.id,
-                    pending_offer.id,
-                )
-            await message.reply_text(
-                f"✅ You're in the pass queue (#{position}).{vip_note}\n"
-                "A waiting pass was sent to the group.",
-                parse_mode="HTML",
+        if sent:
+            logger.info(
+                "pending pass assigned chat=%s notes_msg=%s assigned=%s offer=%s",
+                pending_offer.chat_id,
+                pending_offer.notes_message_id,
+                user.id,
+                pending_offer.id,
             )
-        else:
-            await message.reply_text(
-                f"✅ You're in the pass queue (#{position}).{vip_note}\n"
-                "You'll get @mentioned when a starter posts notes.",
-                parse_mode="HTML",
-            )
+            if joined:
+                await message.reply_text(
+                    f"✅ You're in the pass queue (#{position}).{vip_note}\n"
+                    "A waiting pass was sent to the group.",
+                    parse_mode="HTML",
+                )
+            else:
+                await message.reply_text(
+                    f"You're already in the queue (#{position}).{vip_note}\n"
+                    "A waiting pass was sent to the group.",
+                    parse_mode="HTML",
+                )
+            return
+        await message.reply_text(
+            f"{'✅ ' if joined else ''}You're in the pass queue (#{position}).{vip_note}\n"
+            "Waiting pass assigned but could not post to the group — try /joinqueue again.",
+            parse_mode="HTML",
+        )
+        return
+
+    if joined:
+        await message.reply_text(
+            f"✅ You're in the pass queue (#{position}).{vip_note}\n"
+            "You'll get @mentioned when a starter posts notes.",
+            parse_mode="HTML",
+        )
     else:
         await message.reply_text(
             f"You're already in the queue (#{position}).{vip_note}",
@@ -654,7 +737,7 @@ async def notes_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if parent and parent.from_user and not parent.from_user.is_bot:
         parent_text = (parent.text or parent.caption or "").strip()
         if parent_text and looks_like_notes(parent_text, queue_waiting=True):
-            if pass_offer_for_notes(settings.database_path, chat.id, parent.message_id):
+            if pending_pass_offer_for_notes(settings.database_path, chat.id, parent.message_id):
                 return
             await _offer_pass(
                 update,
@@ -667,7 +750,7 @@ async def notes_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not looks_like_notes(text, queue_waiting=queue_waiting):
         return
-    if pass_offer_for_notes(settings.database_path, chat.id, message.message_id):
+    if pending_pass_offer_for_notes(settings.database_path, chat.id, message.message_id):
         return
 
     await _offer_pass(
@@ -693,7 +776,7 @@ async def _offer_pass(
     if not message or not chat or starter is None:
         return
 
-    if pass_offer_for_notes(
+    if pending_pass_offer_for_notes(
         settings.database_path, chat.id, notes_message.message_id
     ):
         return
@@ -783,16 +866,18 @@ async def _offer_pass(
         )
         created = get_pass_offer(settings.database_path, offer_id)
         assert created is not None
-        offer_message = await notes_message.reply_text(
-            _pass_offer_text(created),
-            parse_mode="HTML",
-            reply_markup=_pass_keyboard(offer_id),
-        )
-        update_pass_offer(
+        if not await _deliver_pass_offer(
+            context.bot,
             settings.database_path,
-            offer_id,
-            offer_message_id=offer_message.message_id,
-        )
+            created,
+            reply_to_message_id=notes_message.message_id,
+        ):
+            logger.warning(
+                "Pass offer %s created but could not post to chat %s",
+                offer_id,
+                chat.id,
+            )
+            return
         logger.info(
             "pass offer chat=%s notes_msg=%s starter=%s assigned=%s offer=%s",
             chat.id,
@@ -918,6 +1003,11 @@ async def _handle_take_pass(
     except BadRequest:
         pass
     await query.answer(answer_text)
+    await _try_deliver_pending_to_free_finisher(
+        context.bot,
+        settings.database_path,
+        chat_id=offer.chat_id,
+    )
 
 
 async def _handle_brush_pass(
@@ -964,21 +1054,17 @@ async def _handle_brush_pass(
         refreshed = get_pass_offer(path, offer.id)
         assert refreshed is not None
         reply_to = offer.notes_message_id or query.message.message_id
-        try:
-            offer_message = await _send_pass_offer_message(
-                context.bot,
-                refreshed,
-                reply_to_message_id=reply_to,
-            )
-            update_pass_offer(
-                path,
-                offer.id,
-                offer_message_id=offer_message.message_id,
-            )
-        except BadRequest:
-            logger.warning("Failed to send brushed pass handoff for offer %s", offer.id)
-        except Exception:
-            logger.exception("Failed to hand off pass %s to user %s", offer.id, next_user.user_id)
+        await _deliver_pass_offer(
+            context.bot,
+            path,
+            refreshed,
+            reply_to_message_id=reply_to,
+        )
+        await _try_deliver_pending_to_free_finisher(
+            context.bot,
+            path,
+            chat_id=offer.chat_id,
+        )
         await query.answer("Brushed — offered to next in queue.")
         return
 

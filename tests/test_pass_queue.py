@@ -41,6 +41,7 @@ from database import (  # noqa: E402
     list_pending_pass_offers,
     pass_offer_for_notes,
     pending_pass_assignee_user_ids,
+    pending_pass_offer_for_notes,
     record_pass_offer_brush,
     remove_pass_queue_vip,
     rotate_pass_queue_user_to_back,
@@ -161,11 +162,14 @@ also has hsbc"""
 
         context = MagicMock()
         context.bot_data = {"settings": settings}
+        context.bot.send_message = AsyncMock(
+            return_value=SimpleNamespace(message_id=502)
+        )
 
         await pass_queue.notes_message_handler(update, context)
 
-        notes_message.reply_text.assert_awaited()
-        args, kwargs = notes_message.reply_text.await_args
+        context.bot.send_message.assert_awaited()
+        args, kwargs = context.bot.send_message.await_args
         text = kwargs.get("text", args[0] if args else "")
         self.assertIn("Take this pass", text)
         self.assertIn("Quick look", text)
@@ -222,11 +226,14 @@ also has hsbc"""
 
         context = MagicMock()
         context.bot_data = {"settings": settings}
+        context.bot.send_message = AsyncMock(
+            return_value=SimpleNamespace(message_id=502)
+        )
 
         await pass_queue.notes_message_handler(update, context)
 
-        notes_message.reply_text.assert_awaited_once()
-        args, kwargs = notes_message.reply_text.await_args
+        context.bot.send_message.assert_awaited_once()
+        args, kwargs = context.bot.send_message.await_args
         text = kwargs.get("text", args[0] if args else "")
         self.assertIn("Take this pass", text)
         self.assertIn("finisher2", text.lower())
@@ -418,14 +425,18 @@ also has hsbc"""
 
         context = MagicMock()
         context.bot_data = {"settings": settings}
+        context.bot.send_message = AsyncMock(
+            return_value=SimpleNamespace(message_id=503)
+        )
 
         await pass_queue.notes_message_handler(update, context)
 
-        parent.reply_text.assert_awaited_once()
-        args, kwargs = parent.reply_text.await_args
+        context.bot.send_message.assert_awaited_once()
+        args, kwargs = context.bot.send_message.await_args
         text = kwargs.get("text", args[0] if args else "")
         self.assertIn("Take this pass", text)
         self.assertIn("Read full notes before taking pass", text)
+        self.assertEqual(kwargs.get("reply_to_message_id"), 500)
 
     async def test_joinqueue_assigns_pending_pass_to_new_finisher(self):
         from config import load_settings
@@ -485,6 +496,57 @@ also has hsbc"""
         reply_args, reply_kwargs = message.reply_text.await_args
         reply_text = reply_kwargs.get("text", reply_args[0] if reply_args else "")
         self.assertIn("waiting pass was sent", reply_text)
+
+    async def test_joinqueue_assigns_pending_when_already_in_queue(self):
+        from config import load_settings
+
+        join_pass_queue(
+            self.db_path,
+            telegram_user_id=333,
+            telegram_username="free",
+            display_name="Free",
+        )
+        upsert_pending_pass_note(
+            self.db_path,
+            chat_id=-100,
+            notes_message_id=601,
+            starter_user_id=222,
+            starter_username="starter",
+            starter_display_name="Starter",
+            notes_text="notes with current 1000",
+        )
+
+        os.environ["DATABASE_PATH"] = self.db_path
+        settings = load_settings()
+
+        user = SimpleNamespace(
+            id=333,
+            username="free",
+            first_name="Free",
+            last_name="",
+            is_bot=False,
+        )
+        message = MagicMock()
+        message.reply_text = AsyncMock()
+
+        update = MagicMock()
+        update.effective_user = user
+        update.effective_message = message
+
+        context = MagicMock()
+        context.bot_data = {"settings": settings}
+        context.bot.send_message = AsyncMock(
+            return_value=SimpleNamespace(message_id=602)
+        )
+
+        await pass_queue.joinqueue_command(update, context)
+
+        context.bot.send_message.assert_awaited()
+        message.reply_text.assert_awaited()
+        args, kwargs = message.reply_text.await_args
+        text = kwargs.get("text", args[0] if args else "")
+        self.assertIn("waiting pass was sent", text)
+        self.assertIn("already in the queue", text)
 
     async def test_manual_override_take_by_non_queue_user(self):
         from config import load_settings
@@ -764,7 +826,8 @@ also has hsbc"""
         summary = extract_notes_pass_summary(self.EXAMPLE)
         self.assertIn("balance", (summary.balance or "").lower())
         self.assertEqual(summary.dob, "23/02/1943")
-        self.assertEqual(summary.bank, "Barclays")
+        self.assertIn("Barclays", summary.bank or "")
+        self.assertIn("Hsbc", summary.bank or "")
 
     def test_notes_pass_summary_ian_davis(self):
         summary = extract_notes_pass_summary(self.EXAMPLE_1)
@@ -820,6 +883,22 @@ Cookie level : 1000/10"""
         self.assertIn("🪙", html_summary)
         self.assertIn("1000/10", html_summary)
         self.assertTrue(notes_has_balance(notes))
+
+    def test_notes_pass_summary_multiple_banks(self):
+        notes = """Robert Gomm
+2/3/1944
+Halifax main bank last 4 dig 3378
+barclays
+hsbc
+current 5000"""
+        summary = extract_notes_pass_summary(notes)
+        self.assertIn("Halifax", summary.bank or "")
+        self.assertIn("Barclays", summary.bank or "")
+        self.assertIn("Hsbc", summary.bank or "")
+        self.assertEqual(
+            summary.bank,
+            "Halifax · Barclays · Hsbc",
+        )
 
     def test_notes_missing_balance(self):
         self.assertFalse(notes_has_balance("james adams 31/01/2000 bk"))
@@ -963,6 +1042,46 @@ class PassQueueDbTests(unittest.TestCase):
         )
         self.assertIsNone(offer)
         self.assertEqual(len(list_pending_pass_notes(self.db_path)), 1)
+
+    def test_assign_pending_after_taken_offer_on_same_notes(self):
+        offer_id = create_pass_offer(
+            self.db_path,
+            chat_id=-100,
+            notes_message_id=501,
+            starter_user_id=222,
+            starter_username="starter",
+            starter_display_name="Starter",
+            assigned_user_id=111,
+            assigned_username="finisher",
+            assigned_display_name="Finisher",
+            notes_text="old pass",
+        )
+        update_pass_offer(self.db_path, offer_id, status="taken")
+        upsert_pending_pass_note(
+            self.db_path,
+            chat_id=-100,
+            notes_message_id=501,
+            starter_user_id=222,
+            starter_username="starter",
+            starter_display_name="Starter",
+            notes_text="notes with current 1000",
+        )
+        join_pass_queue(
+            self.db_path,
+            telegram_user_id=333,
+            telegram_username="free",
+            display_name="Free",
+        )
+        offer = assign_pending_pass_to_user(
+            self.db_path,
+            assigned_user_id=333,
+            assigned_username="free",
+            assigned_display_name="Free",
+        )
+        self.assertIsNotNone(offer)
+        assert offer is not None
+        self.assertEqual(offer.status, "pending")
+        self.assertTrue(pending_pass_offer_for_notes(self.db_path, -100, 501))
 
     def test_clear_circulating_pass_notes(self):
         create_pass_offer(

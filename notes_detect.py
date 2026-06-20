@@ -307,17 +307,35 @@ def _extract_dob(text: str) -> str | None:
     return match.group(0) if match else None
 
 
-def _extract_bank(text: str) -> str | None:
-    for line in _non_empty_lines(text):
-        if re.fullmatch(r"(?i)bk", line.strip()):
-            return "Bk"
-    match = BANK_NAME.search(text)
-    if not match:
-        return None
-    bank = match.group(1)
+def _normalize_bank_name(bank: str) -> str:
+    if bank.lower() == "bk":
+        return "Bk"
     if bank.lower().startswith("barclay"):
         return "Barclaycard" if "card" in bank.lower() else "Barclays"
+    if bank.lower().replace(" ", "") == "capitalone":
+        return "Capital One"
     return bank.title()
+
+
+def _extract_bank(text: str) -> str | None:
+    seen: set[str] = set()
+    parts: list[str] = []
+
+    def add_bank(raw: str) -> None:
+        normalized = _normalize_bank_name(raw)
+        key = normalized.lower()
+        if key not in seen:
+            seen.add(key)
+            parts.append(normalized)
+
+    for line in _non_empty_lines(text):
+        stripped = line.strip()
+        if re.fullmatch(r"(?i)bk", stripped):
+            add_bank("bk")
+        for match in BANK_NAME.finditer(stripped):
+            add_bank(match.group(1))
+
+    return " · ".join(parts) if parts else None
 
 
 def _extract_online_status(text: str) -> str | None:

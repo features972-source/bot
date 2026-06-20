@@ -2361,6 +2361,18 @@ def pass_offer_for_notes(path: str, chat_id: int, notes_message_id: int) -> bool
     return row is not None
 
 
+def pending_pass_offer_for_notes(path: str, chat_id: int, notes_message_id: int) -> bool:
+    with _connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM pass_offers
+            WHERE chat_id = ? AND notes_message_id = ? AND status = 'pending'
+            """,
+            (chat_id, notes_message_id),
+        ).fetchone()
+    return row is not None
+
+
 _PENDING_PASS_NOTE_SELECT = """
     SELECT
         id,
@@ -2488,9 +2500,34 @@ def assign_pending_pass_to_user(
     for pending in list_pending_pass_notes(path):
         if pending.starter_user_id == assigned_user_id:
             continue
-        if pass_offer_for_notes(path, pending.chat_id, pending.notes_message_id):
+        if pending_pass_offer_for_notes(path, pending.chat_id, pending.notes_message_id):
             delete_pending_pass_note(path, pending.chat_id, pending.notes_message_id)
             continue
+        with _connect(path) as conn:
+            stale_ids = [
+                int(row[0])
+                for row in conn.execute(
+                    """
+                    SELECT id FROM pass_offers
+                    WHERE chat_id = ? AND notes_message_id = ? AND status != 'pending'
+                    """,
+                    (pending.chat_id, pending.notes_message_id),
+                ).fetchall()
+            ]
+            if stale_ids:
+                placeholders = ",".join("?" * len(stale_ids))
+                conn.execute(
+                    f"DELETE FROM pass_offer_brushed WHERE offer_id IN ({placeholders})",
+                    stale_ids,
+                )
+                conn.execute(
+                    """
+                    DELETE FROM pass_offers
+                    WHERE chat_id = ? AND notes_message_id = ? AND status != 'pending'
+                    """,
+                    (pending.chat_id, pending.notes_message_id),
+                )
+                conn.commit()
         offer_id = create_pass_offer(
             path,
             chat_id=pending.chat_id,
