@@ -172,9 +172,7 @@ also has hsbc"""
         args, kwargs = context.bot.send_message.await_args
         text = kwargs.get("text", args[0] if args else "")
         self.assertIn("Take this pass", text)
-        self.assertIn("Quick look", text)
-        self.assertIn("Balance", text)
-        self.assertIn("DOB", text)
+        self.assertNotIn("Quick look", text)
 
     async def test_notes_handler_assigns_second_note_to_next_free_finisher(self):
         from config import load_settings
@@ -435,7 +433,7 @@ also has hsbc"""
         args, kwargs = context.bot.send_message.await_args
         text = kwargs.get("text", args[0] if args else "")
         self.assertIn("Take this pass", text)
-        self.assertIn("Read full notes before taking pass", text)
+        self.assertNotIn("Read full notes before taking pass", text)
         self.assertEqual(kwargs.get("reply_to_message_id"), 500)
 
     async def test_joinqueue_assigns_pending_pass_to_new_finisher(self):

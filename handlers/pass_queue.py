@@ -40,7 +40,6 @@ from database import (
 )
 from handlers.admin_access import require_admin
 from notes_detect import (
-    format_notes_summary_html,
     looks_like_notes,
     notes_balance_only,
     notes_has_balance,
@@ -60,50 +59,26 @@ PASS_EXPIRE_SECONDS = 600
 PASS_NOTES_FILTER = filters.ChatType.GROUPS & ~filters.COMMAND
 
 
-def _pass_summary_block(notes_text: str) -> str:
-    summary = format_notes_summary_html(notes_text)
-    if not summary:
-        return ""
-    return f"{summary}\n\n"
-
-
-def _pass_read_line() -> str:
-    return "👀 <i>Read full notes before taking pass.</i>"
-
-
 def _pass_offer_text(offer: PassOffer, *, reminder: bool = False) -> str:
     suffix = " ⏰" if reminder else ""
-    summary = _pass_summary_block(offer.notes_text)
-    read_line = _pass_read_line()
     if offer.manual_override:
         return (
             f"🚨 <b>Manual override open</b>{suffix}\n"
-            "Anyone can take this pass — no queue needed.\n\n"
-            f"{summary}{read_line}"
+            "Anyone can take this pass — no queue needed."
         )
     mention = _mention_html(
         offer.assigned_user_id,
         offer.assigned_username,
         offer.assigned_display_name,
     )
-    return (
-        f"{mention} — 📞 <b>Take this pass</b>{suffix}\n\n"
-        f"{summary}{read_line}"
-    )
+    return f"{mention} — 📞 <b>Take this pass</b>{suffix}"
 
 
-def _manual_override_text(
-    *,
-    notes_text: str,
-    reminder: bool = False,
-) -> str:
-    summary = _pass_summary_block(notes_text)
-    read_line = _pass_read_line()
+def _manual_override_text(*, reminder: bool = False) -> str:
     suffix = " ⏰" if reminder else ""
     return (
         f"🚨 <b>Manual override open</b>{suffix}\n"
-        "Anyone can take this pass — no queue needed.\n\n"
-        f"{summary}{read_line}"
+        "Anyone can take this pass — no queue needed."
     )
 
 
@@ -411,10 +386,7 @@ async def _ping_manual_override(
     *,
     reminder: bool = False,
 ) -> None:
-    text = _manual_override_text(
-        notes_text=offer.notes_text,
-        reminder=reminder,
-    )
+    text = _manual_override_text(reminder=reminder)
     reply_to = offer.offer_message_id or offer.notes_message_id
     if offer.offer_message_id is not None:
         try:
@@ -467,7 +439,7 @@ async def _activate_manual_override(
     update_pass_offer(path, offer.id, manual_override=True, reset_reminder=True)
     refreshed = get_pass_offer(path, offer.id)
     assert refreshed is not None
-    text = _manual_override_text(notes_text=offer.notes_text)
+    text = _manual_override_text()
     if brushed_text:
         text = f"{brushed_text}\n\n{text}"
     reply_to = reply_to_message_id or offer.notes_message_id

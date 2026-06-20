@@ -85,7 +85,7 @@ def _pass_queue_help_block(*, admin: bool) -> str:
         "• If no finisher is free, notes are saved and offered when someone /joinqueue\n"
         "• Starters can't take their own pass — another finisher must join\n\n"
         "<i>When assigned:</i>\n"
-        "• Take pass — notes sent to your DM (read notes before taking)\n"
+        "• Take pass — full notes sent to your DM\n"
         "• Brush pass — skip and offer to the next finisher in queue\n"
         "• If everyone brushes, manual override opens — anyone can take (no queue needed)\n"
         "• 1-minute reminders until take/brush; pass expires after 10 minutes with no taker"
