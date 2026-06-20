@@ -440,15 +440,58 @@ def _allocate_card_name(database_path: str, desired: str) -> str:
         n += 1
 
 
+def _sorted_cards_for_base(database_path: str, base_name: str) -> list:
+    """Cards sharing a base name (Lloyds / Lloyds #2), oldest first — matches picker #1, #2."""
+    base_lower = _base_card_name(base_name).lower()
+    cards = [
+        c
+        for c in list_credo_credit_cards(database_path)
+        if c.photo_file_id and _base_card_name(c.name).lower() == base_lower
+    ]
+    cards.sort(key=lambda c: (c.added_at or "", c.name.lower()))
+    return cards
+
+
+def _parse_card_query_index(query: str) -> tuple[str, int | None]:
+    """Split 'Lloyds #2' into base name + 1-based index."""
+    cleaned = re.sub(r"\s+", " ", query.strip())
+    match = re.search(r"#\s*(\d+)\s*$", cleaned, flags=re.IGNORECASE)
+    if not match:
+        return cleaned, None
+    index = int(match.group(1))
+    base = cleaned[: match.start()].strip()
+    return (base or _base_card_name(cleaned)), index
+
+
+def _parse_setlimit_from_message(text: str | None) -> tuple[str, float] | None:
+    """Parse `/setlimit Lloyds #2 10000` from raw text (Telegram drops # from args)."""
+    if not text:
+        return None
+    match = re.match(r"^/(?:setlimit|setcredolimit)(?:@\w+)?\s+(.+)$", text.strip(), re.I)
+    if not match:
+        return None
+    rest = match.group(1).strip()
+    if not rest:
+        return None
+    parts = rest.rsplit(None, 1)
+    if len(parts) != 2:
+        return None
+    card_query, amount_text = parts
+    amount = _parse_usage_amount(amount_text)
+    if amount is None or not card_query.strip():
+        return None
+    return card_query.strip(), amount
+
+
 def _resolve_credo_cards_for_removal(
     database_path: str,
     query: str,
 ) -> tuple[list[str], str | None]:
-    """Map /removecredo argument to DB card name(s). Returns (names, error_hint)."""
+    """Map credo card query to DB card name(s). Returns (names, error_hint)."""
     cleaned = query.strip()
     if not cleaned:
         return [], (
-            "Usage: `/removecredo Lloyds #1`\n\n"
+            "Usage: `/setlimit Lloyds #1 5000`\n\n"
             "Use **/listcredocards** to see exact names."
         )
 
@@ -457,35 +500,35 @@ def _resolve_credo_cards_for_removal(
         return [], "No credo cards on the list."
 
     labels = _card_display_labels(database_path)
+    base, index = _parse_card_query_index(cleaned)
 
-    if re.search(r"#\s*\d", cleaned, flags=re.IGNORECASE):
-        for card in cards:
-            if card.name.lower() == cleaned.lower():
-                return [card.name], None
-        for db_name, label in labels.items():
-            if label.lower() == cleaned.lower():
-                return [db_name], None
-    else:
-        base = _base_card_name(cleaned)
-        matching = [
-            card
-            for card in cards
-            if _base_card_name(card.name).lower() == base.lower()
-        ]
-        if len(matching) > 1:
-            lines = [
-                f"• `/removecredo {labels.get(card.name, card.name)}`"
-                for card in sorted(
-                    matching,
-                    key=lambda c: (c.added_at or "", labels.get(c.name, c.name).lower()),
-                )
-            ]
+    if index is not None:
+        group = _sorted_cards_for_base(database_path, base)
+        if not group:
             return [], (
-                f"**{base}** has {len(matching)} cards on the list. "
-                "Remove one specifically:\n\n" + "\n".join(lines)
+                f"**{cleaned}** was not on the list.\n\n"
+                "Use **/listcredocards** for exact names."
             )
-        if len(matching) == 1:
-            return [matching[0].name], None
+        if index < 1 or index > len(group):
+            return [], (
+                f"**{base} #{index}** was not on the list "
+                f"({len(group)} **{base}** card{'s' if len(group) != 1 else ''} on file).\n\n"
+                "Use **/listcredocards** for exact names."
+            )
+        return [group[index - 1].name], None
+
+    matching = _sorted_cards_for_base(database_path, base)
+    if len(matching) > 1:
+        lines = [
+            f"• `/setlimit {labels.get(card.name, card.name)} 5000`"
+            for card in matching
+        ]
+        return [], (
+            f"**{base}** has {len(matching)} cards on the list. "
+            "Pick one with the **# number**:\n\n" + "\n".join(lines)
+        )
+    if len(matching) == 1:
+        return [matching[0].name], None
 
     for card in cards:
         if card.name.lower() == cleaned.lower():
@@ -1634,6 +1677,7 @@ async def setcredolimit_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.effective_message.reply_text(
             "Set **amount left** on the /cc picker for a card:\n\n"
             "`/setlimit Lloyds #1 5000`\n"
+            "`/setlimit Lloyds #2 10000`\n"
             "`/setlimit Tesco 5k`\n\n"
             "Also works as `/setcredolimit`.\n\n"
             "This clears logged outs for that card and sets the limit to that amount.\n"
@@ -1642,15 +1686,27 @@ async def setcredolimit_command(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    amount = _parse_usage_amount(context.args[-1])
-    if amount is None:
+    message = update.effective_message
+    parsed = _parse_setlimit_from_message(message.text if message else None)
+    if parsed is None:
+        amount = _parse_usage_amount(context.args[-1])
+        if amount is None:
+            await update.effective_message.reply_text(
+                "Send a valid amount like `5000`, `£5000`, or `5k`.",
+                parse_mode="Markdown",
+            )
+            return
+        card_query = " ".join(context.args[:-1]).strip()
+    else:
+        card_query, amount = parsed
+
+    if not card_query:
         await update.effective_message.reply_text(
-            "Send a valid amount like `5000`, `£5000`, or `5k`.",
+            "Send the card name and amount, e.g. `/setlimit Lloyds #2 10000`.",
             parse_mode="Markdown",
         )
         return
 
-    card_query = " ".join(context.args[:-1]).strip()
     matches, hint = _resolve_credo_cards_for_removal(settings.database_path, card_query)
     if hint:
         await update.effective_message.reply_text(hint, parse_mode="Markdown")

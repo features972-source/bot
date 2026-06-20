@@ -17,7 +17,10 @@ os.environ.setdefault("BOT_TOKEN", "0000000000:TEST")
 os.environ.setdefault("CLOUD_DEPLOYED", "true")
 
 from database import init_db, upsert_credo_credit_card  # noqa: E402
-from handlers.credo import _resolve_credo_cards_for_removal  # noqa: E402
+from handlers.credo import (  # noqa: E402
+    _parse_setlimit_from_message,
+    _resolve_credo_cards_for_removal,
+)
 
 
 class CredoRemoveResolveTests(unittest.TestCase):
@@ -48,6 +51,20 @@ class CredoRemoveResolveTests(unittest.TestCase):
         names, hint = _resolve_credo_cards_for_removal(self.db_path, "Lloyds #2")
         self.assertIsNone(hint)
         self.assertEqual(names, ["Lloyds #2"])
+
+    def test_lloyds_hash_two_picks_second_card_in_group(self):
+        """Lloyds + Lloyds #2 in DB — #2 must be the second card, not the first."""
+        names, hint = _resolve_credo_cards_for_removal(self.db_path, "Lloyds #2")
+        self.assertIsNone(hint)
+        self.assertEqual(names, ["Lloyds #2"])
+
+    def test_setlimit_message_parser_keeps_hash(self):
+        parsed = _parse_setlimit_from_message("/setlimit Lloyds #2 10000")
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        card_query, amount = parsed
+        self.assertEqual(card_query, "Lloyds #2")
+        self.assertEqual(amount, 10000.0)
 
     def test_ambiguous_base_name(self):
         names, hint = _resolve_credo_cards_for_removal(self.db_path, "Lloyds")
