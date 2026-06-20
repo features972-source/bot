@@ -25,6 +25,7 @@ from database import (
     leave_pass_queue,
     list_pass_queue,
     list_pending_pass_offers,
+    list_waiting_pass_offers,
     pass_offer_for_notes,
     pending_pass_assignee_user_ids,
     remove_pass_queue_vip,
@@ -40,6 +41,7 @@ CALLBACK_PREFIX = "pass:"
 PASS_STATUS_PENDING = "pending"
 PASS_STATUS_TAKEN = "taken"
 PASS_STATUS_BRUSHED = "brushed"
+PASS_STATUS_WAITING = "waiting"
 PASS_REMINDER_SECONDS = 60
 PASS_REMINDER_POLL_SECONDS = 15
 
@@ -261,6 +263,60 @@ async def _ping_assignee(
     )
 
 
+async def _assign_next_waiting_pass_to_user(
+    bot,
+    settings: Settings,
+    user,
+) -> PassOffer | None:
+    """Give the oldest waiting pass to a finisher who has no pending take/brush."""
+    path = settings.database_path
+    if user.id in pending_pass_assignee_user_ids(path):
+        return None
+
+    waiting = list_waiting_pass_offers(path)
+    if not waiting:
+        return None
+
+    offer = waiting[0]
+    update_pass_offer(
+        path,
+        offer.id,
+        status=PASS_STATUS_PENDING,
+        assigned_user_id=user.id,
+        assigned_username=user.username,
+        assigned_display_name=_display_name(user),
+        reset_reminder=True,
+    )
+    refreshed = get_pass_offer(path, offer.id)
+    if refreshed is None:
+        return None
+
+    reply_to = offer.notes_message_id or offer.offer_message_id
+    try:
+        offer_message = await _send_pass_offer_message(
+            bot,
+            refreshed,
+            reply_to_message_id=reply_to,
+        )
+        update_pass_offer(path, offer.id, offer_message_id=offer_message.message_id)
+    except BadRequest:
+        logger.warning("Failed to send waiting pass %s to user %s", offer.id, user.id)
+        update_pass_offer(path, offer.id, status=PASS_STATUS_WAITING)
+        return None
+    except Exception:
+        logger.exception("Failed to assign waiting pass %s to user %s", offer.id, user.id)
+        update_pass_offer(path, offer.id, status=PASS_STATUS_WAITING)
+        return None
+
+    logger.info(
+        "waiting pass assigned chat=%s offer=%s assigned=%s",
+        offer.chat_id,
+        offer.id,
+        user.id,
+    )
+    return refreshed
+
+
 async def joinqueue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     user = update.effective_user
@@ -278,11 +334,19 @@ async def joinqueue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     position = get_pass_queue_position(path, user.id)
     vip_note = " ⭐ VIP — ahead of standard finishers." if is_pass_queue_vip(path, user.id) else ""
     if joined:
-        await message.reply_text(
-            f"✅ You're in the pass queue (#{position}).{vip_note}\n"
-            "You'll get @mentioned when a starter posts notes.",
-            parse_mode="HTML",
-        )
+        assigned = await _assign_next_waiting_pass_to_user(context.bot, settings, user)
+        if assigned:
+            await message.reply_text(
+                f"✅ You're in the pass queue (#{position}).{vip_note}\n"
+                "A pass was waiting — check the group for Take/Brush.",
+                parse_mode="HTML",
+            )
+        else:
+            await message.reply_text(
+                f"✅ You're in the pass queue (#{position}).{vip_note}\n"
+                "You'll get @mentioned when a starter posts notes.",
+                parse_mode="HTML",
+            )
     else:
         await message.reply_text(
             f"You're already in the queue (#{position}).{vip_note}",
@@ -633,7 +697,7 @@ async def _handle_brush_pass(
         busy_user_ids=busy,
     )
     if next_user is None:
-        update_pass_offer(path, offer.id, status=PASS_STATUS_BRUSHED)
+        update_pass_offer(path, offer.id, status=PASS_STATUS_WAITING)
         try:
             await query.edit_message_text(
                 f"{brushed_text}\n\nNo one else free in queue.\n\nFinishers: /joinqueue",
@@ -641,7 +705,7 @@ async def _handle_brush_pass(
             )
         except BadRequest:
             pass
-        await query.answer("Brushed — no one else free.")
+        await query.answer("Brushed — waiting for next finisher.")
         return
 
     update_pass_offer(

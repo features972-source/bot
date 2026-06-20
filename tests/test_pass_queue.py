@@ -34,6 +34,7 @@ from database import (  # noqa: E402
     join_pass_queue,
     leave_pass_queue,
     list_pass_queue,
+    list_waiting_pass_offers,
     pass_offer_for_notes,
     pending_pass_assignee_user_ids,
     remove_pass_queue_vip,
@@ -262,6 +263,59 @@ also has hsbc"""
         text = kwargs.get("text", args[0] if args else "")
         self.assertIn("already has a pass pending", text)
         self.assertIn("take or brush", text)
+
+    async def test_joinqueue_assigns_waiting_pass(self):
+        from config import load_settings
+
+        offer_id = create_pass_offer(
+            self.db_path,
+            chat_id=-100,
+            notes_message_id=400,
+            starter_user_id=333,
+            starter_username="starter",
+            starter_display_name="Starter",
+            assigned_user_id=111,
+            assigned_username="finisher",
+            assigned_display_name="Finisher",
+            notes_text="waiting notes",
+        )
+        update_pass_offer(self.db_path, offer_id, status="waiting")
+
+        os.environ["DATABASE_PATH"] = self.db_path
+        settings = load_settings()
+
+        user = SimpleNamespace(
+            id=222,
+            username="newfin",
+            first_name="New",
+            last_name="Finisher",
+            is_bot=False,
+        )
+        message = MagicMock()
+        message.reply_text = AsyncMock()
+
+        update = MagicMock()
+        update.effective_user = user
+        update.effective_message = message
+
+        context = MagicMock()
+        context.bot_data = {"settings": settings}
+        context.bot.send_message = AsyncMock(
+            return_value=SimpleNamespace(message_id=900)
+        )
+
+        await pass_queue.joinqueue_command(update, context)
+
+        offer = get_pass_offer(self.db_path, offer_id)
+        assert offer is not None
+        self.assertEqual(offer.status, "pending")
+        self.assertEqual(offer.assigned_user_id, 222)
+        self.assertEqual(offer.offer_message_id, 900)
+        context.bot.send_message.assert_awaited()
+        message.reply_text.assert_awaited()
+        args, kwargs = message.reply_text.await_args
+        text = kwargs.get("text", args[0] if args else "")
+        self.assertIn("pass was waiting", text)
 
     EXAMPLE_1 = """ian davis
 
@@ -658,6 +712,25 @@ class PassQueueDbTests(unittest.TestCase):
         rotate_pass_queue_user_to_back(self.db_path, 10)
         queue = list_pass_queue(self.db_path)
         self.assertEqual([entry.user_id for entry in queue], [11, 10, 1])
+
+    def test_list_waiting_pass_offers(self):
+        offer_id = create_pass_offer(
+            self.db_path,
+            chat_id=-100,
+            notes_message_id=77,
+            starter_user_id=10,
+            starter_username="starter",
+            starter_display_name="Starter",
+            assigned_user_id=20,
+            assigned_username="finisher",
+            assigned_display_name="Finisher",
+            notes_text="notes",
+        )
+        update_pass_offer(self.db_path, offer_id, status="waiting")
+        waiting = list_waiting_pass_offers(self.db_path)
+        self.assertEqual(len(waiting), 1)
+        self.assertEqual(waiting[0].id, offer_id)
+        self.assertEqual(waiting[0].status, "waiting")
 
     def test_leave_queue(self):
         join_pass_queue(
