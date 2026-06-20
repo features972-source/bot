@@ -148,28 +148,14 @@ if (-not $q2) {
     $q2 = if ($created.service) { $created.service } else { $created }
     Write-Host "Created $($q2.slug) id=$($q2.id)"
 } else {
-    Write-Host "Updating env on existing $($q2.slug) ($($q2.id)) ..."
-    Invoke-RenderApi PUT "/services/$($q2.id)/env-vars" $envVars | Out-Null
+    Write-Host "Found existing $($q2.slug) ($($q2.id)) ..."
 }
 
 $baseUrl = "https://$($q2.slug).onrender.com"
-Write-Host "Setting LISTEN_PUBLIC_URL=$baseUrl ..."
-$listenRows = Invoke-RenderApi GET "/services/$($q2.id)/env-vars"
-$merged = @()
-$foundListen = $false
-foreach ($row in $listenRows) {
-    $ev = if ($row.envVar) { $row.envVar } else { $row }
-    if ($ev.key -eq "LISTEN_PUBLIC_URL") {
-        $merged += @{ key = "LISTEN_PUBLIC_URL"; value = $baseUrl }
-        $foundListen = $true
-    } elseif ($ev.key -notin @("PORT", "RENDER", "RENDER_EXTERNAL_URL", "RENDER_SERVICE_ID")) {
-        $merged += @{ key = $ev.key; value = $ev.value }
-    }
-}
-if (-not $foundListen) {
-    $merged += @{ key = "LISTEN_PUBLIC_URL"; value = $baseUrl }
-}
-Invoke-RenderApi PUT "/services/$($q2.id)/env-vars" $merged | Out-Null
+$envVars = @($envVars | Where-Object { $_.key -ne "LISTEN_PUBLIC_URL" })
+$envVars += @{ key = "LISTEN_PUBLIC_URL"; value = $baseUrl }
+Write-Host "Syncing $($envVars.Count) env vars (LISTEN_PUBLIC_URL=$baseUrl) ..."
+Invoke-RenderApi PUT "/services/$($q2.id)/env-vars" $envVars | Out-Null
 
 Write-Host "Triggering deploy ..."
 Invoke-RenderApi POST "/services/$($q2.id)/deploys" @{ clearCache = "do_not_clear" } | Out-Null
