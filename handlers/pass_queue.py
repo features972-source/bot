@@ -56,6 +56,11 @@ def _pass_offer_text(offer: PassOffer, *, reminder: bool = False) -> str:
     return f"{mention} — <b>take this pass</b>{suffix}"
 
 
+def _pass_brushed_text(user) -> str:
+    mention = _mention_html(user.id, user.username, _display_name(user))
+    return f"❌ {mention} — <b>has brushed pass</b>"
+
+
 def _parse_iso_datetime(value: str) -> datetime:
     dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if dt.tzinfo is None:
@@ -213,6 +218,22 @@ def _busy_pass_assignees(settings: Settings, chat_id: int, *, exclude_offer_id: 
     )
 
 
+async def _send_pass_offer_message(
+    bot,
+    offer: PassOffer,
+    *,
+    reply_to_message_id: int | None = None,
+    reminder: bool = False,
+):
+    return await bot.send_message(
+        chat_id=offer.chat_id,
+        text=_pass_offer_text(offer, reminder=reminder),
+        parse_mode="HTML",
+        reply_markup=_pass_keyboard(offer.id),
+        reply_to_message_id=reply_to_message_id,
+    )
+
+
 async def _ping_assignee(
     bot,
     offer: PassOffer,
@@ -232,11 +253,11 @@ async def _ping_assignee(
             )
         except BadRequest:
             logger.warning("Could not edit pass offer message %s", offer.offer_message_id)
-    await bot.send_message(
-        chat_id=offer.chat_id,
-        text=text,
-        parse_mode="HTML",
+    await _send_pass_offer_message(
+        bot,
+        offer,
         reply_to_message_id=reply_to,
+        reminder=reminder,
     )
 
 
@@ -595,6 +616,15 @@ async def _handle_brush_pass(
 
     path = settings.database_path
     rotate_pass_queue_user_to_back(path, user.id)
+    brushed_text = _pass_brushed_text(user)
+    try:
+        await query.edit_message_text(
+            brushed_text,
+            parse_mode="HTML",
+        )
+    except BadRequest:
+        pass
+
     queue = list_pass_queue(path)
     busy = _busy_pass_assignees(settings, offer.chat_id, exclude_offer_id=offer.id)
     next_user = _next_queue_assignee(
@@ -606,7 +636,7 @@ async def _handle_brush_pass(
         update_pass_offer(path, offer.id, status=PASS_STATUS_BRUSHED)
         try:
             await query.edit_message_text(
-                "Pass brushed — no one else free in queue.\n\nFinishers: /joinqueue",
+                f"{brushed_text}\n\nNo one else free in queue.\n\nFinishers: /joinqueue",
                 parse_mode="HTML",
             )
         except BadRequest:
@@ -624,17 +654,20 @@ async def _handle_brush_pass(
     )
     refreshed = get_pass_offer(path, offer.id)
     assert refreshed is not None
+    reply_to = offer.notes_message_id or query.message.message_id
     try:
-        await _ping_assignee(context.bot, refreshed)
+        offer_message = await _send_pass_offer_message(
+            context.bot,
+            refreshed,
+            reply_to_message_id=reply_to,
+        )
+        update_pass_offer(
+            path,
+            offer.id,
+            offer_message_id=offer_message.message_id,
+        )
     except BadRequest:
-        try:
-            await query.edit_message_text(
-                _pass_offer_text(refreshed),
-                parse_mode="HTML",
-                reply_markup=_pass_keyboard(offer.id),
-            )
-        except BadRequest:
-            pass
+        logger.warning("Failed to send brushed pass handoff for offer %s", offer.id)
     except Exception:
         logger.exception("Failed to hand off pass %s to user %s", offer.id, next_user.user_id)
     await query.answer("Brushed — offered to next in queue.")
