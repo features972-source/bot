@@ -1334,7 +1334,7 @@ def get_delegated_admin_expires_at(path: str, telegram_user_id: int) -> datetime
 def _hash_license_key(key: str) -> str:
     import hashlib
 
-    normalized = key.strip().lower()
+    normalized = key.strip().lower().rstrip("-_.")
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 

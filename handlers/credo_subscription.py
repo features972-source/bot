@@ -32,12 +32,47 @@ from handlers.admin_access import is_primary_admin
 logger = logging.getLogger(__name__)
 
 AWAITING_LICENSE_KEY = "credo_awaiting_license_key"
+AWAITING_LICENSE_USERS_KEY = "credo_awaiting_license_users"
+
+
+def _awaiting_license_users(bot_data: dict) -> set[int]:
+    users = bot_data.get(AWAITING_LICENSE_USERS_KEY)
+    if isinstance(users, set):
+        return users
+    users = set()
+    bot_data[AWAITING_LICENSE_USERS_KEY] = users
+    return users
+
+
+def set_awaiting_license_key(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    context.user_data[AWAITING_LICENSE_KEY] = True
+    _awaiting_license_users(context.application.bot_data).add(user_id)
+
+
+def clear_awaiting_license_key(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    context.user_data.pop(AWAITING_LICENSE_KEY, None)
+    _awaiting_license_users(context.application.bot_data).discard(user_id)
+
+
+def is_awaiting_license_key(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    if context.user_data.get(AWAITING_LICENSE_KEY):
+        return True
+    return user_id in _awaiting_license_users(context.application.bot_data)
+
+
+def normalize_license_key(text: str) -> str:
+    return text.strip().lower().rstrip("-_.")
+
+
+def looks_like_license_key(text: str) -> bool:
+    return normalize_license_key(text).startswith("credo-")
 
 
 def build_credo_subscription_handlers() -> list:
     return [
         CommandHandler("genkey", genkey_command),
         CommandHandler("redeemkey", redeemkey_command),
+        CommandHandler("activate", activate_command),
         CommandHandler("subscription", subscription_command),
         CommandHandler("keys", keys_command),
         MessageHandler(
@@ -51,13 +86,80 @@ def build_credo_subscription_handlers() -> list:
 
 
 async def prompt_for_license_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data[AWAITING_LICENSE_KEY] = True
+    user = update.effective_user
+    if user:
+        set_awaiting_license_key(context, user.id)
     await update.effective_message.reply_text(
         f"💳 <b>Welcome</b>\n\n"
         f"Send your license key to activate <b>{ADMIN_LICENSE_WEEKS} weeks</b> of admin access.\n\n"
-        "The key looks like: <code>credo-xxxxxxxxxxxx</code>",
+        "The key looks like: <code>credo-xxxxxxxxxxxx</code>\n\n"
+        "Or send: <code>/activate credo-xxxxxxxxxxxx</code>",
         parse_mode="HTML",
     )
+
+
+async def _redeem_license_for_user(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    key: str,
+) -> bool:
+    """Try to redeem a license key. Returns True if handled (success or error reply)."""
+    settings: Settings = context.bot_data["settings"]
+    user = update.effective_user
+    message = update.effective_message
+    if not user or not message:
+        return False
+    if is_primary_admin(settings, user.id):
+        return False
+
+    normalized = normalize_license_key(key)
+    if not looks_like_license_key(normalized):
+        if is_awaiting_license_key(context, user.id):
+            await message.reply_text(
+                "That doesn't look like a license key.\n\n"
+                "It should start with <code>credo-</code>",
+                parse_mode="HTML",
+            )
+            return True
+        return False
+
+    try:
+        subscription_until, admin_until = redeem_admin_license_key(
+            settings.database_path,
+            key=normalized,
+            redeemed_by_user_id=user.id,
+            grant_admin=True,
+            telegram_username=user.username,
+            display_name=_display_name(user),
+        )
+    except ValueError:
+        clear_awaiting_license_key(context, user.id)
+        await message.reply_text(
+            "Invalid or already used key.\n\nSend /start to try again."
+        )
+        return True
+    except Exception:
+        logger.exception("License key redeem failed for user %s", user.id)
+        await message.reply_text(
+            "Something went wrong activating that key. Try again or send /start."
+        )
+        return True
+
+    clear_awaiting_license_key(context, user.id)
+    await message.reply_text(
+        f"✅ Admin access activated until "
+        f"{admin_until.astimezone().strftime('%d %b %Y')}.\n"
+        f"Bot active until {subscription_until.astimezone().strftime('%d %b %Y')}.\n\n"
+        "Send /help for commands."
+    )
+    try:
+        from handlers.admin_access import sync_bot_command_menu
+
+        await sync_bot_command_menu(context.bot, settings)
+    except Exception:
+        logger.exception("Failed to sync command menu after license redeem")
+    return True
 
 
 async def license_key_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -69,40 +171,32 @@ async def license_key_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     message = update.effective_message
     if not user or not message or not message.text:
         return
-    if is_primary_admin(settings, user.id):
-        return
 
-    awaiting = context.user_data.get(AWAITING_LICENSE_KEY)
+    awaiting = is_awaiting_license_key(context, user.id)
     text = message.text.strip()
-    if not awaiting and not text.lower().startswith("credo-"):
+    if not awaiting and not looks_like_license_key(text):
         return
 
-    try:
-        subscription_until, admin_until = redeem_admin_license_key(
-            settings.database_path,
-            key=text,
-            redeemed_by_user_id=user.id,
-            grant_admin=True,
-            telegram_username=user.username,
-            display_name=_display_name(user),
-        )
-    except ValueError:
-        await message.reply_text(
-            "Invalid or already used key.\n\nSend /start to try again."
-        )
-        context.user_data.pop(AWAITING_LICENSE_KEY, None)
+    handled = await _redeem_license_for_user(update, context, key=text)
+    if handled:
+        raise ApplicationHandlerStop
+
+
+async def activate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not settings.credo_only_mode:
         return
-
-    context.user_data.pop(AWAITING_LICENSE_KEY, None)
-    from handlers.admin_access import sync_bot_command_menu
-
-    await sync_bot_command_menu(context.bot, settings)
-    await message.reply_text(
-        f"✅ Admin access activated until "
-        f"{admin_until.astimezone().strftime('%d %b %Y')}.\n"
-        f"Bot active until {subscription_until.astimezone().strftime('%d %b %Y')}.\n\n"
-        "Send /help for commands."
-    )
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Usage: /activate <license-key>\n\nOr send /start and paste your key."
+        )
+        return
+    if is_primary_admin(settings, update.effective_user.id if update.effective_user else 0):
+        await update.effective_message.reply_text(
+            "You're the primary admin — you already have full access."
+        )
+        return
+    await _redeem_license_for_user(update, context, key=context.args[0])
 
 
 def _format_until(dt: datetime | None) -> str:
@@ -121,15 +215,15 @@ async def subscription_guard(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     if is_primary_admin(settings, user.id):
         return
-    if context.user_data.get(AWAITING_LICENSE_KEY):
+    if is_awaiting_license_key(context, user.id):
         return
 
     message = update.effective_message
     if message and message.text:
         text = message.text.strip()
-        if text.startswith("/start"):
+        if text.startswith("/start") or text.startswith("/activate"):
             return
-        if text.lower().startswith("credo-"):
+        if looks_like_license_key(text):
             return
 
     if is_credo_subscription_active(settings.database_path):

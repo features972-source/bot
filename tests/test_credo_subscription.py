@@ -22,6 +22,7 @@ from database import (  # noqa: E402
     list_bot_admins,
     redeem_admin_license_key,
 )
+from handlers.credo_subscription import normalize_license_key  # noqa: E402
 from handlers.admin_access import is_bot_admin  # noqa: E402
 
 
@@ -96,17 +97,15 @@ class CredoSubscriptionTests(unittest.TestCase):
         self.assertTrue(is_credo_subscription_active(self.db_path))
         self.assertFalse(list_bot_admins(self.db_path))
 
-    def test_start_key_prefix_accepted_without_awaiting_flag(self) -> None:
-        """Keys starting with credo- can be pasted directly after /start prompt."""
+    def test_trailing_hyphen_normalized(self) -> None:
         key = create_admin_license_key(self.db_path, created_by_user_id=1000)
-        _, admin_until = redeem_admin_license_key(
+        with_hyphen = key + "-"
+        redeem_admin_license_key(
             self.db_path,
-            key=key,
+            key=normalize_license_key(with_hyphen),
             redeemed_by_user_id=2000,
             grant_admin=True,
-            display_name="Alice",
         )
-        self.assertIsNotNone(admin_until)
         self.assertTrue(is_bot_admin(self.settings, self.db_path, 2000))
 
 
