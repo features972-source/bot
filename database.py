@@ -2388,18 +2388,6 @@ def list_pending_pass_offers(path: str) -> list[PassOffer]:
     return [_pass_offer_from_row(row) for row in rows]
 
 
-def list_waiting_pass_offers(path: str) -> list[PassOffer]:
-    with _connect(path) as conn:
-        rows = conn.execute(
-            f"""
-            {_PASS_OFFER_SELECT}
-            WHERE status = 'waiting'
-            ORDER BY created_at ASC, id ASC
-            """
-        ).fetchall()
-    return [_pass_offer_from_row(row) for row in rows]
-
-
 def pending_pass_assignee_user_ids(
     path: str,
     *,

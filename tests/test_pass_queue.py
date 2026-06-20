@@ -34,7 +34,6 @@ from database import (  # noqa: E402
     join_pass_queue,
     leave_pass_queue,
     list_pass_queue,
-    list_waiting_pass_offers,
     pass_offer_for_notes,
     pending_pass_assignee_user_ids,
     remove_pass_queue_vip,
@@ -43,7 +42,7 @@ from database import (  # noqa: E402
 )
 from handlers import pass_queue  # noqa: E402
 from handlers.pass_queue import _next_queue_assignee, pass_reminder_due  # noqa: E402
-from notes_detect import looks_like_notes  # noqa: E402
+from notes_detect import looks_like_notes, notes_has_balance  # noqa: E402
 
 
 class PassReminderTests(unittest.TestCase):
@@ -264,58 +263,146 @@ also has hsbc"""
         self.assertIn("already has a pass pending", text)
         self.assertIn("take or brush", text)
 
-    async def test_joinqueue_assigns_waiting_pass(self):
+    async def test_notes_handler_skips_starter_as_assignee(self):
         from config import load_settings
 
-        offer_id = create_pass_offer(
+        leave_pass_queue(self.db_path, 111)
+        join_pass_queue(
             self.db_path,
-            chat_id=-100,
-            notes_message_id=400,
-            starter_user_id=333,
-            starter_username="starter",
-            starter_display_name="Starter",
-            assigned_user_id=111,
-            assigned_username="finisher",
-            assigned_display_name="Finisher",
-            notes_text="waiting notes",
+            telegram_user_id=222,
+            telegram_username="starter",
+            display_name="Starter",
         )
-        update_pass_offer(self.db_path, offer_id, status="waiting")
 
         os.environ["DATABASE_PATH"] = self.db_path
         settings = load_settings()
 
         user = SimpleNamespace(
             id=222,
-            username="newfin",
-            first_name="New",
-            last_name="Finisher",
+            username="starter",
+            first_name="Starter",
+            last_name="",
             is_bot=False,
         )
-        message = MagicMock()
-        message.reply_text = AsyncMock()
+        chat = SimpleNamespace(id=-100, type="supergroup")
+        notes_message = MagicMock()
+        notes_message.message_id = 501
+        notes_message.text = self.EXAMPLE
+        notes_message.caption = None
+        notes_message.chat = chat
+        notes_message.from_user = user
+        notes_message.reply_to_message = None
+        notes_message.reply_text = AsyncMock()
 
         update = MagicMock()
         update.effective_user = user
-        update.effective_message = message
+        update.effective_chat = chat
+        update.effective_message = notes_message
 
         context = MagicMock()
         context.bot_data = {"settings": settings}
-        context.bot.send_message = AsyncMock(
-            return_value=SimpleNamespace(message_id=900)
+
+        await pass_queue.notes_message_handler(update, context)
+
+        notes_message.reply_text.assert_awaited_once()
+        args, kwargs = notes_message.reply_text.await_args
+        text = kwargs.get("text", args[0] if args else "")
+        self.assertIn("can't take their own pass", text)
+
+    async def test_notes_handler_prompts_for_balance(self):
+        from config import load_settings
+
+        os.environ["DATABASE_PATH"] = self.db_path
+        settings = load_settings()
+
+        user = SimpleNamespace(
+            id=222,
+            username="starter",
+            first_name="Starter",
+            last_name="",
+            is_bot=False,
+        )
+        chat = SimpleNamespace(id=-100, type="supergroup")
+        notes_message = MagicMock()
+        notes_message.message_id = 501
+        notes_message.text = "james adams\n31/01/2000\nbk"
+        notes_message.caption = None
+        notes_message.chat = chat
+        notes_message.from_user = user
+        notes_message.reply_to_message = None
+        notes_message.reply_text = AsyncMock()
+
+        update = MagicMock()
+        update.effective_user = user
+        update.effective_chat = chat
+        update.effective_message = notes_message
+
+        context = MagicMock()
+        context.bot_data = {"settings": settings}
+
+        await pass_queue.notes_message_handler(update, context)
+
+        notes_message.reply_text.assert_awaited_once()
+        args, kwargs = notes_message.reply_text.await_args
+        text = kwargs.get("text", args[0] if args else "")
+        self.assertIn("add balance to your notes", text)
+
+    async def test_notes_handler_offers_after_balance_reply(self):
+        from config import load_settings
+
+        os.environ["DATABASE_PATH"] = self.db_path
+        settings = load_settings()
+
+        starter = SimpleNamespace(
+            id=222,
+            username="starter",
+            first_name="Starter",
+            last_name="",
+            is_bot=False,
+        )
+        parent = MagicMock()
+        parent.message_id = 500
+        parent.text = "james adams\n31/01/2000\nbk"
+        parent.caption = None
+        parent.from_user = starter
+        parent.reply_text = AsyncMock(
+            return_value=SimpleNamespace(message_id=503)
         )
 
-        await pass_queue.joinqueue_command(update, context)
+        user = SimpleNamespace(
+            id=222,
+            username="starter",
+            first_name="Starter",
+            last_name="",
+            is_bot=False,
+        )
+        chat = SimpleNamespace(id=-100, type="supergroup")
+        notes_message = MagicMock()
+        notes_message.message_id = 502
+        notes_message.text = "current 13004"
+        notes_message.caption = None
+        notes_message.chat = chat
+        notes_message.from_user = user
+        notes_message.reply_to_message = parent
+        notes_message.reply_text = AsyncMock(
+            return_value=SimpleNamespace(message_id=503)
+        )
 
-        offer = get_pass_offer(self.db_path, offer_id)
-        assert offer is not None
-        self.assertEqual(offer.status, "pending")
-        self.assertEqual(offer.assigned_user_id, 222)
-        self.assertEqual(offer.offer_message_id, 900)
-        context.bot.send_message.assert_awaited()
-        message.reply_text.assert_awaited()
-        args, kwargs = message.reply_text.await_args
+        update = MagicMock()
+        update.effective_user = user
+        update.effective_chat = chat
+        update.effective_message = notes_message
+
+        context = MagicMock()
+        context.bot_data = {"settings": settings}
+
+        await pass_queue.notes_message_handler(update, context)
+
+        parent.reply_text.assert_awaited_once()
+        args, kwargs = parent.reply_text.await_args
         text = kwargs.get("text", args[0] if args else "")
-        self.assertIn("pass was waiting", text)
+        self.assertIn("take this pass", text)
+        self.assertIn("Read notes before taking pass", text)
 
     EXAMPLE_1 = """ian davis
 
@@ -416,6 +503,22 @@ also has hsbc"""
         self.assertTrue(
             looks_like_notes("Mary Anne\n12/12/1950\nJulie\nNo barclays\nAB12 3CD")
         )
+
+    def test_notes_has_balance_current(self):
+        self.assertTrue(notes_has_balance("james adams\n31/01/2000\ncurrent 13004"))
+
+    def test_notes_has_balance_savings_gbp(self):
+        self.assertTrue(notes_has_balance("Frank\nsavings £2834"))
+
+    def test_notes_has_balance_savings_plain(self):
+        self.assertTrue(notes_has_balance("Name\nsavings 9322"))
+
+    def test_notes_has_balance_frank_example(self):
+        self.assertTrue(notes_has_balance(self.EXAMPLE))
+
+    def test_notes_missing_balance(self):
+        self.assertFalse(notes_has_balance("james adams 31/01/2000 bk"))
+        self.assertFalse(notes_has_balance("Frank\n23/02/1943\nbarclays"))
 
 
 class PassQueueDbTests(unittest.TestCase):
@@ -712,25 +815,6 @@ class PassQueueDbTests(unittest.TestCase):
         rotate_pass_queue_user_to_back(self.db_path, 10)
         queue = list_pass_queue(self.db_path)
         self.assertEqual([entry.user_id for entry in queue], [11, 10, 1])
-
-    def test_list_waiting_pass_offers(self):
-        offer_id = create_pass_offer(
-            self.db_path,
-            chat_id=-100,
-            notes_message_id=77,
-            starter_user_id=10,
-            starter_username="starter",
-            starter_display_name="Starter",
-            assigned_user_id=20,
-            assigned_username="finisher",
-            assigned_display_name="Finisher",
-            notes_text="notes",
-        )
-        update_pass_offer(self.db_path, offer_id, status="waiting")
-        waiting = list_waiting_pass_offers(self.db_path)
-        self.assertEqual(len(waiting), 1)
-        self.assertEqual(waiting[0].id, offer_id)
-        self.assertEqual(waiting[0].status, "waiting")
 
     def test_leave_queue(self):
         join_pass_queue(

@@ -74,6 +74,19 @@ PERSON_NAME_LINE = re.compile(
     r"^[A-Za-z][A-Za-z'\-]+(?:\s+[A-Za-z][A-Za-z'\-\.]+)+$"
 )
 
+BALANCE_IN_NOTES = re.compile(
+    r"(?i)(?:"
+    r"(?:current|savings?|balance)\s*[:.]?\s*£?\s*\d[\d,.\s]*(?:k|m)?"
+    r"|savers?\s+with\s+£?\s*\d[\d,.\s]*(?:k|m)?"
+    r")"
+)
+
+
+def notes_has_balance(text: str | None) -> bool:
+    if not text:
+        return False
+    return bool(BALANCE_IN_NOTES.search(text.strip()))
+
 
 def _non_empty_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]

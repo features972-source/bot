@@ -25,7 +25,6 @@ from database import (
     leave_pass_queue,
     list_pass_queue,
     list_pending_pass_offers,
-    list_waiting_pass_offers,
     pass_offer_for_notes,
     pending_pass_assignee_user_ids,
     remove_pass_queue_vip,
@@ -33,7 +32,7 @@ from database import (
     update_pass_offer,
 )
 from handlers.admin_access import require_admin
-from notes_detect import looks_like_notes
+from notes_detect import looks_like_notes, notes_has_balance
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,6 @@ CALLBACK_PREFIX = "pass:"
 PASS_STATUS_PENDING = "pending"
 PASS_STATUS_TAKEN = "taken"
 PASS_STATUS_BRUSHED = "brushed"
-PASS_STATUS_WAITING = "waiting"
 PASS_REMINDER_SECONDS = 60
 PASS_REMINDER_POLL_SECONDS = 15
 
@@ -55,7 +53,10 @@ def _pass_offer_text(offer: PassOffer, *, reminder: bool = False) -> str:
         offer.assigned_display_name,
     )
     suffix = " ⏰" if reminder else ""
-    return f"{mention} — <b>take this pass</b>{suffix}"
+    return (
+        f"{mention} — <b>take this pass</b>{suffix}\n\n"
+        "<i>Read notes before taking pass.</i>"
+    )
 
 
 def _pass_brushed_text(user) -> str:
@@ -134,8 +135,9 @@ def build_pass_queue_handlers() -> list:
 
 def build_pass_queue_notes_handler() -> MessageHandler:
     """Registered early (group -2) so notes are detected before payment/expense handlers."""
+    notes_filter = PASS_NOTES_FILTER | filters.UpdateType.EDITED_MESSAGE
     return MessageHandler(
-        PASS_NOTES_FILTER,
+        notes_filter,
         notes_message_handler,
         block=False,
     )
@@ -263,60 +265,6 @@ async def _ping_assignee(
     )
 
 
-async def _assign_next_waiting_pass_to_user(
-    bot,
-    settings: Settings,
-    user,
-) -> PassOffer | None:
-    """Give the oldest waiting pass to a finisher who has no pending take/brush."""
-    path = settings.database_path
-    if user.id in pending_pass_assignee_user_ids(path):
-        return None
-
-    waiting = list_waiting_pass_offers(path)
-    if not waiting:
-        return None
-
-    offer = waiting[0]
-    update_pass_offer(
-        path,
-        offer.id,
-        status=PASS_STATUS_PENDING,
-        assigned_user_id=user.id,
-        assigned_username=user.username,
-        assigned_display_name=_display_name(user),
-        reset_reminder=True,
-    )
-    refreshed = get_pass_offer(path, offer.id)
-    if refreshed is None:
-        return None
-
-    reply_to = offer.notes_message_id or offer.offer_message_id
-    try:
-        offer_message = await _send_pass_offer_message(
-            bot,
-            refreshed,
-            reply_to_message_id=reply_to,
-        )
-        update_pass_offer(path, offer.id, offer_message_id=offer_message.message_id)
-    except BadRequest:
-        logger.warning("Failed to send waiting pass %s to user %s", offer.id, user.id)
-        update_pass_offer(path, offer.id, status=PASS_STATUS_WAITING)
-        return None
-    except Exception:
-        logger.exception("Failed to assign waiting pass %s to user %s", offer.id, user.id)
-        update_pass_offer(path, offer.id, status=PASS_STATUS_WAITING)
-        return None
-
-    logger.info(
-        "waiting pass assigned chat=%s offer=%s assigned=%s",
-        offer.chat_id,
-        offer.id,
-        user.id,
-    )
-    return refreshed
-
-
 async def joinqueue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     user = update.effective_user
@@ -334,19 +282,11 @@ async def joinqueue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     position = get_pass_queue_position(path, user.id)
     vip_note = " ⭐ VIP — ahead of standard finishers." if is_pass_queue_vip(path, user.id) else ""
     if joined:
-        assigned = await _assign_next_waiting_pass_to_user(context.bot, settings, user)
-        if assigned:
-            await message.reply_text(
-                f"✅ You're in the pass queue (#{position}).{vip_note}\n"
-                "A pass was waiting — check the group for Take/Brush.",
-                parse_mode="HTML",
-            )
-        else:
-            await message.reply_text(
-                f"✅ You're in the pass queue (#{position}).{vip_note}\n"
-                "You'll get @mentioned when a starter posts notes.",
-                parse_mode="HTML",
-            )
+        await message.reply_text(
+            f"✅ You're in the pass queue (#{position}).{vip_note}\n"
+            "You'll get @mentioned when a starter posts notes.",
+            parse_mode="HTML",
+        )
     else:
         await message.reply_text(
             f"You're already in the queue (#{position}).{vip_note}",
@@ -481,11 +421,26 @@ async def notes_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     queue = list_pass_queue(settings.database_path)
-    queue_waiting = bool(queue)
-    if not queue_waiting:
+    if not queue:
         return
 
-    if not looks_like_notes(text, queue_waiting=True):
+    queue_waiting = True
+    parent = message.reply_to_message
+    if parent and parent.from_user and not parent.from_user.is_bot:
+        parent_text = (parent.text or parent.caption or "").strip()
+        if parent_text and looks_like_notes(parent_text, queue_waiting=True):
+            if pass_offer_for_notes(settings.database_path, chat.id, parent.message_id):
+                return
+            await _offer_pass(
+                update,
+                context,
+                notes_text=f"{parent_text}\n{text}".strip(),
+                notes_message=parent,
+                starter=parent.from_user,
+            )
+            return
+
+    if not looks_like_notes(text, queue_waiting=queue_waiting):
         return
     if pass_offer_for_notes(settings.database_path, chat.id, message.message_id):
         return
@@ -518,6 +473,19 @@ async def _offer_pass(
     ):
         return
 
+    if not notes_has_balance(notes_text):
+        starter_mention = _mention_html(
+            starter.id,
+            getattr(starter, "username", None),
+            _display_name(starter),
+        )
+        await notes_message.reply_text(
+            f"📝 {starter_mention} — <b>add balance to your notes</b>\n\n"
+            "e.g. <code>current 13004</code> or <code>savings £2834</code>",
+            parse_mode="HTML",
+        )
+        return
+
     queue = list_pass_queue(settings.database_path)
     if not queue:
         await message.reply_text(
@@ -527,12 +495,22 @@ async def _offer_pass(
         return
 
     busy = _busy_pass_assignees(settings, chat.id)
-    assigned = _next_queue_assignee(queue, busy_user_ids=busy)
+    assigned = _next_queue_assignee(
+        queue,
+        exclude_user_id=starter.id,
+        busy_user_ids=busy,
+    )
     if assigned is None:
         if busy:
             await message.reply_text(
                 "📝 Notes detected — everyone in queue already has a pass pending.\n"
                 "Waiting for take or brush before the next assignment.",
+                parse_mode="HTML",
+            )
+        else:
+            await message.reply_text(
+                "📝 Notes detected but no finisher is free.\n\n"
+                "Starters can't take their own pass — another finisher needs /joinqueue.",
                 parse_mode="HTML",
             )
         return
@@ -697,7 +675,7 @@ async def _handle_brush_pass(
         busy_user_ids=busy,
     )
     if next_user is None:
-        update_pass_offer(path, offer.id, status=PASS_STATUS_WAITING)
+        update_pass_offer(path, offer.id, status=PASS_STATUS_BRUSHED)
         try:
             await query.edit_message_text(
                 f"{brushed_text}\n\nNo one else free in queue.\n\nFinishers: /joinqueue",
@@ -705,7 +683,7 @@ async def _handle_brush_pass(
             )
         except BadRequest:
             pass
-        await query.answer("Brushed — waiting for next finisher.")
+        await query.answer("Brushed — no one else free.")
         return
 
     update_pass_offer(
