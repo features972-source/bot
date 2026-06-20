@@ -19,7 +19,7 @@ $ErrorActionPreference = "Stop"
 if (-not $Root) { $Root = Resolve-Path (Join-Path $PSScriptRoot "..") }
 if (-not $EnvFile) { $EnvFile = Join-Path $Root ".env.credo" }
 if (-not $env:RENDER_API_KEY) { throw "Set RENDER_API_KEY (Render dashboard -> Account Settings -> API Keys)." }
-if (-not (Test-Path $EnvFile)) { throw "Missing $EnvFile — copy .env.credo.example to .env.credo and fill in BOT_TOKEN." }
+if (-not (Test-Path $EnvFile)) { throw "Missing $EnvFile - copy .env.credo.example to .env.credo and fill in BOT_TOKEN." }
 
 $Headers = @{
     Accept         = "application/json"
@@ -161,7 +161,7 @@ if (-not $credo) {
     try {
         Invoke-RenderApi PATCH "/services/$($credo.id)" $patchBody | Out-Null
     } catch {
-        Write-Warning "Could not patch dockerCommand — set manually in Render dashboard: python bot_credo.py"
+        Write-Warning "Could not patch dockerCommand - set manually in Render dashboard: python bot_credo.py"
     }
 }
 
