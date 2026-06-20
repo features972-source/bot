@@ -27,6 +27,7 @@ from database import (
     get_credo_credit_card,
     get_credo_credit_card_by_last4,
     is_on_credo_whitelist,
+    is_credo_subscription_active,
     list_credo_credit_cards,
     list_credo_card_usage,
     list_credo_whitelist,
@@ -380,9 +381,11 @@ def is_credo_active_command_allowed(
 
 
 def is_credo_allowed(settings: Settings, database_path: str, user_id: int) -> bool:
-    if user_id in settings.credo_whitelist_user_ids:
-        return True
     if is_bot_admin(settings, database_path, user_id):
+        return True
+    if settings.credo_only_mode and is_credo_subscription_active(database_path):
+        return True
+    if user_id in settings.credo_whitelist_user_ids:
         return True
     return is_on_credo_whitelist(database_path, user_id)
 

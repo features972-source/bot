@@ -117,8 +117,8 @@ def _format_credo_only_help_text(*, admin: bool, credo: bool, bot_name: str, pri
 
     return (
         f"💳 <b>{bot_name}</b>\n\n"
-        "This bot is for credo cards only.\n\n"
-        "Ask an admin to add you with /addcredouser."
+        "The bot is not active yet.\n\n"
+        "Send /start and enter a license key, or ask the owner for one."
     )
 
 

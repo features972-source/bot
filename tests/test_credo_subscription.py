@@ -15,6 +15,7 @@ from database import (  # noqa: E402
     ADMIN_LICENSE_DAYS,
     add_bot_admin,
     create_admin_license_key,
+    extend_credo_subscription,
     get_credo_subscription_active_until,
     init_db,
     is_credo_subscription_active,
@@ -96,6 +97,12 @@ class CredoSubscriptionTests(unittest.TestCase):
         )
         self.assertTrue(is_credo_subscription_active(self.db_path))
         self.assertFalse(list_bot_admins(self.db_path))
+
+    def test_active_subscription_allows_anyone(self) -> None:
+        from handlers.credo import is_credo_allowed
+
+        extend_credo_subscription(self.db_path)
+        self.assertTrue(is_credo_allowed(self.settings, self.db_path, 999999))
 
     def test_trailing_hyphen_normalized(self) -> None:
         key = create_admin_license_key(self.db_path, created_by_user_id=1000)

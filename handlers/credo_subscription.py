@@ -148,9 +148,10 @@ async def _redeem_license_for_user(
 
     clear_awaiting_license_key(context, user.id)
     await message.reply_text(
-        f"✅ Admin access activated until "
-        f"{admin_until.astimezone().strftime('%d %b %Y')}.\n"
-        f"Bot active until {subscription_until.astimezone().strftime('%d %b %Y')}.\n\n"
+        f"✅ Key activated — bot is open for **everyone** for {ADMIN_LICENSE_WEEKS} weeks.\n"
+        f"Active until {subscription_until.astimezone().strftime('%d %b %Y')}.\n\n"
+        f"You have admin access until {admin_until.astimezone().strftime('%d %b %Y')}.\n"
+        "Anyone can send /cc to use cards.\n\n"
         "Send /help for commands."
     )
     try:
