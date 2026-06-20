@@ -70,27 +70,6 @@ async def _delete_notify_message(bot, chat_id: int, message_id: int) -> None:
         )
 
 
-async def _try_edit_photo(
-    bot, chat_id: int, message_id: int, image_bytes: bytes
-) -> bool:
-    try:
-        await bot.edit_message_media(
-            chat_id=chat_id,
-            message_id=message_id,
-            media=InputMediaPhoto(media=_photo_file(image_bytes)),
-        )
-        return True
-    except BadRequest as exc:
-        err = str(exc).lower()
-        if "message is not modified" in err:
-            return True
-        logger.debug("edit_message_media failed for expense msg %s: %s", message_id, exc)
-        return False
-    except Exception:
-        logger.exception("edit_message_media error for expense msg %s", message_id)
-        return False
-
-
 def _week_records(settings: Settings) -> tuple:
     since, period_label = current_payment_week_start()
     all_records = list_expenses_since(settings.database_path, since=since)
