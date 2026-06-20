@@ -482,6 +482,11 @@ async def expense_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not message or not user or not chat or not message.text:
         return
 
+    from handlers.credo import is_add_card_flow_active
+
+    if is_add_card_flow_active(context, user.id):
+        return
+
     if await try_complete_pending_expense(update, context):
         return
 

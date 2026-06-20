@@ -100,6 +100,37 @@ ADD_CARD_STEP_SORT_CODE = "sortcode"
 ADD_CARD_STEP_ACCOUNT = "account"
 ADD_CARD_STEP_PHOTO = "photo"
 ADD_CARD_STEP_KEY = "add_card_step"
+ADD_CARD_SESSIONS_KEY = "add_card_sessions"
+
+
+def _add_card_sessions(bot_data: dict) -> dict[int, dict]:
+    return bot_data.setdefault(ADD_CARD_SESSIONS_KEY, {})
+
+
+def _add_card_session(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> dict | None:
+    if user_id is None:
+        return None
+    application = getattr(context, "application", None)
+    if application is None:
+        return None
+    bot_data = getattr(application, "bot_data", None)
+    if not isinstance(bot_data, dict):
+        return None
+    sessions = bot_data.get(ADD_CARD_SESSIONS_KEY)
+    if not isinstance(sessions, dict):
+        return None
+    session = sessions.get(user_id)
+    return session if isinstance(session, dict) else None
+
+
+def is_add_card_flow_active(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
+    return _add_card_session(context, user_id) is not None
+
+
+def _start_add_card_session(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict:
+    session = {"step": ADD_CARD_STEP_NAME}
+    _add_card_sessions(context.application.bot_data)[user_id] = session
+    return session
 
 
 def _normalize_add_card_step(step: object) -> str | None:
@@ -143,7 +174,11 @@ def _end_conversation_by_name(
                 logger.exception("Could not end conversation %s", name)
 
 
-def _clear_add_card_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
+def _clear_add_card_flow(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int | None = None
+) -> None:
+    if user_id is not None:
+        _add_card_sessions(context.application.bot_data).pop(user_id, None)
     context.user_data.pop("add_card_name", None)
     context.user_data.pop("add_card_capacity", None)
     context.user_data.pop("add_card_last4", None)
@@ -957,19 +992,17 @@ async def credo_reminder_loop(bot, settings: Settings, bot_data: dict) -> None:
 
 
 def build_add_card_handlers() -> list:
-    """Register in group -1 so add-card replies beat the mailer text router."""
+    """Register in group -1 before payment/mailer so DM wizard replies are not swallowed."""
     return [
         CommandHandler("addcredo", addcredocard_start),
         CommandHandler("cancel", addcredocard_cancel_if_active, block=False),
         MessageHandler(
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
             addcredocard_route_text,
-            block=False,
         ),
         MessageHandler(
             PHOTO_FILTER & filters.ChatType.PRIVATE,
             addcredocard_route_photo,
-            block=False,
         ),
     ]
 
@@ -1179,9 +1212,11 @@ async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     _end_conversation_by_name(context, update, "credo_user")
     context.user_data.pop("credo_cards", None)
-    _clear_add_card_flow(context)
-    context.user_data["add_card_active"] = True
-    context.user_data[ADD_CARD_STEP_KEY] = ADD_CARD_STEP_NAME
+    user = update.effective_user
+    if not user:
+        return
+    _clear_add_card_flow(context, user.id)
+    _start_add_card_session(context, user.id)
 
     await message.reply_text(
         f"💳 **Add credo card** ({ADD_CARD_TOTAL_STEPS} steps)\n\n"
@@ -1193,7 +1228,8 @@ async def addcredocard_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def addcredocard_cancel_if_active(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    if not context.user_data.get("add_card_active"):
+    user = update.effective_user
+    if not user or not is_add_card_flow_active(context, user.id):
         return
     await addcredocard_cancel(update, context)
     raise ApplicationHandlerStop
@@ -1202,62 +1238,56 @@ async def addcredocard_cancel_if_active(
 async def addcredocard_route_text(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    if not context.user_data.get("add_card_active"):
+    user = update.effective_user
+    session = _add_card_session(context, user.id if user else None)
+    if session is None:
         return
     message = update.effective_message
     if not message or message.chat.type != "private":
         return
 
-    step = _normalize_add_card_step(context.user_data.get(ADD_CARD_STEP_KEY))
+    step = _normalize_add_card_step(session.get("step"))
     if step == ADD_CARD_STEP_NAME:
-        context.user_data[ADD_CARD_STEP_KEY] = await addcredocard_receive_name(
-            update, context
-        )
+        session["step"] = await addcredocard_receive_name(update, context, session)
     elif step == ADD_CARD_STEP_CAPACITY:
-        context.user_data[ADD_CARD_STEP_KEY] = await addcredocard_receive_capacity(
-            update, context
-        )
+        session["step"] = await addcredocard_receive_capacity(update, context, session)
     elif step == ADD_CARD_STEP_LAST4:
-        context.user_data[ADD_CARD_STEP_KEY] = await addcredocard_receive_last4(
-            update, context
-        )
+        session["step"] = await addcredocard_receive_last4(update, context, session)
     elif step == ADD_CARD_STEP_SORT_CODE:
-        context.user_data[ADD_CARD_STEP_KEY] = await addcredocard_receive_sort_code(
-            update, context
-        )
+        session["step"] = await addcredocard_receive_sort_code(update, context, session)
     elif step == ADD_CARD_STEP_ACCOUNT:
-        context.user_data[ADD_CARD_STEP_KEY] = await addcredocard_receive_account(
-            update, context
-        )
+        session["step"] = await addcredocard_receive_account(update, context, session)
     elif step == ADD_CARD_STEP_PHOTO:
         await addcredocard_receive_photo_text(update, context)
     else:
         logger.warning(
             "Add-card active with unknown step %r for user %s — restarting at name",
-            context.user_data.get(ADD_CARD_STEP_KEY),
-            update.effective_user.id if update.effective_user else "?",
+            session.get("step"),
+            user.id if user else "?",
         )
-        context.user_data[ADD_CARD_STEP_KEY] = ADD_CARD_STEP_NAME
+        session["step"] = ADD_CARD_STEP_NAME
         await message.reply_text(
             f"💳 **Add credo card** ({ADD_CARD_TOTAL_STEPS} steps)\n\n"
             f"**Step 1 of {ADD_CARD_TOTAL_STEPS}** — Send the **credit card name** (e.g. Lloyds).",
             parse_mode="Markdown",
         )
 
-    if context.user_data.get(ADD_CARD_STEP_KEY) == ConversationHandler.END:
-        _clear_add_card_flow(context)
+    if session.get("step") == ConversationHandler.END:
+        _clear_add_card_flow(context, user.id if user else None)
     raise ApplicationHandlerStop
 
 
 async def addcredocard_route_photo(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    if not context.user_data.get("add_card_active"):
+    user = update.effective_user
+    session = _add_card_session(context, user.id if user else None)
+    if session is None:
         return
     message = update.effective_message
     if not message or message.chat.type != "private":
         return
-    if _normalize_add_card_step(context.user_data.get(ADD_CARD_STEP_KEY)) != ADD_CARD_STEP_PHOTO:
+    if _normalize_add_card_step(session.get("step")) != ADD_CARD_STEP_PHOTO:
         await message.reply_text(
             f"**Step {ADD_CARD_TOTAL_STEPS} of {ADD_CARD_TOTAL_STEPS}** — "
             "Send a **photo** of the card to finish adding it.",
@@ -1265,15 +1295,17 @@ async def addcredocard_route_photo(
         )
         raise ApplicationHandlerStop
 
-    result = await addcredocard_receive_photo(update, context)
+    result = await addcredocard_receive_photo(update, context, session)
     if result == ConversationHandler.END:
-        _clear_add_card_flow(context)
+        _clear_add_card_flow(context, user.id if user else None)
     elif isinstance(result, str):
-        context.user_data[ADD_CARD_STEP_KEY] = result
+        session["step"] = result
     raise ApplicationHandlerStop
 
 
-async def addcredocard_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+async def addcredocard_receive_name(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, session: dict
+) -> str:
     message = update.effective_message
     if not message:
         return ADD_CARD_STEP_NAME
@@ -1285,7 +1317,7 @@ async def addcredocard_receive_name(update: Update, context: ContextTypes.DEFAUL
         )
         return ADD_CARD_STEP_NAME
 
-    context.user_data["add_card_name"] = name
+    session["name"] = name
     await message.reply_text(
         f"✅ Name: **{name}**\n\n"
         f"**Step 2 of {ADD_CARD_TOTAL_STEPS}** — Send the **£ limit** for this card (e.g. `5000` or `5k`).",
@@ -1295,7 +1327,7 @@ async def addcredocard_receive_name(update: Update, context: ContextTypes.DEFAUL
 
 
 async def addcredocard_receive_capacity(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: ContextTypes.DEFAULT_TYPE, session: dict
 ) -> str:
     message = update.effective_message
     if not message:
@@ -1308,8 +1340,8 @@ async def addcredocard_receive_capacity(
         )
         return ADD_CARD_STEP_CAPACITY
 
-    context.user_data["add_card_capacity"] = amount
-    name = context.user_data.get("add_card_name", "")
+    session["capacity"] = amount
+    name = session.get("name", "")
     await message.reply_text(
         f"✅ Limit: **{format_amount(amount)}** for **{name}**\n\n"
         f"**Step 3 of {ADD_CARD_TOTAL_STEPS}** — Send the **last 4 digits** of the card (e.g. `1234`).\n"
@@ -1320,7 +1352,7 @@ async def addcredocard_receive_capacity(
 
 
 async def addcredocard_receive_last4(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: ContextTypes.DEFAULT_TYPE, session: dict
 ) -> str:
     settings: Settings = context.bot_data["settings"]
     message = update.effective_message
@@ -1335,7 +1367,7 @@ async def addcredocard_receive_last4(
         return ADD_CARD_STEP_LAST4
 
     existing = get_credo_credit_card_by_last4(settings.database_path, last4)
-    pending_name = (context.user_data.get("add_card_name") or "").strip()
+    pending_name = (session.get("name") or "").strip()
     if existing is not None and existing.name.lower() != pending_name.lower():
         await message.reply_text(
             f"····{last4} is already linked to **{existing.name}**.\n\n"
@@ -1344,8 +1376,8 @@ async def addcredocard_receive_last4(
         )
         return ADD_CARD_STEP_LAST4
 
-    context.user_data["add_card_last4"] = last4
-    name = context.user_data.get("add_card_name", "")
+    session["last4"] = last4
+    name = session.get("name", "")
     await message.reply_text(
         f"✅ Last 4: **····{last4}** for **{name}**\n\n"
         f"**Step 4 of {ADD_CARD_TOTAL_STEPS}** — Send the **sort code** (e.g. `12-34-56` or `123456`).",
@@ -1355,7 +1387,7 @@ async def addcredocard_receive_last4(
 
 
 async def addcredocard_receive_sort_code(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: ContextTypes.DEFAULT_TYPE, session: dict
 ) -> str:
     message = update.effective_message
     if not message:
@@ -1369,8 +1401,8 @@ async def addcredocard_receive_sort_code(
         )
         return ADD_CARD_STEP_SORT_CODE
 
-    context.user_data["add_card_sort_code"] = sort_code
-    name = context.user_data.get("add_card_name", "")
+    session["sort_code"] = sort_code
+    name = session.get("name", "")
     await message.reply_text(
         f"✅ Sort code: **{sort_code}** for **{name}**\n\n"
         f"**Step 5 of {ADD_CARD_TOTAL_STEPS}** — Send the **account number** (8 digits).",
@@ -1380,7 +1412,7 @@ async def addcredocard_receive_sort_code(
 
 
 async def addcredocard_receive_account(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: ContextTypes.DEFAULT_TYPE, session: dict
 ) -> str:
     message = update.effective_message
     if not message:
@@ -1393,8 +1425,8 @@ async def addcredocard_receive_account(
         )
         return ADD_CARD_STEP_ACCOUNT
 
-    context.user_data["add_card_account_number"] = account_number
-    name = context.user_data.get("add_card_name", "")
+    session["account_number"] = account_number
+    name = session.get("name", "")
     await message.reply_text(
         f"✅ Account: **{account_number}** for **{name}**\n\n"
         f"**Step 6 of {ADD_CARD_TOTAL_STEPS}** — Send a **photo** of the card (sent privately to users).",
@@ -1414,7 +1446,9 @@ async def addcredocard_receive_photo_text(update: Update, context: ContextTypes.
     return ADD_CARD_STEP_PHOTO
 
 
-async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | int:
+async def addcredocard_receive_photo(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, session: dict
+) -> str | int:
     settings: Settings = context.bot_data["settings"]
     message = update.effective_message
     if not message:
@@ -1425,7 +1459,7 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
         await message.reply_text("Could not read that image. Try sending a photo again.")
         return ADD_CARD_STEP_PHOTO
 
-    name = context.user_data.get("add_card_name", "").strip()
+    name = (session.get("name") or "").strip()
     if not name:
         await message.reply_text(
             f"**Step 1 of {ADD_CARD_TOTAL_STEPS}** — Send the **credit card name** first.",
@@ -1433,8 +1467,8 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
         )
         return ADD_CARD_STEP_NAME
 
-    capacity = float(context.user_data.get("add_card_capacity") or 0)
-    card_last4 = (context.user_data.get("add_card_last4") or "").strip()
+    capacity = float(session.get("capacity") or 0)
+    card_last4 = (session.get("last4") or "").strip()
     if not CARD_LAST4_PATTERN.fullmatch(card_last4):
         await message.reply_text(
             f"**Step 3 of {ADD_CARD_TOTAL_STEPS}** — Send the **last 4 digits** of the card first.",
@@ -1442,7 +1476,7 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
         )
         return ADD_CARD_STEP_LAST4
 
-    sort_code = context.user_data.get("add_card_sort_code")
+    sort_code = session.get("sort_code")
     if not sort_code:
         await message.reply_text(
             f"**Step 4 of {ADD_CARD_TOTAL_STEPS}** — Send the **sort code** first.",
@@ -1450,7 +1484,7 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
         )
         return ADD_CARD_STEP_SORT_CODE
 
-    account_number = context.user_data.get("add_card_account_number")
+    account_number = session.get("account_number")
     if not account_number:
         await message.reply_text(
             f"**Step 5 of {ADD_CARD_TOTAL_STEPS}** — Send the **account number** first.",
@@ -1478,12 +1512,8 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
         return ADD_CARD_STEP_PHOTO
 
     logger.info("Added credo card %r (requested %r)", stored_name, name)
-    context.user_data.pop("add_card_name", None)
-    context.user_data.pop("add_card_capacity", None)
-    context.user_data.pop("add_card_last4", None)
-    context.user_data.pop("add_card_sort_code", None)
-    context.user_data.pop("add_card_account_number", None)
-    context.user_data.pop("add_card_active", None)
+    user = update.effective_user
+    _clear_add_card_flow(context, user.id if user else None)
     cap_line = format_amount(capacity) if capacity > 0 else "no limit"
     limit_hint = (
         f"Don't send more than {format_amount(capacity)} in payments into this account."
@@ -1505,7 +1535,8 @@ async def addcredocard_receive_photo(update: Update, context: ContextTypes.DEFAU
 
 
 async def addcredocard_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    _clear_add_card_flow(context)
+    user = update.effective_user
+    _clear_add_card_flow(context, user.id if user else None)
     await update.effective_message.reply_text("Add card cancelled.")
 
 

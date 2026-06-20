@@ -198,8 +198,12 @@ async def mailer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text(detail or "Button click failed.")
 
 
-def _credo_conversation_active(context: ContextTypes.DEFAULT_TYPE) -> bool:
+def _credo_conversation_active(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
     """True when credo add-card wizard or card picker is in progress."""
+    from handlers.credo import is_add_card_flow_active
+
+    if user_id is not None and is_add_card_flow_active(context, user_id):
+        return True
     data = context.user_data
     return bool(
         data.get("add_card_active")
@@ -220,7 +224,7 @@ async def private_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not user or not message or not message.text:
         return
 
-    if _credo_conversation_active(context):
+    if _credo_conversation_active(context, user.id):
         return
 
     bridge = _bridge(context)
