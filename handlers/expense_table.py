@@ -60,3 +60,36 @@ def format_expense_subtitle(period_label: str) -> str:
     if text:
         text = text[0].upper() + text[1:]
     return f"{text} · new week every Sunday"
+
+
+def format_expense_report_text(
+    records: list[ExpenseRecord],
+    *,
+    database_path: str,
+    total_amount: float,
+    total_count: int,
+    title: str,
+    period_label: str,
+) -> str:
+    import html
+
+    lookup = build_expense_username_lookup(database_path, records)
+    lines = [
+        f"<b>{html.escape(title)}</b>",
+        f"<i>{html.escape(format_expense_subtitle(period_label))}</i>",
+        "",
+    ]
+    for record in records:
+        row = expense_table_row(record, username_lookup=lookup)
+        lines.append(
+            f"{html.escape(row[1])} · {html.escape(row[3])} → "
+            f"{html.escape(row[4])} ({html.escape(row[0])})"
+        )
+    lines.extend(
+        [
+            "",
+            f"<b>Total:</b> {html.escape(format_amount(total_amount))} "
+            f"({total_count} expense{'s' if total_count != 1 else ''})",
+        ]
+    )
+    return "\n".join(lines)

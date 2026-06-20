@@ -146,6 +146,28 @@ def _resolve_by_name_or_username(text: str, database_path: str):
                     and link.telegram_username.lower().lstrip("@") == username
                 ):
                     return _link_to_user(link)
+            from database import list_bot_admins, list_credo_whitelist
+
+            for entry in list_bot_admins(database_path):
+                if (
+                    entry.telegram_username
+                    and entry.telegram_username.lower().lstrip("@") == username
+                ):
+                    return _MinimalUser(
+                        entry.telegram_user_id,
+                        username=entry.telegram_username,
+                        first_name=entry.display_name or "",
+                    )
+            for entry in list_credo_whitelist(database_path):
+                if (
+                    entry.telegram_username
+                    and entry.telegram_username.lower().lstrip("@") == username
+                ):
+                    return _MinimalUser(
+                        entry.telegram_user_id,
+                        username=entry.telegram_username,
+                        first_name=entry.display_name or "",
+                    )
         return None
 
     lowered = query.lower()
@@ -274,7 +296,17 @@ async def _finalize_expense(
 
     from handlers.expense_reports import refresh_expense_report
 
-    await refresh_expense_report(context.bot, settings, chat_id=pending.chat_id)
+    posted = await refresh_expense_report(
+        context.bot, settings, chat_id=pending.chat_id
+    )
+    if not posted:
+        await context.bot.send_message(
+            chat_id=pending.chat_id,
+            text=(
+                "Expense saved but the table could not be posted. "
+                "Ask an admin to run /setnotifyexpenses and ensure the bot can send photos."
+            ),
+        )
 
 
 def _user_label_from_pending(pending: PendingExpense) -> str:
