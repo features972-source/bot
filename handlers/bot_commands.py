@@ -6,7 +6,10 @@ from database import (
     ExtensionLink,
     link_extension,
     list_links,
+    clear_expense_report_message_id,
+    get_expense_report_chat_id,
     set_expense_logging_chat_id,
+    set_expense_report_chat_id,
     set_notify_chat_id,
     unlink_by_telegram_user_id,
     unlink_extension,
@@ -333,14 +336,19 @@ async def set_notify_expenses_command(
         return
 
     set_expense_logging_chat_id(settings.database_path, chat.id)
+    if get_expense_report_chat_id(settings.database_path) is None:
+        set_expense_report_chat_id(settings.database_path, chat.id)
+        clear_expense_report_message_id(settings.database_path)
     from handlers.admin_access import sync_bot_command_menu
+    from handlers.expense_reports import refresh_expense_report
 
     await sync_bot_command_menu(context.bot, settings)
+    await refresh_expense_report(context.bot, settings, chat_id=chat.id)
     await update.effective_message.reply_text(
         f"**Expense logging** will use this group.\n"
         f"Chat id: `{chat.id}`\n\n"
-        "Use **/expense** or post lines like `£132 Tesco` here.\n\n"
-        "For the live table image, run **/setexpenses** in the group where you want it posted.",
+        "Use **/expense** or post lines like `£132 Tesco` here.\n"
+        "The expense table will post and update in this group.",
         parse_mode="Markdown",
     )
 

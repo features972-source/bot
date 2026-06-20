@@ -602,6 +602,17 @@ def get_expense_report_chat_id(path: str) -> int | None:
     return _parse_stored_chat_id(_get_bot_setting(path, EXPENSE_NOTIFY_CHAT_ID_KEY))
 
 
+def get_expense_table_chat_id(path: str) -> int | None:
+    """Group where the live expense table image is posted."""
+    chat_id = _parse_stored_chat_id(_get_bot_setting(path, EXPENSE_REPORT_CHAT_ID_KEY))
+    if chat_id is not None:
+        return chat_id
+    chat_id = _parse_stored_chat_id(_get_bot_setting(path, EXPENSE_LOGGING_CHAT_ID_KEY))
+    if chat_id is not None:
+        return chat_id
+    return _parse_stored_chat_id(_get_bot_setting(path, EXPENSE_NOTIFY_CHAT_ID_KEY))
+
+
 def set_expense_report_chat_id(path: str, chat_id: int) -> None:
     _set_bot_setting(path, EXPENSE_REPORT_CHAT_ID_KEY, str(chat_id))
 

@@ -274,7 +274,7 @@ async def _finalize_expense(
 
     from handlers.expense_reports import refresh_expense_report
 
-    await refresh_expense_report(context.bot, settings)
+    await refresh_expense_report(context.bot, settings, chat_id=pending.chat_id)
 
 
 def _user_label_from_pending(pending: PendingExpense) -> str:
@@ -482,4 +482,4 @@ async def expense_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     from handlers.expense_reports import refresh_expense_report
 
     await _delete_messages(context.bot, chat.id, [message.message_id])
-    await refresh_expense_report(context.bot, settings)
+    await refresh_expense_report(context.bot, settings, chat_id=chat.id)

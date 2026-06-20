@@ -14,9 +14,12 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 from config import Settings
 from database import (
     clear_expense_report_message_id,
+    get_expense_logging_chat_id,
     get_expense_report_chat_id,
     get_expense_report_message_id,
+    get_expense_table_chat_id,
     list_expenses_since,
+    set_expense_logging_chat_id,
     set_expense_report_chat_id,
     set_expense_report_message_id,
     get_expense_totals,
@@ -130,9 +133,15 @@ async def _run_pending_refresh(key: str) -> None:
     await refresh_expense_report(bot, settings)
 
 
-async def refresh_expense_report(bot, settings: Settings) -> None:
-    chat_id = get_expense_report_chat_id(settings.database_path)
-    if chat_id is None:
+async def refresh_expense_report(
+    bot, settings: Settings, *, chat_id: int | None = None
+) -> None:
+    target_chat_id = chat_id or get_expense_table_chat_id(settings.database_path)
+    if target_chat_id is None:
+        logger.warning(
+            "No expense table chat configured for %s — run /setnotifyexpenses or /setexpenses",
+            settings.bot_display_name,
+        )
         return
 
     lock = _REFRESH_LOCKS[settings.database_path]
@@ -143,30 +152,32 @@ async def refresh_expense_report(bot, settings: Settings) -> None:
         if image_bytes is None:
             text = build_expense_report_empty_text(settings)
             if message_id is not None:
-                await _delete_notify_message(bot, chat_id, message_id)
+                await _delete_notify_message(bot, target_chat_id, message_id)
                 message_id = None
             try:
                 sent = await bot.send_message(
-                    chat_id=chat_id, text=text, parse_mode="HTML"
+                    chat_id=target_chat_id, text=text, parse_mode="HTML"
                 )
                 set_expense_report_message_id(settings.database_path, sent.message_id)
             except Exception:
-                logger.exception("Failed to post empty expense report")
+                logger.exception(
+                    "Failed to post empty expense report to chat %s", target_chat_id
+                )
             return
 
         if message_id is not None:
-            await _delete_notify_message(bot, chat_id, message_id)
+            await _delete_notify_message(bot, target_chat_id, message_id)
 
         try:
             sent = await bot.send_photo(
-                chat_id=chat_id, photo=_photo_file(image_bytes)
+                chat_id=target_chat_id, photo=_photo_file(image_bytes)
             )
             set_expense_report_message_id(settings.database_path, sent.message_id)
         except Exception:
             logger.exception(
                 "Failed to post expense report image for %s to chat %s",
                 settings.bot_display_name,
-                chat_id,
+                target_chat_id,
             )
 
 
@@ -254,6 +265,8 @@ async def setexpenses_callback(
     await query.answer()
     old_chat_id = get_expense_report_chat_id(target_settings.database_path)
     set_expense_report_chat_id(target_settings.database_path, chat.id)
+    if get_expense_logging_chat_id(target_settings.database_path) is None:
+        set_expense_logging_chat_id(target_settings.database_path, chat.id)
     if old_chat_id is None or old_chat_id != chat.id:
         clear_expense_report_message_id(target_settings.database_path)
 
@@ -266,7 +279,7 @@ async def setexpenses_callback(
             parse_mode="Markdown",
         )
 
-    schedule_expense_report_refresh(context.bot, target_settings)
     from handlers.admin_access import sync_bot_command_menu
 
     await sync_bot_command_menu(context.bot, target_settings)
+    await refresh_expense_report(context.bot, target_settings, chat_id=chat.id)
