@@ -32,7 +32,7 @@ from handlers.panic import build_panic_handlers
 from handlers.payment_reports import build_payment_report_handlers
 from handlers.premium_access import build_premium_access_handlers
 from handlers.nemesis import build_nemesis_handlers
-from handlers.pass_queue import build_pass_queue_handlers
+from handlers.pass_queue import build_pass_queue_handlers, build_pass_queue_notes_handler
 from handlers.profit_export import build_profit_export_handlers
 
 
@@ -112,8 +112,7 @@ def _format_help_text(
             "/export — jobs payout %, owed per user, expenses & net profit (today · 7 · all)\n\n"
             "<b>🎯 Pass queue</b>\n"
             "/joinqueue — join queue for the next pass\n"
-            "/leavequeue — leave the queue · /queue — who's waiting\n"
-            "/pass — reply to notes to offer pass (if auto-detect misses)\n\n"
+            "/leavequeue — leave the queue · /queue — who's waiting\n\n"
             "<b>👑 Admins</b>\n"
             "/admin · /addadmin · /removeadmin — manage bot admins\n\n"
             "<b>🚫 Blacklist</b>\n"

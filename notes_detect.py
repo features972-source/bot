@@ -138,14 +138,10 @@ def _looks_like_casual_chat(lines: list[str]) -> bool:
 
 
 def _queue_waiting_notes(lines: list[str], cleaned: str) -> bool:
-    """When someone is waiting in queue, treat obvious multi-line blocks as notes."""
-    if len(lines) < 2 or len(cleaned) < 12:
+    """Someone is waiting — any non-chat multi-line paste is notes."""
+    if len(lines) < 2 or len(cleaned) < 10:
         return False
-    if _looks_like_casual_chat(lines):
-        return False
-    if len(lines) >= 2:
-        return True
-    return False
+    return not _looks_like_casual_chat(lines)
 
 
 def _freeform_notes(text: str, lines: list[str]) -> bool:
@@ -157,23 +153,14 @@ def _freeform_notes(text: str, lines: list[str]) -> bool:
     has_signal = _has_content_signal(text)
     name_first = _person_name_first(lines[0])
 
-    if line_count >= 2 and has_signal:
+    if has_signal:
         return True
-    if line_count >= 2 and info_lines >= 1:
+    if info_lines >= 1:
         return True
-    if line_count >= 3 and _looks_like_casual_chat(lines):
-        return False
     if line_count >= 3 and name_first:
         return True
-    if line_count >= 3 and info_lines >= 1:
+    if line_count >= 4 and not _looks_like_casual_chat(lines):
         return True
-    if line_count >= 2 and name_first and info_lines >= 1:
-        return True
-    if line_count >= 4:
-        return not _looks_like_casual_chat(lines)
-    if line_count >= 5:
-        return True
-
     return False
 
 
@@ -181,7 +168,7 @@ def looks_like_notes(text: str | None, *, queue_waiting: bool = False) -> bool:
     if not text:
         return False
     cleaned = text.strip()
-    if len(cleaned) < 12 or OUT_PATTERN.search(cleaned):
+    if len(cleaned) < 10 or OUT_PATTERN.search(cleaned):
         return False
     if cleaned.startswith("/"):
         return False

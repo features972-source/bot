@@ -33,20 +33,25 @@ PASS_STATUS_PENDING = "pending"
 PASS_STATUS_TAKEN = "taken"
 PASS_STATUS_BRUSHED = "brushed"
 
+PASS_NOTES_FILTER = filters.ChatType.GROUPS & ~filters.COMMAND
+
 
 def build_pass_queue_handlers() -> list:
     return [
         CommandHandler("joinqueue", joinqueue_command),
         CommandHandler("leavequeue", leavequeue_command),
         CommandHandler("queue", queue_command),
-        CommandHandler("pass", pass_command),
         CallbackQueryHandler(pass_callback, pattern=rf"^{re.escape(CALLBACK_PREFIX)}"),
-        MessageHandler(
-            filters.ChatType.GROUPS & ~filters.COMMAND,
-            notes_message_handler,
-            block=False,
-        ),
     ]
+
+
+def build_pass_queue_notes_handler() -> MessageHandler:
+    """Registered early (group -2) so notes are detected before payment/expense handlers."""
+    return MessageHandler(
+        PASS_NOTES_FILTER,
+        notes_message_handler,
+        block=False,
+    )
 
 
 def _display_name(user) -> str:
@@ -119,8 +124,7 @@ async def joinqueue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if joined:
         await message.reply_text(
             f"✅ You're in the pass queue (#{position}).\n"
-            "You'll get @mentioned when a starter posts notes.\n\n"
-            "<i>Starters: post notes, or reply to them with /pass</i>",
+            "You'll get @mentioned when a starter posts notes.",
             parse_mode="HTML",
         )
     else:
@@ -162,44 +166,6 @@ async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
-async def pass_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manual trigger — reply to notes with /pass if auto-detect misses them."""
-    settings: Settings = context.bot_data["settings"]
-    user = update.effective_user
-    message = update.effective_message
-    chat = update.effective_chat
-    if not user or not message or not chat:
-        return
-    if not _pass_queue_chat_allowed(chat):
-        await message.reply_text("Use /pass in your team group.")
-        return
-
-    reply = message.reply_to_message
-    if reply is not None and not reply.from_user.is_bot:
-        notes_text = (reply.text or reply.caption or "").strip()
-        notes_message = reply
-        starter = reply.from_user
-    else:
-        notes_text = (message.text or message.caption or "").strip()
-        notes_text = re.sub(r"^/\w+(?:@\w+)?\s*", "", notes_text, count=1).strip()
-        notes_message = message
-        starter = user
-
-    if not notes_text:
-        await message.reply_text(
-            "Reply to the notes message with /pass to offer them to the queue."
-        )
-        return
-
-    await _offer_pass(
-        update,
-        context,
-        notes_text=notes_text,
-        notes_message=notes_message,
-        starter=starter,
-    )
-
-
 async def notes_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     message = update.effective_message
@@ -216,7 +182,10 @@ async def notes_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     queue = list_pass_queue(settings.database_path)
     queue_waiting = bool(queue)
-    if not looks_like_notes(text, queue_waiting=queue_waiting):
+    if not queue_waiting:
+        return
+
+    if not looks_like_notes(text, queue_waiting=True):
         return
     if pass_offer_for_notes(settings.database_path, chat.id, message.message_id):
         return
@@ -299,9 +268,6 @@ async def _offer_pass(
             "Failed to create pass offer chat=%s notes_msg=%s",
             chat.id,
             notes_message.message_id,
-        )
-        await message.reply_text(
-            "Could not offer this pass — try replying to the notes with /pass."
         )
 
 

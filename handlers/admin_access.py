@@ -58,7 +58,6 @@ CREDO_GROUP_COMMANDS = [
     BotCommand("leaderboard", "Opener & closer rankings"),
     BotCommand("nemesis", "Head-to-head payment rivalry"),
     BotCommand("joinqueue", "Join pass queue for starter notes"),
-    BotCommand("pass", "Offer notes to the pass queue (reply)"),
     BotCommand("queue", "Who is waiting for a pass"),
     BotCommand("cc", "Pick a credo card"),
     BotCommand("credos", "Pick a credo card"),
