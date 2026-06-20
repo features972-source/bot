@@ -57,6 +57,8 @@ CREDO_GROUP_COMMANDS = [
     BotCommand("alltime", "All-time payment totals (short)"),
     BotCommand("leaderboard", "Opener & closer rankings"),
     BotCommand("nemesis", "Head-to-head payment rivalry"),
+    BotCommand("joinqueue", "Join pass queue for starter notes"),
+    BotCommand("queue", "Who is waiting for a pass"),
     BotCommand("cc", "Pick a credo card"),
     BotCommand("credos", "Pick a credo card"),
     BotCommand("usingcc", "See which cards are in use"),
@@ -65,6 +67,7 @@ CREDO_GROUP_COMMANDS = [
 
 EXPENSE_GROUP_COMMANDS = CREDO_GROUP_COMMANDS + [
     BotCommand("expense", "Log expense (who · amount · where)"),
+    BotCommand("removeexpense", "Remove an expense (# or reply)"),
 ]
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 from dataclasses import dataclass, field
 
@@ -10,8 +11,18 @@ from telegram.error import BadRequest
 from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import Settings
-from database import get_expense_logging_chat_id, list_links, record_expense
-from handlers.admin_access import USERNAME_TOKEN, _MinimalUser, _resolve_target_user, _user_label
+from database import (
+    ExpenseRecord,
+    delete_expense,
+    get_expense_by_id,
+    get_expense_by_message,
+    get_expense_logging_chat_id,
+    list_links,
+    list_recent_expenses,
+    record_expense,
+)
+from handlers.admin_access import USERNAME_TOKEN, _MinimalUser, _resolve_target_user, _user_label, require_admin
+from handlers.payment_table import format_payment_date
 from money_format import format_amount, parse_expense_amount, parse_expense_line
 
 logger = logging.getLogger(__name__)
@@ -47,6 +58,7 @@ def build_expense_message_handlers() -> list:
 def build_expense_command_handlers() -> list:
     return [
         CommandHandler("expense", expense_command, block=False),
+        CommandHandler("removeexpense", removeexpense_command, block=False),
         CommandHandler("cancel", expense_cancel_command, block=False),
     ]
 
@@ -515,3 +527,97 @@ async def expense_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     await _delete_messages(context.bot, chat.id, [message.message_id])
     await refresh_expense_report(context.bot, settings, chat_id=chat.id)
+
+
+def _parse_expense_id_arg(raw: str) -> int | None:
+    try:
+        return int(raw.lstrip("#"))
+    except ValueError:
+        return None
+
+
+def _resolve_expense_from_reply(database_path: str, message) -> ExpenseRecord | None:
+    if message is None or message.reply_to_message is None:
+        return None
+    chat_id = message.chat_id
+    current = message.reply_to_message
+    for _ in range(6):
+        if current is None:
+            break
+        record = get_expense_by_message(
+            database_path,
+            chat_id=chat_id,
+            telegram_message_id=current.message_id,
+        )
+        if record is not None:
+            return record
+        current = current.reply_to_message
+    return None
+
+
+def _format_expense_block(record: ExpenseRecord) -> str:
+    user = _MinimalUser(
+        record.telegram_user_id,
+        username=record.telegram_username,
+        first_name=record.display_name or "",
+    )
+    when = format_payment_date(record.created_at, compact=True)
+    return (
+        f"#{record.id} · {_user_label(user)} · {format_amount(record.amount)} · "
+        f"{html.escape(record.reason)} ({html.escape(when)})"
+    )
+
+
+async def removeexpense_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not await require_admin(update, settings, deny_message="Admin only."):
+        return
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    expense_id: int | None = None
+    if context.args:
+        expense_id = _parse_expense_id_arg(context.args[0])
+    if expense_id is None:
+        record = _resolve_expense_from_reply(settings.database_path, message)
+        if record is not None:
+            expense_id = record.id
+
+    if expense_id is None:
+        records = list_recent_expenses(settings.database_path, limit=10)
+        if not records:
+            await message.reply_text("No expenses logged yet.")
+            return
+        blocks = [_format_expense_block(record) for record in records]
+        await message.reply_text(
+            "<b>Remove an expense</b>\n\n"
+            "• Reply to the expense message with /removeexpense\n"
+            "• Or: /removeexpense &lt;#&gt; (see # on the expense table)\n\n"
+            f"<b>Recent expenses</b>\n\n"
+            f"{'\n\n'.join(blocks)}",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        return
+
+    record = get_expense_by_id(settings.database_path, expense_id)
+    if record is None:
+        await message.reply_text(f"No expense with #{expense_id}.")
+        return
+
+    amount = format_amount(record.amount)
+    if not delete_expense(settings.database_path, expense_id):
+        await message.reply_text(f"Could not remove expense #{expense_id}.")
+        return
+
+    await message.reply_text(
+        f"🗑 Removed {html.escape(amount)} "
+        f"(#{expense_id}) — {html.escape(record.reason)}.",
+        parse_mode="HTML",
+    )
+
+    from handlers.expense_reports import refresh_expense_report
+
+    await refresh_expense_report(context.bot, settings)

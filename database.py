@@ -166,6 +166,31 @@ class PaymentNemesis:
 
 
 @dataclass
+class PassQueueEntry:
+    user_id: int
+    telegram_username: str | None
+    display_name: str | None
+    joined_at: str
+
+
+@dataclass
+class PassOffer:
+    id: int
+    chat_id: int
+    notes_message_id: int
+    offer_message_id: int | None
+    starter_user_id: int
+    starter_username: str | None
+    starter_display_name: str | None
+    assigned_user_id: int
+    assigned_username: str | None
+    assigned_display_name: str | None
+    notes_text: str
+    status: str
+    created_at: str
+
+
+@dataclass
 class CompletedCall:
     id: int
     extension: str
@@ -504,6 +529,36 @@ def init_db(path: str) -> None:
                 user_b_display TEXT,
                 created_by_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pass_queue (
+                telegram_user_id INTEGER PRIMARY KEY,
+                telegram_username TEXT,
+                display_name TEXT,
+                joined_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pass_offers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                notes_message_id INTEGER NOT NULL,
+                offer_message_id INTEGER,
+                starter_user_id INTEGER NOT NULL,
+                starter_username TEXT,
+                starter_display_name TEXT,
+                assigned_user_id INTEGER NOT NULL,
+                assigned_username TEXT,
+                assigned_display_name TEXT,
+                notes_text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                UNIQUE(chat_id, notes_message_id)
             )
             """
         )
@@ -1581,6 +1636,50 @@ def record_expense(
         return int(cursor.lastrowid) if cursor.lastrowid else None
 
 
+def get_expense_by_id(path: str, expense_id: int) -> ExpenseRecord | None:
+    with _connect(path) as conn:
+        row = conn.execute(
+            f"{_EXPENSE_SELECT} WHERE id = ? LIMIT 1",
+            (expense_id,),
+        ).fetchone()
+    return _expense_record_from_row(row) if row else None
+
+
+def get_expense_by_message(
+    path: str, *, chat_id: int, telegram_message_id: int
+) -> ExpenseRecord | None:
+    with _connect(path) as conn:
+        row = conn.execute(
+            f"""
+            {_EXPENSE_SELECT}
+            WHERE chat_id = ? AND telegram_message_id = ?
+            LIMIT 1
+            """,
+            (chat_id, telegram_message_id),
+        ).fetchone()
+    return _expense_record_from_row(row) if row else None
+
+
+def list_recent_expenses(path: str, *, limit: int = 30) -> list[ExpenseRecord]:
+    with _connect(path) as conn:
+        rows = conn.execute(
+            f"""
+            {_EXPENSE_SELECT}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [_expense_record_from_row(row) for row in rows]
+
+
+def delete_expense(path: str, expense_id: int) -> bool:
+    with _connect(path) as conn:
+        cursor = conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 def list_expenses_since(path: str, *, since: datetime) -> list[ExpenseRecord]:
     with _connect(path) as conn:
         rows = conn.execute(
@@ -1869,6 +1968,250 @@ def clear_payment_nemesis(path: str, chat_id: int) -> bool:
         )
         conn.commit()
         return cursor.rowcount > 0
+
+
+def _pass_queue_entry_from_row(row) -> PassQueueEntry:
+    return PassQueueEntry(
+        user_id=int(row[0]),
+        telegram_username=row[1],
+        display_name=row[2],
+        joined_at=row[3],
+    )
+
+
+def _pass_offer_from_row(row) -> PassOffer:
+    return PassOffer(
+        id=int(row[0]),
+        chat_id=int(row[1]),
+        notes_message_id=int(row[2]),
+        offer_message_id=int(row[3]) if row[3] is not None else None,
+        starter_user_id=int(row[4]),
+        starter_username=row[5],
+        starter_display_name=row[6],
+        assigned_user_id=int(row[7]),
+        assigned_username=row[8],
+        assigned_display_name=row[9],
+        notes_text=row[10],
+        status=row[11],
+        created_at=row[12],
+    )
+
+
+def join_pass_queue(
+    path: str,
+    *,
+    telegram_user_id: int,
+    telegram_username: str | None,
+    display_name: str | None,
+) -> bool:
+    """Return True if newly joined, False if already in queue."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect(path) as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM pass_queue WHERE telegram_user_id = ?",
+            (telegram_user_id,),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE pass_queue
+                SET telegram_username = ?, display_name = ?
+                WHERE telegram_user_id = ?
+                """,
+                (telegram_username, display_name, telegram_user_id),
+            )
+            conn.commit()
+            return False
+        conn.execute(
+            """
+            INSERT INTO pass_queue (telegram_user_id, telegram_username, display_name, joined_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (telegram_user_id, telegram_username, display_name, now),
+        )
+        conn.commit()
+        return True
+
+
+def leave_pass_queue(path: str, telegram_user_id: int) -> bool:
+    with _connect(path) as conn:
+        cursor = conn.execute(
+            "DELETE FROM pass_queue WHERE telegram_user_id = ?",
+            (telegram_user_id,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def list_pass_queue(path: str) -> list[PassQueueEntry]:
+    with _connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT telegram_user_id, telegram_username, display_name, joined_at
+            FROM pass_queue
+            ORDER BY joined_at ASC, telegram_user_id ASC
+            """
+        ).fetchall()
+    return [_pass_queue_entry_from_row(row) for row in rows]
+
+
+def get_pass_queue_position(path: str, telegram_user_id: int) -> int:
+    entries = list_pass_queue(path)
+    for index, entry in enumerate(entries, start=1):
+        if entry.user_id == telegram_user_id:
+            return index
+    return len(entries) + 1
+
+
+def rotate_pass_queue_user_to_back(path: str, telegram_user_id: int) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT telegram_username, display_name
+            FROM pass_queue
+            WHERE telegram_user_id = ?
+            """,
+            (telegram_user_id,),
+        ).fetchone()
+        if not row:
+            return
+        conn.execute(
+            "DELETE FROM pass_queue WHERE telegram_user_id = ?",
+            (telegram_user_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO pass_queue (telegram_user_id, telegram_username, display_name, joined_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (telegram_user_id, row[0], row[1], now),
+        )
+        conn.commit()
+
+
+def pass_offer_for_notes(path: str, chat_id: int, notes_message_id: int) -> bool:
+    with _connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM pass_offers
+            WHERE chat_id = ? AND notes_message_id = ?
+            """,
+            (chat_id, notes_message_id),
+        ).fetchone()
+    return row is not None
+
+
+def create_pass_offer(
+    path: str,
+    *,
+    chat_id: int,
+    notes_message_id: int,
+    starter_user_id: int,
+    starter_username: str | None,
+    starter_display_name: str | None,
+    assigned_user_id: int,
+    assigned_username: str | None,
+    assigned_display_name: str | None,
+    notes_text: str,
+) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect(path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO pass_offers (
+                chat_id,
+                notes_message_id,
+                starter_user_id,
+                starter_username,
+                starter_display_name,
+                assigned_user_id,
+                assigned_username,
+                assigned_display_name,
+                notes_text,
+                status,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            """,
+            (
+                chat_id,
+                notes_message_id,
+                starter_user_id,
+                starter_username,
+                starter_display_name,
+                assigned_user_id,
+                assigned_username,
+                assigned_display_name,
+                notes_text,
+                now,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def get_pass_offer(path: str, offer_id: int) -> PassOffer | None:
+    with _connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+                id,
+                chat_id,
+                notes_message_id,
+                offer_message_id,
+                starter_user_id,
+                starter_username,
+                starter_display_name,
+                assigned_user_id,
+                assigned_username,
+                assigned_display_name,
+                notes_text,
+                status,
+                created_at
+            FROM pass_offers
+            WHERE id = ?
+            """,
+            (offer_id,),
+        ).fetchone()
+    return _pass_offer_from_row(row) if row else None
+
+
+def update_pass_offer(
+    path: str,
+    offer_id: int,
+    *,
+    offer_message_id: int | None = None,
+    assigned_user_id: int | None = None,
+    assigned_username: str | None = None,
+    assigned_display_name: str | None = None,
+    status: str | None = None,
+) -> None:
+    fields: list[str] = []
+    params: list[object] = []
+    if offer_message_id is not None:
+        fields.append("offer_message_id = ?")
+        params.append(offer_message_id)
+    if assigned_user_id is not None:
+        fields.append("assigned_user_id = ?")
+        params.append(assigned_user_id)
+    if assigned_username is not None:
+        fields.append("assigned_username = ?")
+        params.append(assigned_username)
+    if assigned_display_name is not None:
+        fields.append("assigned_display_name = ?")
+        params.append(assigned_display_name)
+    if status is not None:
+        fields.append("status = ?")
+        params.append(status)
+    if not fields:
+        return
+    params.append(offer_id)
+    with _connect(path) as conn:
+        conn.execute(
+            f"UPDATE pass_offers SET {', '.join(fields)} WHERE id = ?",
+            params,
+        )
+        conn.commit()
 
 
 def add_credo_whitelist_user(
