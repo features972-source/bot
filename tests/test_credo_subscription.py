@@ -96,6 +96,19 @@ class CredoSubscriptionTests(unittest.TestCase):
         self.assertTrue(is_credo_subscription_active(self.db_path))
         self.assertFalse(list_bot_admins(self.db_path))
 
+    def test_start_key_prefix_accepted_without_awaiting_flag(self) -> None:
+        """Keys starting with credo- can be pasted directly after /start prompt."""
+        key = create_admin_license_key(self.db_path, created_by_user_id=1000)
+        _, admin_until = redeem_admin_license_key(
+            self.db_path,
+            key=key,
+            redeemed_by_user_id=2000,
+            grant_admin=True,
+            display_name="Alice",
+        )
+        self.assertIsNotNone(admin_until)
+        self.assertTrue(is_bot_admin(self.settings, self.db_path, 2000))
+
 
 if __name__ == "__main__":
     unittest.main()

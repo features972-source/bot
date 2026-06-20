@@ -459,7 +459,7 @@ async def admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lines.extend(
             [
                 "",
-                "Primary admin adds others with /genkey then /addadmin <key> (4 weeks each).",
+                "Primary admin adds others with /genkey — they /start and paste the key.",
                 "/subscription — bot status · /redeemkey — extend bot without new admin",
             ]
         )

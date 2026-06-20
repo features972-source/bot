@@ -31,6 +31,8 @@ from handlers.admin_access import is_primary_admin
 
 logger = logging.getLogger(__name__)
 
+AWAITING_LICENSE_KEY = "credo_awaiting_license_key"
+
 
 def build_credo_subscription_handlers() -> list:
     return [
@@ -38,9 +40,69 @@ def build_credo_subscription_handlers() -> list:
         CommandHandler("redeemkey", redeemkey_command),
         CommandHandler("subscription", subscription_command),
         CommandHandler("keys", keys_command),
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
+            license_key_entry,
+            block=False,
+        ),
         MessageHandler(filters.ALL, subscription_guard, block=False),
         CallbackQueryHandler(subscription_guard, block=False),
     ]
+
+
+async def prompt_for_license_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data[AWAITING_LICENSE_KEY] = True
+    await update.effective_message.reply_text(
+        f"💳 <b>Welcome</b>\n\n"
+        f"Send your license key to activate <b>{ADMIN_LICENSE_WEEKS} weeks</b> of admin access.\n\n"
+        "The key looks like: <code>credo-xxxxxxxxxxxx</code>",
+        parse_mode="HTML",
+    )
+
+
+async def license_key_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.bot_data["settings"]
+    if not settings.credo_only_mode:
+        return
+
+    user = update.effective_user
+    message = update.effective_message
+    if not user or not message or not message.text:
+        return
+    if is_primary_admin(settings, user.id):
+        return
+
+    awaiting = context.user_data.get(AWAITING_LICENSE_KEY)
+    text = message.text.strip()
+    if not awaiting and not text.lower().startswith("credo-"):
+        return
+
+    try:
+        subscription_until, admin_until = redeem_admin_license_key(
+            settings.database_path,
+            key=text,
+            redeemed_by_user_id=user.id,
+            grant_admin=True,
+            telegram_username=user.username,
+            display_name=_display_name(user),
+        )
+    except ValueError:
+        await message.reply_text(
+            "Invalid or already used key.\n\nSend /start to try again."
+        )
+        context.user_data.pop(AWAITING_LICENSE_KEY, None)
+        return
+
+    context.user_data.pop(AWAITING_LICENSE_KEY, None)
+    from handlers.admin_access import sync_bot_command_menu
+
+    await sync_bot_command_menu(context.bot, settings)
+    await message.reply_text(
+        f"✅ Admin access activated until "
+        f"{admin_until.astimezone().strftime('%d %b %Y')}.\n"
+        f"Bot active until {subscription_until.astimezone().strftime('%d %b %Y')}.\n\n"
+        "Send /help for commands."
+    )
 
 
 def _format_until(dt: datetime | None) -> str:
@@ -59,10 +121,20 @@ async def subscription_guard(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     if is_primary_admin(settings, user.id):
         return
-    if is_credo_subscription_active(settings.database_path):
+    if context.user_data.get(AWAITING_LICENSE_KEY):
         return
 
     message = update.effective_message
+    if message and message.text:
+        text = message.text.strip()
+        if text.startswith("/start"):
+            return
+        if text.lower().startswith("credo-"):
+            return
+
+    if is_credo_subscription_active(settings.database_path):
+        return
+
     if message:
         await message.reply_text(
             "This bot's subscription has expired.\n\n"
@@ -92,10 +164,8 @@ async def genkey_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_text(
         f"New admin key (single use, {ADMIN_LICENSE_WEEKS} weeks):\n\n"
         f"`{key}`\n\n"
-        f"Grant admin: reply to someone with\n"
-        f"`/addadmin {key}`\n\n"
-        f"Or extend bot only:\n"
-        f"`/redeemkey {key}`",
+        f"Share it with them — they DM the bot, send /start, then paste the key.\n\n"
+        f"Or extend bot only (owner): `/redeemkey {key}`",
         parse_mode="Markdown",
     )
 

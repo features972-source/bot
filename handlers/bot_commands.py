@@ -78,7 +78,7 @@ def _format_credo_only_help_text(*, admin: bool, credo: bool, bot_name: str, pri
             f"💳 <b>{bot_name} — owner</b>\n\n"
             "<b>Subscription</b>\n"
             "/genkey — create a 4-week license key\n"
-            "/addadmin &lt;key&gt; — grant admin (reply to user)\n"
+            "Share key → they send /start and paste it\n"
             "/redeemkey &lt;key&gt; — extend bot 4 weeks only\n"
             "/subscription · /keys — status &amp; unused keys\n\n"
             "<b>Cards</b>\n"
@@ -254,12 +254,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     admin = is_bot_admin(settings, settings.database_path, user.id)
     if settings.credo_only_mode:
         from handlers.credo import is_credo_allowed
+        from handlers.credo_subscription import prompt_for_license_key
 
-        if admin:
+        if is_primary_admin(settings, user.id):
             text = (
                 f"💳 <b>{bot_name}</b>\n\n"
                 "Credo card bot — manage cards and whitelist.\n\n"
                 "Send /help for the full command list."
+            )
+        elif admin:
+            text = (
+                f"💳 <b>{bot_name}</b>\n\n"
+                "You're an admin.\n\n"
+                "Send /help for commands or /cc to view cards."
             )
         elif is_credo_allowed(settings, settings.database_path, user.id):
             text = (
@@ -267,11 +274,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 "Send /cc (or /credos) to view cards and capacity, or /help for commands."
             )
         else:
-            text = (
-                f"💳 <b>{bot_name}</b>\n\n"
-                "This bot is for credo cards only.\n\n"
-                "Ask an admin to add you with /addcredouser."
-            )
+            await prompt_for_license_key(update, context)
+            return
     elif admin:
         text = (
             f"📱 <b>{bot_name}</b>\n\n"
