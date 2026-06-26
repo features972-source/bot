@@ -54,6 +54,10 @@ TELEGRAM_EDIT_SPACING_SECONDS = 0.4
 
 RECENT_TRANSFER_WINDOW_SECONDS = 45
 
+TRANSFER_OUT_COOLDOWN_SECONDS = 45
+
+RECENT_TRANSFER_OUT_KEY = "recent_transfer_out_extensions"
+
 RECENT_ANNOUNCE_KEY = "recent_call_announces"
 
 ANNOUNCE_LOCKS_KEY = "announce_locks"
@@ -353,6 +357,24 @@ def format_transfer_sent_message(*, from_link: ExtensionLink, to_link: Extension
 
 
 
+def format_transfer_sender_ended_message(
+    *,
+    from_link: ExtensionLink,
+    to_link: ExtensionLink,
+    duration_seconds: int,
+) -> str:
+    lines = [
+        "📞❌ <b>CALL ENDED · TRANSFERRED</b>",
+        f"👤 <b>To</b> · {format_bold_agent_label(to_link)}",
+        f"👤 <b>From</b> · {format_bold_agent_label(from_link)}",
+        f"⏱️ <b>Duration</b> · <b>{format_duration(duration_seconds)}</b>",
+    ]
+    return "\n".join(lines)
+
+
+
+
+
 def _notify_chat_ids(settings, bot_data: dict) -> list[int]:
 
     primary = bot_data.get("notify_chat_id") or settings.notify_chat_id
@@ -642,6 +664,48 @@ def register_recent_call_handler(
         if float(info.get("at", 0)) < stale_before:
 
             recent.pop(key, None)
+
+
+
+
+
+def _recent_transfer_out(bot_data: dict) -> dict[str, float]:
+
+    return bot_data.setdefault(RECENT_TRANSFER_OUT_KEY, {})
+
+
+
+
+
+def register_transfer_out(bot_data: dict, extension: str) -> None:
+
+    now = time.monotonic()
+
+    recent = _recent_transfer_out(bot_data)
+
+    recent[extension] = now
+
+    stale_before = now - TRANSFER_OUT_COOLDOWN_SECONDS
+
+    for ext, at in list(recent.items()):
+
+        if at < stale_before:
+
+            recent.pop(ext, None)
+
+
+
+
+
+def was_recent_transfer_out(bot_data: dict, extension: str) -> bool:
+
+    at = _recent_transfer_out(bot_data).get(extension)
+
+    if at is None:
+
+        return False
+
+    return time.monotonic() - at <= TRANSFER_OUT_COOLDOWN_SECONDS
 
 
 
@@ -1043,6 +1107,18 @@ async def announce_call_started(
 
             return False
 
+        if was_recent_transfer_out(bot_data, extension):
+
+            logger.info(
+
+                "Skipping on-phone after transfer out ext %s",
+
+                extension,
+
+            )
+
+            return False
+
         notify_chat_id = bot_data.get("notify_chat_id") or settings.notify_chat_id
         if notify_chat_id is not None and is_chat_blacklisted(
             settings.database_path,
@@ -1259,6 +1335,10 @@ async def announce_transfer_received(
 
 
 
+    register_transfer_out(bot_data, from_extension)
+
+
+
     if from_extension in active:
 
         active[from_extension].clear()
@@ -1269,6 +1349,10 @@ async def announce_transfer_received(
 
     if sender_live is not None:
 
+        sender_link = from_link or sender_live.link
+
+        duration = max(1, int(time.monotonic() - sender_live.started_at))
+
         await _stop_live_call(
 
             bot,
@@ -1277,27 +1361,15 @@ async def announce_transfer_received(
 
             from_extension,
 
-            final_text=format_transfer_sent_message(
+            final_text=format_transfer_sender_ended_message(
 
-                from_link=from_link or sender_live.link,
+                from_link=sender_link,
 
                 to_link=to_link,
 
+                duration_seconds=duration,
+
             ),
-
-        )
-
-    elif from_link is not None:
-
-        await send_to_notify_chats(
-
-            bot,
-
-            settings,
-
-            bot_data,
-
-            text=format_transfer_sent_message(from_link=from_link, to_link=to_link),
 
         )
 

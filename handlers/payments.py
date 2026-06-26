@@ -91,6 +91,10 @@ ON_PHONE_STARTER_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
+        r"🔀\s+ON CALL · TRANSFER",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"📞❌\s+CALL ENDED",
         re.IGNORECASE,
     ),
@@ -98,6 +102,10 @@ ON_PHONE_STARTER_PATTERNS = (
         r"📞🟢\s+(.+?)\s+is on the phone",
         re.IGNORECASE | re.DOTALL,
     ),
+)
+TRANSFER_TO_LINE = re.compile(
+    r"👤\s*To\s*·\s*(.+?)(?:\s*\n|$)",
+    re.IGNORECASE | re.DOTALL,
 )
 USERNAME_IN_LABEL = re.compile(r"@([A-Za-z0-9_]{4,})")
 
@@ -502,7 +510,10 @@ def _starter_from_on_phone_text(database_path: str, text: str) -> ExtensionLink 
     for pattern in ON_PHONE_STARTER_PATTERNS:
         if not pattern.search(plain):
             continue
-        agent_match = CALL_AGENT_LINE.search(plain)
+        if "TRANSFER" in pattern.pattern:
+            agent_match = TRANSFER_TO_LINE.search(plain)
+        else:
+            agent_match = CALL_AGENT_LINE.search(plain)
         if not agent_match:
             continue
         link = _link_from_on_phone_label(database_path, agent_match.group(1))
