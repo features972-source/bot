@@ -292,14 +292,14 @@ def format_off_phone_message(
     *,
     duration_seconds: int | None = None,
 ) -> str:
-    return "\n".join(
-        _call_message_lines(
-            "CALL ENDED",
-            link,
-            title_emoji="📞❌",
-            duration_seconds=duration_seconds,
-        )
-    )
+    if link.telegram_username:
+        agent = f"@{link.telegram_username}"
+    elif link.display_name:
+        agent = link.display_name
+    else:
+        agent = f"ext {link.extension}"
+    dur = f" · {format_duration(duration_seconds)}" if duration_seconds is not None else ""
+    return f"📞❌ {agent} call ended{dur}"
 
 
 
@@ -312,16 +312,9 @@ def format_transfer_live_message(
     to_link: ExtensionLink,
     elapsed_seconds: int | None = None,
 ) -> str:
-    lines = [
-        "🔀 <b>ON CALL · TRANSFER</b>",
-        f"👤 <b>To</b> · {format_bold_agent_label(to_link)}",
-        f"👤 <b>From</b> · <b>{_extension_label(from_link, from_extension)}</b>",
-    ]
-    if elapsed_seconds is not None:
-        lines.append(
-            f"⏱️ <b>Duration</b> · <b>{format_duration(elapsed_seconds)}</b>"
-        )
-    return "\n".join(lines)
+    to_label = f"@{to_link.telegram_username}" if to_link.telegram_username else (to_link.display_name or f"ext {to_link.extension}")
+    from_label = f"@{from_link.telegram_username}" if from_link and from_link.telegram_username else (getattr(from_link, 'display_name', None) or f"ext {from_extension}")
+    return f"🔀 {from_label} → {to_label} is on a call"
 
 
 
@@ -334,23 +327,19 @@ def format_transfer_final_message(
     to_link: ExtensionLink,
     duration_seconds: int,
 ) -> str:
-    lines = [
-        "📞❌ <b>CALL ENDED · TRANSFER</b>",
-        f"👤 <b>To</b> · {format_bold_agent_label(to_link)}",
-        f"👤 <b>From</b> · <b>{_extension_label(from_link, from_extension)}</b>",
-        f"⏱️ <b>Duration</b> · <b>{format_duration(duration_seconds)}</b>",
-    ]
-    return "\n".join(lines)
+    to_label = f"@{to_link.telegram_username}" if to_link.telegram_username else (to_link.display_name or f"ext {to_link.extension}")
+    from_label = f"@{from_link.telegram_username}" if from_link and from_link.telegram_username else (getattr(from_link, 'display_name', None) or f"ext {from_extension}")
+    dur = format_duration(duration_seconds)
+    return f"📞❌ {from_label} → {to_label} call ended · {dur}"
 
 
 
 
 
 def format_transfer_sent_message(*, from_link: ExtensionLink, to_link: ExtensionLink) -> str:
-    return (
-        "🔀 <b>TRANSFER</b>\n"
-        f"👤 {format_bold_agent_label(from_link)} → {format_bold_agent_label(to_link)}"
-    )
+    from_label = f"@{from_link.telegram_username}" if from_link.telegram_username else (from_link.display_name or f"ext {from_link.extension}")
+    to_label = f"@{to_link.telegram_username}" if to_link.telegram_username else (to_link.display_name or f"ext {to_link.extension}")
+    return f"🔀 {from_label} transferred to {to_label}"
 
 
 
@@ -362,13 +351,10 @@ def format_transfer_sender_ended_message(
     to_link: ExtensionLink,
     duration_seconds: int,
 ) -> str:
-    lines = [
-        "📞❌ <b>CALL ENDED · TRANSFERRED</b>",
-        f"👤 <b>To</b> · {format_bold_agent_label(to_link)}",
-        f"👤 <b>From</b> · {format_bold_agent_label(from_link)}",
-        f"⏱️ <b>Duration</b> · <b>{format_duration(duration_seconds)}</b>",
-    ]
-    return "\n".join(lines)
+    from_label = f"@{from_link.telegram_username}" if from_link.telegram_username else (from_link.display_name or f"ext {from_link.extension}")
+    to_label = f"@{to_link.telegram_username}" if to_link.telegram_username else (to_link.display_name or f"ext {to_link.extension}")
+    dur = format_duration(duration_seconds)
+    return f"📞❌ {from_label} → {to_label} call ended · {dur}"
 
 
 
