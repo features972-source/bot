@@ -535,6 +535,9 @@ def detect_transfer_from(
 
 ) -> str | None:
 
+    settings = bot_data.get("settings")
+    db_path = getattr(settings, "database_path", None) if settings else None
+
     for field, type_field in (
 
         ("referred_by_dn", "referred_by_type"),
@@ -556,6 +559,13 @@ def detect_transfer_from(
         if dn_type and dn_type not in {"none", "extension", "0"}:
 
             continue
+
+        # Only treat as a transfer if the DN is a known linked agent extension.
+        # Queue/IVR extensions are not in the database and must not trigger transfer UI.
+        if db_path:
+            link = get_link_by_extension(db_path, dn)
+            if link is None:
+                continue
 
         return dn
 
