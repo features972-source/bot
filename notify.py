@@ -275,14 +275,13 @@ def format_on_phone_message(
     *,
     elapsed_seconds: int | None = None,
 ) -> str:
-    return "\n".join(
-        _call_message_lines(
-            "ON CALL",
-            link,
-            title_emoji="📞🟢",
-            duration_seconds=elapsed_seconds,
-        )
-    )
+    if link.telegram_username:
+        agent = f"@{link.telegram_username}"
+    elif link.display_name:
+        agent = link.display_name
+    else:
+        agent = f"ext {link.extension}"
+    return f"📞🟢 {agent} is on a call"
 
 
 
