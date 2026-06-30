@@ -82,13 +82,21 @@ async def blast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def blast_content_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reply with the blast content when anyone types /content in the group."""
-    if not update.message:
+    """Reply with the blast content when anyone types 'content' in the group."""
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip().lower()
+    logger.info("blast_content_trigger called: text=%r", text)
+
+    if "content" not in text:
         return
 
     last_content = context.bot_data.get(LAST_BLAST_CONTENT_KEY)
+    logger.info("blast_content_trigger: last_content=%r", last_content)
+
     if not last_content:
-        await update.message.reply_text("⚠️ No active blast content set.")
+        await update.message.reply_text("⚠️ No active blast content set. Run /blast first.")
         return
 
     await update.message.reply_text(
