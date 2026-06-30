@@ -88,10 +88,18 @@ async def adminpayments_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Build one message per record, send individually to avoid length limits
     for r in records:
+        text = _format_record(r)
         try:
-            await update.message.reply_text(_format_record(r), parse_mode="HTML")
-        except Exception:
-            logger.exception("Failed to send adminpayments record #%s", r.id)
+            await update.message.reply_text(text, parse_mode="HTML")
+        except Exception as e:
+            logger.warning("HTML failed for record #%s (%s), retrying plain", r.id, e)
+            try:
+                # Strip all tags for plain text fallback
+                import re as _re
+                plain = _re.sub(r"<[^>]+>", "", text).replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+                await update.message.reply_text(plain)
+            except Exception:
+                logger.exception("Failed to send adminpayments record #%s even as plain text", r.id)
 
 
 def build_admin_payments_handlers() -> list:
