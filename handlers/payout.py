@@ -119,9 +119,17 @@ async def payout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     all_records = list_all_payments(settings.database_path)
-    records = [r for r in all_records if r.cleared is True]
+    # cleared_only arg: /payout cleared
+    args = context.args or []
+    cleared_only = "cleared" in [a.lower() for a in args]
+    records = [r for r in all_records if r.cleared is True] if cleared_only else all_records
+
     if not records:
-        await update.message.reply_text("No cleared payments on record yet.")
+        await update.message.reply_text(
+            "No payments on record yet.\n\n"
+            "<i>Tip: use /paybuttons to mark payments as cleared.</i>",
+            parse_mode="HTML",
+        )
         return
 
     agents = _build_agents(records)
@@ -131,8 +139,9 @@ async def payout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     total_paid = sum(paid_map.get(k, 0.0) for k in agents)
     remaining_total = max(0.0, total_owed - total_paid)
 
+    filter_note = " (cleared only)" if cleared_only else " (all payments)"
     await update.message.reply_text(
-        f"💷 <b>Payout — {int(STARTER_PCT*100)}% starter · {int(FINISHER_PCT*100)}% finisher</b>\n"
+        f"💷 <b>Payout — {int(STARTER_PCT*100)}% starter · {int(FINISHER_PCT*100)}% finisher</b>{html.escape(filter_note)}\n"
         f"Total still owed: <b>{html.escape(format_amount(remaining_total))}</b>",
         parse_mode="HTML",
     )
