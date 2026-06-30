@@ -86,17 +86,12 @@ async def adminpayments_command(update: Update, context: ContextTypes.DEFAULT_TY
     )
     await update.message.reply_text(header, parse_mode="HTML")
 
-    # Send in batches of up to 10 records per message
-    BATCH = 10
-    for i in range(0, len(records), BATCH):
-        chunk = records[i:i + BATCH]
-        lines = []
-        for r in chunk:
-            lines.append(_format_record(r))
-            lines.append("")
-        text = "\n".join(lines).strip()
-        if text:
-            await update.message.reply_text(text, parse_mode="HTML")
+    # Build one message per record, send individually to avoid length limits
+    for r in records:
+        try:
+            await update.message.reply_text(_format_record(r), parse_mode="HTML")
+        except Exception:
+            logger.exception("Failed to send adminpayments record #%s", r.id)
 
 
 def build_admin_payments_handlers() -> list:
