@@ -193,12 +193,12 @@ async def payout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     ]
 
     if not agents_owed:
-        lines.append("✅ Everyone has been paid!")
+        lines.append("✅ Everyone has been paid! Nothing outstanding.")
     else:
         for ukey, data in sorted(agents_owed.items(), key=lambda x: -x[1]["owed"]):
             lines.append(
-                f"👤 <b>{html.escape(data['label'])}</b> — "
-                f"💷 <b>{html.escape(format_amount(data['owed']))}</b>"
+                f"👤 <b>{html.escape(data['label'])}</b>\n"
+                f"   💷 <b>{html.escape(format_amount(data['owed']))}</b> owed"
             )
 
     lines.append("──────────────")
