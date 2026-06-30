@@ -88,8 +88,14 @@ async def blast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         if raw:
             notify_chat_ids = [int(raw)]
 
+    BLAST_STICKER_ID = "CAACAgIAAxkBA0ZHjWpDMd6qf9m6K5X7ZeNEkdkNI-TPAALcZwACLpE4SNFzixHQlDy6PAQ"
+
     for chat_id in notify_chat_ids:
         try:
+            try:
+                await context.bot.send_sticker(chat_id=chat_id, sticker=BLAST_STICKER_ID)
+            except Exception:
+                pass
             msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=group_text,
