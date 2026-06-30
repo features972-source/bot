@@ -17,13 +17,30 @@ logger = logging.getLogger(__name__)
 async def adminpayments_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message:
         return
+    try:
+        await _adminpayments_inner(update, context)
+    except Exception as exc:
+        logger.exception("adminpayments_command crashed")
+        try:
+            await update.message.reply_text(f"Error: {exc}")
+        except Exception:
+            pass
 
+
+async def _adminpayments_inner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = context.bot_data.get("settings")
-    if settings is None or not is_bot_admin(settings, settings.database_path, update.effective_user.id):
+    if settings is None:
+        await update.message.reply_text("No settings found.")
+        return
+
+    from handlers.admin_access import is_bot_admin as _is_admin
+    if not _is_admin(settings, settings.database_path, update.effective_user.id):
         await update.message.reply_text("Admins only.")
         return
 
     records = list_all_payments(settings.database_path)
+    await update.message.reply_text(f"Fetched {len(records)} records, building list...")
+
     if not records:
         await update.message.reply_text("No payments on record.")
         return
@@ -69,7 +86,6 @@ async def adminpayments_command(update: Update, context: ContextTypes.DEFAULT_TY
 
         lines.append(f"#{r.id} {amount} {date} [{status}] {who} card:{card}")
 
-    # Split into chunks of 4000 chars
     chunk = ""
     for line in lines:
         if len(chunk) + len(line) + 1 > 4000:
