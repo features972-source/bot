@@ -166,36 +166,34 @@ async def payout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         paid_by = query.from_user.id if query.from_user else 0
         _set_paid(settings.database_path, uname, owed, paid_by)
-        paid = owed
-        owed_val = owed
+        # Delete the message — agent is paid, remove from list
+        if query.message:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+        return
 
     elif action == "unpaid" and len(parts) >= 3:
         uname = parts[2]
         _clear_paid(settings.database_path, uname)
-        paid = 0.0
-        # Recalculate owed from records
+        # Rebuild and re-show
         records = list_all_payments(settings.database_path)
         agents = _build_agents(records)
         ukey = uname.lower()
-        owed_val = agents.get(ukey, {}).get("owed", 0.0)
+        data = agents.get(ukey, {"label": f"@{uname}", "uname": uname, "owed": 0.0})
+        paid = 0.0
+        if query.message:
+            try:
+                await query.message.edit_text(
+                    _agent_row_text(data["label"], data["owed"], paid),
+                    parse_mode="HTML",
+                    reply_markup=_agent_keyboard(uname, data["owed"], paid),
+                )
+            except Exception:
+                pass
     else:
         return
-
-    # Rebuild label
-    records = list_all_payments(settings.database_path)
-    agents = _build_agents(records)
-    ukey = uname.lower()
-    data = agents.get(ukey, {"label": f"@{uname}", "uname": uname, "owed": owed_val})
-
-    if query.message:
-        try:
-            await query.message.edit_text(
-                _agent_row_text(data["label"], data["owed"], paid),
-                parse_mode="HTML",
-                reply_markup=_agent_keyboard(uname, data["owed"], paid),
-            )
-        except Exception:
-            pass
 
 
 async def paylog_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
