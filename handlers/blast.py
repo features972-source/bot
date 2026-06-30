@@ -16,7 +16,6 @@ LAST_BLAST_CONTENT_KEY = "last_blast_content"
 
 _COMMANDS = (
     "/remind [time] [note] — set a personal reminder and the bot will ping you when the time is up\n"
-    "Example: /remind 30m call back John\n"
 )
 
 
@@ -33,7 +32,7 @@ def _build_group_text(content: str, domain: str) -> str:
         f"⚠️ <b>WARNING — READ IMMEDIATELY</b> ⚠️\n"
         f"🚨🚨🚨 <b>ATTENTION ALL AGENTS</b> 🚨🚨🚨\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"{html.escape(content)}\n\n"
+        f"📋 <b>Content:</b>\n{html.escape(content)}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"<b>📌 Key commands:</b>\n"
         f"{_COMMANDS}\n"
