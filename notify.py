@@ -8,7 +8,7 @@ import logging
 
 import time
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -1685,3 +1685,70 @@ async def clear_live_calls_state(bot_data: dict) -> int:
     _recent_call_handlers(bot_data).clear()
     _recent_announces(bot_data).clear()
     return len(extensions)
+
+
+async def daily_summary_loop(bot, settings, bot_data: dict) -> None:
+    """Post a daily call summary at midnight (STATS_TIMEZONE)."""
+    from handlers.stats_period import stats_timezone
+    from database import list_recent_completed_calls
+
+    try:
+        while True:
+            tz = stats_timezone()
+            now = datetime.now(tz)
+            # Sleep until next midnight
+            tomorrow = (now + timedelta(days=1)).replace(
+                hour=0, minute=0, second=5, microsecond=0
+            )
+            wait = (tomorrow - now).total_seconds()
+            await asyncio.sleep(wait)
+
+            # Build summary for the day that just ended
+            since = datetime.now(tz).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).astimezone(timezone.utc) - timedelta(days=1)
+            until = since + timedelta(days=1)
+
+            try:
+                calls = list_recent_completed_calls(
+                    settings.database_path, limit=10000, since=since
+                )
+                calls = [c for c in calls if c.ended_at and c.ended_at < until.isoformat()]
+            except Exception:
+                calls = []
+
+            if not calls:
+                continue
+
+            total = len(calls)
+            avg_dur = int(sum(c.duration_seconds for c in calls) / total) if total else 0
+
+            # Per-agent counts
+            agent_counts: dict[str, int] = {}
+            for c in calls:
+                label = f"@{c.telegram_username}" if c.telegram_username else (c.display_name or f"ext {c.extension}")
+                agent_counts[label] = agent_counts.get(label, 0) + 1
+
+            top = sorted(agent_counts.items(), key=lambda x: x[1], reverse=True)
+
+            date_label = since.astimezone(tz).strftime("%a %d %b")
+            lines = [f"📊 <b>Daily Summary · {date_label}</b>"]
+            lines.append(f"📞 Total calls: <b>{total}</b>")
+            lines.append(f"⏱️ Avg duration: <b>{format_duration(avg_dur)}</b>")
+            if top:
+                lines.append("")
+                lines.append("🏆 <b>Top agents:</b>")
+                for i, (agent, count) in enumerate(top[:5], 1):
+                    lines.append(f"  {i}. {agent} · {count} call{'s' if count != 1 else ''}")
+
+            text = "\n".join(lines)
+            try:
+                await send_to_notify_chats(bot, settings, bot_data, text=text)
+                logger.info("Posted daily summary: %d calls on %s", total, date_label)
+            except Exception:
+                logger.exception("Failed to post daily summary")
+
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Daily summary loop stopped")

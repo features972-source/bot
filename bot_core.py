@@ -28,6 +28,7 @@ from handlers.ready_check import build_ready_check_handlers, ready_check_shift_l
 from mailer_bridge import init_mailer_bridge
 from notify import (
     active_calls_digest_loop,
+    daily_summary_loop,
     ensure_telegram_send_worker,
 )
 from payments_excel_export import schedule_payments_excel_sync
@@ -88,6 +89,10 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         asyncio.create_task(
             active_calls_digest_loop(app.bot, settings, app.bot_data),
             name=f"active-calls-{instance_id}",
+        )
+        asyncio.create_task(
+            daily_summary_loop(app.bot, settings, app.bot_data),
+            name=f"daily-summary-{instance_id}",
         )
         from handlers.credo import credo_reminder_loop
         from handlers.nemesis import nemesis_loop
