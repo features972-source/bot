@@ -27,36 +27,36 @@ def _status_label(cleared) -> str:
 
 def _format_record(r) -> str:
     amount = format_amount(r.amount)
-    card = f"····{r.card_last4}" if r.card_last4 else "no card"
+    card = f"····{r.card_last4}" if r.card_last4 else "—"
     status = _status_label(r.cleared)
 
-    finisher_name = r.display_name or r.finisher_username or str(r.finisher_user_id)
-    finisher_uname = f"@{r.finisher_username}" if r.finisher_username else ""
-    finisher_label = f"{finisher_name} ({finisher_uname})" if finisher_uname and finisher_name != finisher_uname.lstrip("@") else finisher_name
+    finisher_name = (r.display_name or r.finisher_username or str(r.finisher_user_id)).strip()
+    finisher_uname = r.finisher_username or ""
+    finisher_label = f"{finisher_name} (@{finisher_uname.lstrip('@')})" if finisher_uname and finisher_name.lower() != finisher_uname.lower().lstrip("@") else finisher_name
 
-    starter_name = r.starter_display_name or r.starter_username
-    starter_uname = f"@{r.starter_username}" if r.starter_username else ""
-    starter_label = f"{starter_name} ({starter_uname})" if starter_uname and starter_name != starter_uname.lstrip("@") else (starter_name or "")
+    starter_name = (r.starter_display_name or r.starter_username or "").strip()
+    starter_uname = r.starter_username or ""
+    starter_label = f"{starter_name} (@{starter_uname.lstrip('@')})" if starter_uname and starter_name.lower() != starter_uname.lower().lstrip("@") else starter_name
 
     date = ""
     if r.created_at:
         try:
             dt = datetime.fromisoformat(r.created_at)
-            date = dt.strftime("%d %b %Y")
+            date = dt.strftime("%d %b")
         except Exception:
             pass
 
     if r.starter_user_id and r.starter_user_id == r.finisher_user_id:
-        team = f"🔒 {html.escape(finisher_label)} (starter &amp; finisher)"
+        team_line = f"� {html.escape(finisher_label)}"
     elif starter_label:
-        team = f"🔓 {html.escape(starter_label)} → 🔒 {html.escape(finisher_label)}"
+        team_line = f"🔓 {html.escape(starter_label)}  →  🔒 {html.escape(finisher_label)}"
     else:
-        team = f"🔒 {html.escape(finisher_label)}"
+        team_line = f"� {html.escape(finisher_label)}"
 
     return (
-        f"<b>ID #{r.id}</b> · <b>{html.escape(amount)}</b> · {date}\n"
-        f"{team}\n"
-        f"💳 {html.escape(card)} · {status}"
+        f"<b>#{r.id}</b>  <b>{html.escape(amount)}</b>  {date}  {status}\n"
+        f"{team_line}\n"
+        f"💳 {html.escape(card)}"
     )
 
 
@@ -82,25 +82,21 @@ async def adminpayments_command(update: Update, context: ContextTypes.DEFAULT_TY
     header = (
         f"📋 <b>All Payments ({len(records)})</b>\n"
         f"Total: <b>{html.escape(format_amount(total_amount))}</b>\n"
-        f"🟩 {cleared} cleared · 🟧 {waiting} waiting · 🟥 {not_cleared} not cleared\n"
-        f"──────────────"
+        f"🟩 {cleared} cleared · 🟧 {waiting} waiting · 🟥 {not_cleared} not cleared"
     )
     await update.message.reply_text(header, parse_mode="HTML")
 
-    # Send in batches to avoid hitting message length limits
-    batch: list[str] = []
-    batch_len = 0
-    for r in records:
-        line = _format_record(r)
-        if batch_len + len(line) > 3500:
-            await update.message.reply_text("\n\n".join(batch), parse_mode="HTML")
-            batch = []
-            batch_len = 0
-        batch.append(line)
-        batch_len += len(line)
-
-    if batch:
-        await update.message.reply_text("\n\n".join(batch), parse_mode="HTML")
+    # Send in batches of up to 10 records per message
+    BATCH = 10
+    for i in range(0, len(records), BATCH):
+        chunk = records[i:i + BATCH]
+        lines = []
+        for r in chunk:
+            lines.append(_format_record(r))
+            lines.append("")
+        text = "\n".join(lines).strip()
+        if text:
+            await update.message.reply_text(text, parse_mode="HTML")
 
 
 def build_admin_payments_handlers() -> list:
