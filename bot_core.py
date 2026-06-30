@@ -122,9 +122,14 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
             name=f"ready-check-{instance_id}",
         )
         from onedrive_cloud_sync import remember_excel_web_url
+        from handlers.payment_reports import refresh_payment_report
 
         remember_excel_web_url(settings)
         schedule_payments_excel_sync(settings)
+        asyncio.create_task(
+            refresh_payment_report(app.bot, settings),
+            name=f"payment-report-startup-{instance_id}",
+        )
         if settings.mailer_bridge_enabled:
             await init_mailer_bridge(settings, app.bot_data, app.bot)
 
