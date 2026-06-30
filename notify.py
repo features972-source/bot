@@ -274,6 +274,8 @@ def format_on_phone_message(
     link: ExtensionLink,
     *,
     elapsed_seconds: int | None = None,
+    caller_name: str = "",
+    caller_number: str = "",
 ) -> str:
     if link.telegram_username:
         agent = f"@{link.telegram_username}"
@@ -281,7 +283,9 @@ def format_on_phone_message(
         agent = link.display_name
     else:
         agent = f"ext {link.extension}"
-    return f"📞🟢 {agent} is on a call"
+    caller = caller_name or caller_number
+    caller_part = f" · {caller}" if caller else ""
+    return f"📞🟢 {agent} is on a call{caller_part}"
 
 
 
@@ -291,6 +295,8 @@ def format_off_phone_message(
     link: ExtensionLink,
     *,
     duration_seconds: int | None = None,
+    caller_name: str = "",
+    caller_number: str = "",
 ) -> str:
     if link.telegram_username:
         agent = f"@{link.telegram_username}"
@@ -299,7 +305,9 @@ def format_off_phone_message(
     else:
         agent = f"ext {link.extension}"
     dur = f" · {format_duration(duration_seconds)}" if duration_seconds is not None else ""
-    return f"📞❌ {agent} call ended{dur}"
+    caller = caller_name or caller_number
+    caller_part = f" · {caller}" if caller else ""
+    return f"📞❌ {agent} call ended{dur}{caller_part}"
 
 
 
@@ -750,6 +758,8 @@ def _live_call_final_text(live_call: LiveCall, duration: int) -> str:
     return format_off_phone_message(
         live_call.link,
         duration_seconds=duration,
+        caller_name=live_call.caller_name,
+        caller_number=live_call.caller_number,
     )
 
 
@@ -1168,7 +1178,7 @@ async def announce_call_started(
 
             link=link,
 
-            initial_text=format_on_phone_message(link),
+            initial_text=format_on_phone_message(link, caller_name=caller_name, caller_number=caller_number),
 
             caller_name=caller_name,
 
@@ -1299,7 +1309,7 @@ async def announce_call_ended(
             bot,
             settings,
             bot_data,
-            text=format_off_phone_message(link),
+            text=format_off_phone_message(link),  # no caller info in orphan path
         )
 
 
