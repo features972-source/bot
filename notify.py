@@ -913,19 +913,27 @@ async def _start_live_call(
                     reply_markup=reply_markup,
                     inline=True,
                 )
+                if message is None:
+                    return
                 live_call.message_ids[chat_id] = message.message_id
+
+            await asyncio.gather(*(_send_one(cid) for cid in chat_ids))
+
+        await _send_initial()
+
+        # Pin after send — fire and forget so it never blocks or crashes the announcement.
+        async def _pin_all() -> None:
+            for chat_id, msg_id in live_call.message_ids.items():
                 try:
                     await bot.pin_chat_message(
                         chat_id=chat_id,
-                        message_id=message.message_id,
+                        message_id=msg_id,
                         disable_notification=True,
                     )
                 except Exception:
                     pass
 
-            await asyncio.gather(*(_send_one(cid) for cid in chat_ids))
-
-        await _send_initial()
+        asyncio.ensure_future(_pin_all())
     except Exception:
         live_calls.pop(extension, None)
         raise
