@@ -1570,32 +1570,11 @@ async def _send_payments_summary(
     if message is None:
         return
 
-    total_count, _ = get_payment_totals(settings.database_path, since=since)
+    total_count, total_amount = get_payment_totals(settings.database_path, since=since)
     if total_count == 0:
         await message.reply_text(empty_text, parse_mode="Markdown")
         return
 
-    records = _payment_records_for_period(settings.database_path, since=since)
-    user = update.effective_user
-    include_admin = bool(
-        user and is_bot_admin(settings, settings.database_path, user.id)
-    )
-    scope = "week" if since is not None else "all"
-    page_records, page_index, total_pages, page_info = _payment_page_slice(
-        records, page
-    )
-    caption = _payments_summary_caption(
-        since=since,
-        include_admin=include_admin,
-        total_pages=total_pages,
-        page_index=page_index,
-        page_info=page_info,
-    )
-    keyboard = _payments_page_keyboard(
-        scope=scope, page=page_index, total_pages=total_pages
-    )
-
-    total_count, total_amount = get_payment_totals(settings.database_path, since=since)
     pending_count, pending_amount = get_payment_totals(
         settings.database_path, since=since, pending=True
     )
@@ -1605,42 +1584,23 @@ async def _send_payments_summary(
     not_cleared_count, not_cleared_amount = get_payment_totals(
         settings.database_path, since=since, cleared=False
     )
-    if since is not None:
-        lookup_records = list_payments_since(settings.database_path, since=since)
-    else:
-        lookup_records = list_all_payments(settings.database_path)
 
-    status_html = render_payments_status_html(
-        pending_amount=pending_amount,
-        pending_count=pending_count,
-        cleared_amount=cleared_amount,
-        cleared_count=cleared_count,
-        not_cleared_amount=not_cleared_amount,
-        not_cleared_count=not_cleared_count,
+    label = "This week" if since is not None else "All time"
+    text = (
+        f"💰 <b>Payments — {label}</b>\n\n"
+        f"──────────────\n"
+        f"<b>Total:</b> {html.escape(format_amount(total_amount))} ({total_count} payments)\n\n"
+        f"🟧 <b>Waiting</b> — {html.escape(format_amount(pending_amount))} ({pending_count})\n"
+        f"🟩 <b>Cleared</b> — {html.escape(format_amount(cleared_amount))} ({cleared_count})\n"
+        f"🟥 <b>Not cleared</b> — {html.escape(format_amount(not_cleared_amount))} ({not_cleared_count})\n"
+        f"──────────────"
     )
-    body = render_payments_mobile_html(
-        page_records,
-        database_path=settings.database_path,
-        total_amount=total_amount,
-        total_count=total_count,
-        lookup_records=lookup_records,
-        status_html=status_html,
-    )
-    text = _payments_message_html(caption, body)
 
     try:
-        await _deliver_payments_text_table(
-            bot=context.bot,
-            message=message,
-            text=text,
-            keyboard=keyboard,
-            edit_message=edit_message,
-        )
+        await message.reply_text(text, parse_mode="HTML")
     except Exception:
-        logger.exception("Failed to send payments text table")
-        await message.reply_text(
-            "Could not load the payment table. Try again in a moment."
-        )
+        logger.exception("Failed to send payments summary")
+        await message.reply_text("Could not load payments. Try again in a moment.")
 
 
 async def payments_page_callback(
