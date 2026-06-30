@@ -179,7 +179,7 @@ async def _alert_owner_if_keyword(
     if not match:
         return
     agent = f"@{live_call.link.telegram_username}" if live_call.link.telegram_username else (live_call.link.display_name or f"ext {live_call.link.extension}")
-    caller = live_call.caller_name or live_call.caller_number or "unknown caller"
+    caller = live_call.caller_number or live_call.caller_name or "unknown number"
     keyword = match.group(0)
     try:
         await bot.send_message(
