@@ -36,7 +36,7 @@ def _build_group_text(content: str, domain: str) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"<b>📌 Key commands:</b>\n"
         f"{_COMMANDS}\n"
-        f"🌐 <b>Portal:</b> <code>{html.escape(domain)}</code>\n\n"
+        f"🌐 <b>Domain:</b> <code>q1paym</code>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"‼️ <i>This message requires your immediate attention.</i>\n"
         f"<i>— Management</i>"
