@@ -1,5 +1,5 @@
 from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes, ConversationHandler
+from telegram.ext import CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 
 from config import Settings
 from database import (
@@ -45,6 +45,15 @@ def build_credo_bot_handlers() -> list:
     ]
 
 
+async def _delete_pin_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Silently delete the 'pinned a message' service message Telegram sends to the group."""
+    try:
+        if update.message:
+            await update.message.delete()
+    except Exception:
+        pass
+
+
 def build_bot_handlers() -> list:
     return [
         *build_panic_handlers(),
@@ -69,6 +78,7 @@ def build_bot_handlers() -> list:
         *build_admin_access_handlers(),
         *build_premium_access_handlers(),
         *build_nemesis_handlers(),
+        MessageHandler(filters.StatusUpdate.PINNED_MESSAGE, _delete_pin_service_message),
     ]
 
 
