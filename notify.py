@@ -930,6 +930,12 @@ async def _start_live_call(
                         message_id=msg_id,
                         disable_notification=True,
                     )
+                    # Delete the "pinned a message" service message to keep chat clean.
+                    # The service message ID is always pin_msg_id + 1 in Telegram groups.
+                    try:
+                        await bot.delete_message(chat_id=chat_id, message_id=msg_id + 1)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
