@@ -38,6 +38,7 @@ from handlers.mypay import build_mypay_handlers
 from handlers.blast import build_blast_handlers
 from handlers.attendance import build_attendance_handlers
 from handlers.pay_buttons import build_pay_buttons_handlers
+from handlers.payout import build_payout_handlers
 
 
 def build_credo_bot_handlers() -> list:
@@ -88,6 +89,7 @@ def build_bot_handlers() -> list:
         *build_blast_handlers(),
         *build_attendance_handlers(),
         *build_pay_buttons_handlers(),
+        *build_payout_handlers(),
         MessageHandler(filters.StatusUpdate.PINNED_MESSAGE, _delete_pin_service_message),
     ]
 
@@ -154,8 +156,9 @@ def _format_help_text(
         return (
             f"📱 <b>{bot_name} — commands</b>\n\n"
             "<b>💸 Payments</b>\n"
-            "/payments — this week's summary\n"
+            "/payments — all payments summary\n"
             "/paybuttons — tap to mark each payment Paid/Not Cleared\n"
+            "/payout — who you owe and how much (5% starter · 15% finisher)\n"
             "/alltimepayments — all-time totals (/alltime works too)\n"
             "/leaderboard — opener & closer rankings (today · 7 · all)\n"
             "/nemesis @user — challenge someone (they tap Yes to start)\n"
