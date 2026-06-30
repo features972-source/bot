@@ -113,16 +113,24 @@ def _build_agents_owed(records, paid_timestamps: dict[str, str]) -> dict[str, di
         return name or (f"@{uname}" if uname else str(user_id))
 
     def _after_paid(record, ukey: str) -> bool:
-        paid_at = paid_timestamps.get(ukey)
-        if paid_at is None:
+        paid_at_str = paid_timestamps.get(ukey)
+        if paid_at_str is None:
             return True  # never paid, always counts
-        created = getattr(record, "created_at", None)
-        if not created:
-            return False  # can't determine, skip
+        created_str = getattr(record, "created_at", None)
+        if not created_str:
+            return True  # can't determine, include it
         try:
-            return created > paid_at
+            # Normalise both to naive UTC datetimes for safe comparison
+            def _parse(s: str):
+                s = s.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is not None:
+                    dt = dt.replace(tzinfo=None) + (dt.utcoffset() or __import__("datetime").timedelta(0))
+                    dt = dt.replace(tzinfo=None)
+                return dt
+            return _parse(created_str) > _parse(paid_at_str)
         except Exception:
-            return False
+            return True  # on parse error, include it
 
     for r in records:
         # Starter
