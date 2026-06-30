@@ -25,6 +25,20 @@ POLL_INTERVAL_SECONDS = 60
 MAX_WAIT_SECONDS = 600
 TRANSCRIPT_DISABLED_KEY = "transcript_api_disabled"
 
+ALERT_OWNER_ID = 8217438821
+
+_PLATFORM_KEYWORDS = re.compile(
+    r"\b("
+    r"whatsapp|whats app|what'?s app"
+    r"|moving (you |them |the customer )?over"
+    r"|move (you |them |the customer )?over"
+    r"|different (software|platform|app|application|system)"
+    r"|switch(ing)? (you |them |the customer )?(to|over)"
+    r"|telegram|signal|viber"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def _digits(value: str) -> str:
     return re.sub(r"\D", "", value or "")
@@ -156,6 +170,32 @@ def _format_transcript_message(live_call: LiveCall, recording: dict[str, Any]) -
     return text
 
 
+async def _alert_owner_if_keyword(
+    bot,
+    live_call: LiveCall,
+    transcription: str,
+) -> None:
+    match = _PLATFORM_KEYWORDS.search(transcription)
+    if not match:
+        return
+    agent = f"@{live_call.link.telegram_username}" if live_call.link.telegram_username else (live_call.link.display_name or f"ext {live_call.link.extension}")
+    caller = live_call.caller_name or live_call.caller_number or "unknown caller"
+    keyword = match.group(0)
+    try:
+        await bot.send_message(
+            chat_id=ALERT_OWNER_ID,
+            text=(
+                f"⚠️ <b>Platform alert</b>\n\n"
+                f"{agent} mentioned <b>{html.escape(keyword)}</b> "
+                f"during a call with <b>{html.escape(caller)}</b>"
+            ),
+            parse_mode="HTML",
+        )
+        logger.info("Sent platform keyword alert for ext %s (keyword: %s)", live_call.extension, keyword)
+    except Exception:
+        logger.exception("Failed to send platform keyword alert")
+
+
 def schedule_transcript_delivery(
     bot,
     settings: Settings,
@@ -215,6 +255,8 @@ async def _deliver_transcript(
                     text=_format_transcript_message(live_call, recording),
                 )
                 logger.info("Posted transcript for ext %s", live_call.extension)
+                if transcription:
+                    await _alert_owner_if_keyword(bot, live_call, transcription)
                 return
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
