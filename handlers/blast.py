@@ -14,6 +14,7 @@ from notify import _notify_chat_ids
 logger = logging.getLogger(__name__)
 
 LAST_BLAST_KEY = "last_blast_text"
+LAST_BLAST_CONTENT_KEY = "last_blast_content"
 
 _COMMANDS = (
     "/remind [time] [note] — set a personal reminder and the bot will ping you when the time is up\n"
@@ -78,6 +79,7 @@ async def blast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     domain = _domain(settings)
     group_text = _build_group_text(content, domain)
     context.bot_data[LAST_BLAST_KEY] = group_text
+    context.bot_data[LAST_BLAST_CONTENT_KEY] = content
 
     chat_ids = _notify_chat_ids(settings, context.bot_data)
     await _post_and_pin(context.bot, chat_ids, group_text)
@@ -85,19 +87,20 @@ async def blast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def blast_content_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Resend last blast when anyone types 'content' in the group."""
+    """Reply with just the blast content when anyone types 'content' in the group."""
     if not update.message or not update.message.text:
         return
     if not _CONTENT_TRIGGER.search(update.message.text):
         return
 
-    last_blast = context.bot_data.get(LAST_BLAST_KEY)
-    if not last_blast:
+    last_content = context.bot_data.get(LAST_BLAST_CONTENT_KEY)
+    if not last_content:
         return
 
-    settings = context.bot_data.get("settings")
-    chat_ids = _notify_chat_ids(settings, context.bot_data)
-    await _post_and_pin(context.bot, chat_ids, last_blast)
+    await update.message.reply_text(
+        f"⚠️🚨 <b>Content:</b> {html.escape(last_content)} 🚨⚠️",
+        parse_mode="HTML",
+    )
 
 
 def build_blast_handlers() -> list:
