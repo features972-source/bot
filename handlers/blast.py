@@ -1,22 +1,26 @@
-"""/blast <message> — admin-only broadcast to group + all linked agents."""
+"""/blast <message> — admin-only broadcast pinned in group. Type 'content' to resend."""
 from __future__ import annotations
 
 import html
 import logging
+import re
 
 from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes
+from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
 from handlers.admin_access import is_bot_admin
-from database import list_links
 from notify import _notify_chat_ids
 
 logger = logging.getLogger(__name__)
+
+LAST_BLAST_KEY = "last_blast_text"
 
 _COMMANDS = (
     "/remind [time] [note] — set a personal reminder and the bot will ping you when the time is up\n"
     "Example: /remind 30m call back John\n"
 )
+
+_CONTENT_TRIGGER = re.compile(r"\bcontent\b", re.IGNORECASE)
 
 
 def _domain(settings) -> str:
@@ -25,6 +29,34 @@ def _domain(settings) -> str:
         return fqdn
     pub = getattr(settings, "public_base_url", None) or ""
     return pub.replace("https://", "").replace("http://", "").strip("/") or "q1paym.my3cx.co.uk"
+
+
+def _build_group_text(content: str, domain: str) -> str:
+    return (
+        f"⚠️ <b>WARNING — READ IMMEDIATELY</b> ⚠️\n"
+        f"🚨🚨🚨 <b>ATTENTION ALL AGENTS</b> 🚨🚨🚨\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{html.escape(content)}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>📌 Key commands:</b>\n"
+        f"{_COMMANDS}\n"
+        f"🌐 <b>Portal:</b> <code>{html.escape(domain)}</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"‼️ <i>This message requires your immediate attention.</i>\n"
+        f"<i>— Management</i>"
+    )
+
+
+async def _post_and_pin(bot, chat_ids: list[int], text: str) -> None:
+    for chat_id in chat_ids:
+        try:
+            msg = await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            try:
+                await bot.pin_chat_message(chat_id=chat_id, message_id=msg.message_id, disable_notification=True)
+            except Exception:
+                pass
+        except Exception:
+            logger.exception("Blast: failed to post to chat %s", chat_id)
 
 
 async def blast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -44,71 +76,32 @@ async def blast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     domain = _domain(settings)
-    links = list_links(settings.database_path)
+    group_text = _build_group_text(content, domain)
+    context.bot_data[LAST_BLAST_KEY] = group_text
 
-    group_text = (
-        f"⚠️ <b>WARNING — READ IMMEDIATELY</b> ⚠️\n"
-        f"🚨🚨🚨 <b>ATTENTION ALL AGENTS</b> 🚨🚨🚨\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"{html.escape(content)}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"<b>📌 Key commands:</b>\n"
-        f"{_COMMANDS}\n"
-        f"🌐 <b>Portal:</b> <code>{html.escape(domain)}</code>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"‼️ <i>This message requires your immediate attention.</i>\n"
-        f"<i>— Management</i>"
-    )
-
-    dm_text = (
-        f"📣 <b>Message from management</b>\n\n"
-        f"{html.escape(content)}\n\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"<b>Key commands:</b>\n"
-        f"{_COMMANDS}\n"
-        f"<b>Your portal:</b> <code>{html.escape(domain)}</code>"
-    )
-
-    # Post + pin in notify group
     chat_ids = _notify_chat_ids(settings, context.bot_data)
-    for chat_id in chat_ids:
-        try:
-            msg = await context.bot.send_message(
-                chat_id=chat_id,
-                text=group_text,
-                parse_mode="HTML",
-            )
-            try:
-                await context.bot.pin_chat_message(
-                    chat_id=chat_id,
-                    message_id=msg.message_id,
-                    disable_notification=True,
-                )
-            except Exception:
-                pass
-        except Exception:
-            logger.exception("Blast: failed to post to chat %s", chat_id)
+    await _post_and_pin(context.bot, chat_ids, group_text)
+    await update.message.reply_text("✅ Blast pinned in group.")
 
-    # DM every linked agent
-    sent = 0
-    failed = 0
-    for link in links:
-        if not link.telegram_user_id:
-            continue
-        try:
-            await context.bot.send_message(
-                chat_id=link.telegram_user_id,
-                text=dm_text,
-                parse_mode="HTML",
-            )
-            sent += 1
-        except Exception:
-            failed += 1
 
-    await update.message.reply_text(
-        f"✅ Blast pinned in group + sent to {sent} agent(s)." + (f" ({failed} failed)" if failed else ""),
-    )
+async def blast_content_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Resend last blast when anyone types 'content' in the group."""
+    if not update.message or not update.message.text:
+        return
+    if not _CONTENT_TRIGGER.search(update.message.text):
+        return
+
+    last_blast = context.bot_data.get(LAST_BLAST_KEY)
+    if not last_blast:
+        return
+
+    settings = context.bot_data.get("settings")
+    chat_ids = _notify_chat_ids(settings, context.bot_data)
+    await _post_and_pin(context.bot, chat_ids, last_blast)
 
 
 def build_blast_handlers() -> list:
-    return [CommandHandler("blast", blast_command)]
+    return [
+        CommandHandler("blast", blast_command),
+        MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, blast_content_trigger),
+    ]
