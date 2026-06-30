@@ -176,18 +176,13 @@ async def payout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     all_records = list_all_payments(settings.database_path)
-    cleared = [r for r in all_records if r.cleared is True]
 
-    if not cleared:
-        await update.message.reply_text(
-            "No cleared payments yet.\n\n"
-            "<i>Mark payments as cleared via /paybuttons or /setcleared, then run /payout again.</i>",
-            parse_mode="HTML",
-        )
+    if not all_records:
+        await update.message.reply_text("No payments on record yet.")
         return
 
     paid_timestamps = _get_paid_timestamps(settings.database_path)
-    agents = _build_agents_owed(cleared, paid_timestamps)
+    agents = _build_agents_owed(all_records, paid_timestamps)
 
     # Remove agents with nothing owed
     agents_owed = {k: v for k, v in agents.items() if v["owed"] > 0.01}
