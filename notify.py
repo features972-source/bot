@@ -1599,9 +1599,13 @@ async def active_calls_digest_loop(bot, settings, bot_data: dict) -> None:
     from threex_api import filter_real_connected_participants
     from threex_token import get_token_holder
 
+    last_digest_hash: str | None = None
+
     try:
         while True:
             delay, next_tick = _seconds_until_next_digest_boundary()
+            # Always wait at least 60s after startup before first digest
+            delay = max(delay, 60)
             logger.info(
                 "Next active calls digest at %s (in %.0fs)",
                 next_tick.strftime("%H:%M"),
@@ -1659,6 +1663,11 @@ async def active_calls_digest_loop(bot, settings, bot_data: dict) -> None:
                 continue
 
             text = format_active_calls_digest(bot_data, verified=verified)
+            digest_hash = str(hash(text))
+            if digest_hash == last_digest_hash:
+                logger.info("Digest skipped: same as last post")
+                continue
+            last_digest_hash = digest_hash
             await send_to_notify_chats(
                 bot,
                 settings,

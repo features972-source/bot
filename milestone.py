@@ -25,14 +25,22 @@ def _milestone_message(count: int) -> str:
 
 
 async def milestone_loop(bot, settings, bot_data: dict) -> None:
-    """Check every minute if the team has hit a new 200-call milestone."""
+    """Check every minute if the team has hit a new milestone. Never re-announces."""
     try:
+        # On first run, seed DB with current total so old milestones are skipped
+        raw = _get_bot_setting(settings.database_path, DB_MILESTONE_KEY)
+        if raw is None:
+            current_total, _ = get_call_stats_totals(settings.database_path)
+            # Round down to last completed milestone
+            seed = (current_total // MILESTONE_INTERVAL) * MILESTONE_INTERVAL
+            _set_bot_setting(settings.database_path, DB_MILESTONE_KEY, str(seed))
+            logger.info("Milestone seeded at %d (current total: %d)", seed, current_total)
+
         while True:
             await asyncio.sleep(CHECK_INTERVAL_SECONDS)
             try:
                 total, _ = get_call_stats_totals(settings.database_path)
 
-                # Load last announced from DB (survives redeploys)
                 raw = _get_bot_setting(settings.database_path, DB_MILESTONE_KEY)
                 last = int(raw) if raw and raw.isdigit() else 0
 
