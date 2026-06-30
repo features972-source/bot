@@ -80,46 +80,38 @@ async def blast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def blast_content_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reply with the blast content when anyone types 'content' in the group."""
+    """Reply with blast content or domain when anyone types the keyword in the group."""
     if not update.message or not update.message.text:
         return
 
     text = update.message.text.strip().lower()
     logger.info("blast_content_trigger called: text=%r", text)
 
-    if "content" not in text:
+    if "domain" in text:
+        settings = context.bot_data.get("settings")
+        domain = _domain(settings) if settings else "q1paym.my3cx.co.uk"
+        await update.message.reply_text(
+            f"🌐 <b>Domain:</b> <code>{html.escape(domain)}</code>",
+            parse_mode="HTML",
+        )
         return
 
-    last_content = context.bot_data.get(LAST_BLAST_CONTENT_KEY)
-    logger.info("blast_content_trigger: last_content=%r", last_content)
-
-    if not last_content:
-        await update.message.reply_text("⚠️ No active blast content set. Run /blast first.")
-        return
-
-    await update.message.reply_text(
-        f"⚠️🚨 <b>Here's the content:</b> 🚨⚠️\n\n"
-        f"{html.escape(last_content)}",
-        parse_mode="HTML",
-    )
+    if "content" in text:
+        last_content = context.bot_data.get(LAST_BLAST_CONTENT_KEY)
+        logger.info("blast_content_trigger: last_content=%r", last_content)
+        if not last_content:
+            await update.message.reply_text("⚠️ No active blast content set. Run /blast first.")
+            return
+        await update.message.reply_text(
+            f"⚠️🚨 <b>Here's the content:</b> 🚨⚠️\n\n"
+            f"{html.escape(last_content)}",
+            parse_mode="HTML",
+        )
 
 
 async def blast_domain_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reply with the domain when anyone types 'domain' in the group."""
-    if not update.message or not update.message.text:
-        return
-
-    text = update.message.text.strip().lower()
-    if "domain" not in text:
-        return
-
-    settings = context.bot_data.get("settings")
-    domain = _domain(settings) if settings else "q1paym.my3cx.co.uk"
-
-    await update.message.reply_text(
-        f"🌐 <b>Domain:</b> <code>{html.escape(domain)}</code>",
-        parse_mode="HTML",
-    )
+    """Kept for import compatibility — logic merged into blast_content_trigger."""
+    pass
 
 
 def build_blast_handlers() -> list:
