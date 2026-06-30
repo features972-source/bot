@@ -1046,13 +1046,16 @@ async def _stop_live_call(
         return live_call
 
     # Unpin the on-call message now the call has ended.
-    settings_obj = bot_data.get("settings")
-    if settings_obj is not None:
-        for chat_id, msg_id in live_call.message_ids.items():
+    _pinned_ids = dict(live_call.message_ids)
+
+    async def _unpin_all() -> None:
+        for chat_id, msg_id in _pinned_ids.items():
             try:
                 await bot.unpin_chat_message(chat_id=chat_id, message_id=msg_id)
             except Exception:
                 pass
+
+    asyncio.ensure_future(_unpin_all())
 
     ended_by_html = consume_telegram_hangup_label(bot_data, extension)
     if ended_by_html is None:
