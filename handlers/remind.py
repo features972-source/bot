@@ -19,19 +19,25 @@ def _parse_duration(text: str) -> int | None:
     """Parse a duration string into total seconds. Returns None if unparseable."""
     text = text.strip().lower()
 
-    # e.g. 2h30m, 1h, 45m, 30, 90
-    pattern = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(\d+)?", text)
-    if pattern:
-        hours = int(pattern.group(1) or 0)
-        mins = int(pattern.group(2) or 0)
-        secs_raw = int(pattern.group(3) or 0)
-        # If only a bare number with no h/m suffix, treat as minutes
-        if not pattern.group(1) and not pattern.group(2) and pattern.group(3):
-            mins = secs_raw
-            secs_raw = 0
-        total = hours * 3600 + mins * 60 + secs_raw
-        if total > 0:
-            return total
+    total = 0
+
+    # Match explicit h/m components e.g. 2h30m, 1h, 45m
+    matched = False
+    for value, unit in re.findall(r"(\d+)\s*([hm])", text):
+        matched = True
+        if unit == "h":
+            total += int(value) * 3600
+        elif unit == "m":
+            total += int(value) * 60
+
+    if matched:
+        return total if total > 0 else None
+
+    # Bare number with no suffix — treat as minutes
+    bare = re.fullmatch(r"\d+", text)
+    if bare:
+        total = int(text) * 60
+        return total if total > 0 else None
 
     return None
 
