@@ -228,17 +228,23 @@ async def _deliver_transcript(
     started_after: datetime,
 ) -> None:
     if bot_data.get(TRANSCRIPT_DISABLED_KEY):
+        logger.info("Transcript disabled — skipping for ext %s", live_call.extension)
         return
+    logger.info("Transcript polling started for ext %s (caller: %s)", live_call.extension, live_call.caller_number)
     deadline = time.monotonic() + MAX_WAIT_SECONDS
+    poll = 0
     while time.monotonic() < deadline:
         if bot_data.get(TRANSCRIPT_DISABLED_KEY):
             return
         token = await _fetch_token(settings, bot_data)
         if token is None:
+            logger.warning("Transcript polling: no token for ext %s", live_call.extension)
             return
+        poll += 1
         recordings = await _list_recordings(
             settings, token, started_after=started_after, bot_data=bot_data
         )
+        logger.info("Transcript poll #%d for ext %s: %d recording(s) found", poll, live_call.extension, len(recordings))
         recording = _pick_recording(
             recordings,
             extension=live_call.extension,
@@ -247,6 +253,8 @@ async def _deliver_transcript(
         if recording is not None:
             transcription = str(recording.get("Transcription") or "").strip()
             summary = str(recording.get("Summary") or "").strip()
+            logger.info("Transcript poll #%d ext %s: recording found, transcription=%s summary=%s",
+                poll, live_call.extension, bool(transcription), bool(summary))
             if transcription or summary:
                 await send_to_notify_chats(
                     bot,
@@ -258,10 +266,13 @@ async def _deliver_transcript(
                 if transcription:
                     await _alert_owner_if_keyword(bot, live_call, transcription)
                 return
+        else:
+            logger.info("Transcript poll #%d ext %s: no matching recording yet", poll, live_call.extension)
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     logger.info(
-        "No transcript available for ext %s within %ss",
+        "No transcript available for ext %s within %ss after %d polls",
         live_call.extension,
         MAX_WAIT_SECONDS,
+        poll,
     )
