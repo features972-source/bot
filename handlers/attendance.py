@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 ATTENDANCE_RESET_KEY = "attendance_reset_at"
 
 
+def seed_attendance_reset(database_path: str) -> None:
+    """Called on startup — sets reset timestamp to now if never set before."""
+    raw = _get_bot_setting(database_path, ATTENDANCE_RESET_KEY)
+    if raw is None:
+        now = datetime.now(timezone.utc)
+        _set_bot_setting(database_path, ATTENDANCE_RESET_KEY, now.isoformat())
+        logger.info("Attendance reset seeded at %s", now.isoformat())
+
+
 def _get_reset_since(database_path: str) -> datetime | None:
     raw = _get_bot_setting(database_path, ATTENDANCE_RESET_KEY)
     if not raw:
@@ -60,8 +69,13 @@ async def attendance_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     since = _get_reset_since(settings.database_path)
-    since_label = f"since {since.strftime('%d %b %Y')}" if since else "all time"
-    lines = [f"👥 <b>Attendance ({since_label})</b>\n──────────────"]
+    if since is None:
+        # First use — seed from now so only future calls are counted
+        since = datetime.now(timezone.utc)
+        _set_bot_setting(settings.database_path, ATTENDANCE_RESET_KEY, since.isoformat())
+
+    since_label = since.strftime("%d %b %Y %H:%M")
+    lines = [f"👥 <b>Attendance (since {since_label} UTC)</b>\n──────────────"]
 
     for link in links:
         name = link.display_name or link.telegram_username or str(link.telegram_user_id)

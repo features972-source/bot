@@ -34,6 +34,7 @@ from notify import (
 from queue_alert import queue_alert_loop
 from milestone import milestone_loop
 from handlers.blast import blast_content_trigger
+from handlers.attendance import seed_attendance_reset
 from payments_excel_export import schedule_payments_excel_sync
 from threex_token import get_token_holder
 from threex_ws import ASYNCIO_LOOP_KEY
@@ -159,6 +160,8 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
     tg_app.bot_data["settings"] = settings
     if runtime_notify_chat_id is not None:
         tg_app.bot_data["notify_chat_id"] = runtime_notify_chat_id
+
+    seed_attendance_reset(settings.database_path)
 
     for handler in build_add_card_handlers():
         tg_app.add_handler(handler, group=-1)
