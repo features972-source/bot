@@ -29,17 +29,15 @@ def _domain(settings) -> str:
 
 def _build_group_text(content: str, domain: str) -> str:
     return (
-        f"⚠️ <b>WARNING — READ IMMEDIATELY</b> ⚠️\n"
-        f"🚨🚨🚨 <b>ATTENTION ALL AGENTS</b> 🚨🚨🚨\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📋 <b>Content:</b>\n{html.escape(content)}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"<b>📌 Key commands:</b>\n"
+        f"🚨 <b>ATTENTION ALL AGENTS</b> 🚨\n"
+        f"⚠️ <b>Read immediately</b>\n\n"
+        f"──────────────\n"
+        f"📋 <b>Content:</b>\n{html.escape(content)}\n"
+        f"──────────────\n\n"
+        f"📌 <b>Key commands:</b>\n"
         f"{_COMMANDS}\n"
         f"🌐 <b>Domain:</b> <code>q1paym</code>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"‼️ <i>This message requires your immediate attention.</i>\n"
-        f"<i>— Management</i>"
+        f"‼️ <i>Immediate attention required — Management</i>"
     )
 
 
