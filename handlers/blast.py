@@ -98,7 +98,8 @@ async def blast_content_trigger(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     await update.message.reply_text(
-        f"⚠️🚨 <b>Content:</b> {html.escape(last_content)} 🚨⚠️",
+        f"⚠️🚨 <b>Here's the content:</b> 🚨⚠️\n\n"
+        f"{html.escape(last_content)}",
         parse_mode="HTML",
     )
 
