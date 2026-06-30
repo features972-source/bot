@@ -294,16 +294,14 @@ def _format_card_prompt(
     else:
         team = f"Starter: {starter}\nFinisher: {finisher}"
     return (
-        f"�🚨🚨 <b>OUT LOGGED</b> 🚨🚨🚨\n\n"
-        f"💰 <b>{amount_str} OUT</b> �\n\n"
+        f"🔥🔥🔥 <b>{amount_str} OUT</b> 🔥🔥🔥\n\n"
         f"──────────────\n"
-        f"� {team}\n"
+        f"👤 {team}\n"
         f"──────────────\n\n"
         f"💳 <b>ACTION REQUIRED:</b>\n"
         f"Reply to this message with the <b>last 4 digits</b> of the card used.\n\n"
         f"🔴 <b>WARNING: If you do not reply with the card digits you will NOT be paid.</b> 🔴"
     )
-
 
 def _format_payment_line(record: PaymentRecord) -> str:
     """Compact single line (admin commands)."""
