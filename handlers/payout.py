@@ -119,15 +119,12 @@ async def payout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     all_records = list_all_payments(settings.database_path)
-    # cleared_only arg: /payout cleared
-    args = context.args or []
-    cleared_only = "cleared" in [a.lower() for a in args]
-    records = [r for r in all_records if r.cleared is True] if cleared_only else all_records
+    records = [r for r in all_records if r.cleared is True]
 
     if not records:
         await update.message.reply_text(
-            "No payments on record yet.\n\n"
-            "<i>Tip: use /paybuttons to mark payments as cleared.</i>",
+            "No cleared payments yet.\n\n"
+            "<i>Mark payments as cleared via /paybuttons or /setcleared, then run /payout again.</i>",
             parse_mode="HTML",
         )
         return
@@ -139,20 +136,22 @@ async def payout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     total_paid = sum(paid_map.get(k, 0.0) for k in agents)
     remaining_total = max(0.0, total_owed - total_paid)
 
-    filter_note = " (cleared only)" if cleared_only else " (all payments)"
-    await update.message.reply_text(
-        f"💷 <b>Payout — {int(STARTER_PCT*100)}% starter · {int(FINISHER_PCT*100)}% finisher</b>{html.escape(filter_note)}\n"
+    lines = [
+        f"💷 <b>Payout — {int(STARTER_PCT*100)}% starter · {int(FINISHER_PCT*100)}% finisher</b>",
         f"Total still owed: <b>{html.escape(format_amount(remaining_total))}</b>",
-        parse_mode="HTML",
-    )
+        "──────────────",
+    ]
 
     for ukey, data in sorted(agents.items(), key=lambda x: -x[1]["owed"]):
         paid = paid_map.get(ukey, 0.0)
-        await update.message.reply_text(
-            _agent_row_text(data["label"], data["owed"], paid),
-            parse_mode="HTML",
-            reply_markup=_agent_keyboard(data["uname"] or ukey, data["owed"], paid),
-        )
+        remaining = max(0.0, data["owed"] - paid)
+        status = "✅ PAID" if remaining <= 0 else f"💷 <b>{html.escape(format_amount(remaining))}</b> owed"
+        lines.append(f"👤 <b>{html.escape(data['label'])}</b> — {status}")
+
+    lines.append("──────────────")
+    lines.append("<i>/paybuttons to mark cleared · /paylog for pay history</i>")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def payout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
