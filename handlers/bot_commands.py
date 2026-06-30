@@ -33,6 +33,7 @@ from handlers.payment_reports import build_payment_report_handlers
 from handlers.premium_access import build_premium_access_handlers
 from handlers.nemesis import build_nemesis_handlers
 from handlers.profit_export import build_profit_export_handlers
+from handlers.remind import build_remind_handlers
 
 
 def build_credo_bot_handlers() -> list:
@@ -78,6 +79,7 @@ def build_bot_handlers() -> list:
         *build_admin_access_handlers(),
         *build_premium_access_handlers(),
         *build_nemesis_handlers(),
+        *build_remind_handlers(),
         MessageHandler(filters.StatusUpdate.PINNED_MESSAGE, _delete_pin_service_message),
     ]
 
