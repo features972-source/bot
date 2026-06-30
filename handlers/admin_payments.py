@@ -47,11 +47,11 @@ def _format_record(r) -> str:
             pass
 
     if r.starter_user_id and r.starter_user_id == r.finisher_user_id:
-        team_line = f"� {html.escape(finisher_label)}"
+        team_line = f"\U0001f464 {html.escape(finisher_label)} (starter &amp; finisher)"
     elif starter_label:
-        team_line = f"🔓 {html.escape(starter_label)}  →  🔒 {html.escape(finisher_label)}"
+        team_line = f"\U0001f513 {html.escape(starter_label)}  \u2192  \U0001f512 {html.escape(finisher_label)}"
     else:
-        team_line = f"� {html.escape(finisher_label)}"
+        team_line = f"\U0001f464 {html.escape(finisher_label)}"
 
     return (
         f"<b>#{r.id}</b>  <b>{html.escape(amount)}</b>  {date}  {status}\n"
