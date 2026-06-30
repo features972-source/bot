@@ -60,7 +60,8 @@ async def blast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     links = list_links(settings.database_path)
 
     group_text = (
-        f"�🚨🚨 <b>ATTENTION ALL AGENTS</b> 🚨🚨🚨\n\n"
+        f"⚠️ <b>WARNING — READ IMMEDIATELY</b> ⚠️\n"
+        f"🚨🚨🚨 <b>ATTENTION ALL AGENTS</b> 🚨🚨🚨\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{html.escape(content)}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -68,6 +69,7 @@ async def blast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         f"{_COMMANDS}\n"
         f"🌐 <b>Portal:</b> <code>{html.escape(domain)}</code>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"‼️ <i>This message requires your immediate attention.</i>\n"
         f"<i>— Management</i>"
     )
 
@@ -88,14 +90,8 @@ async def blast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         if raw:
             notify_chat_ids = [int(raw)]
 
-    BLAST_STICKER_ID = "CAACAgIAAxkBA0ZHjWpDMd6qf9m6K5X7ZeNEkdkNI-TPAALcZwACLpE4SNFzixHQlDy6PAQ"
-
     for chat_id in notify_chat_ids:
         try:
-            try:
-                await context.bot.send_sticker(chat_id=chat_id, sticker=BLAST_STICKER_ID)
-            except Exception:
-                pass
             msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=group_text,
