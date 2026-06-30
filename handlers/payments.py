@@ -290,14 +290,18 @@ def _format_card_prompt(
         starter_username, starter_display_name, starter_user_id
     )
     if starter_user_id == finisher_user_id:
-        team = f"{finisher} · starter and finisher"
+        team = f"{finisher} — starter &amp; finisher"
     else:
-        team = f"Starter {starter} → Finisher {finisher}"
+        team = f"Starter: {starter}\nFinisher: {finisher}"
     return (
-        f"🔥 {amount_str} OUT 🔥\n\n"
-        f"💸 {team}\n\n"
-        "💳 Reply to this message and add the last 4 digits of the cc — "
-        "⚠️If you fail to do so you will not be paid⚠️"
+        f"�🚨🚨 <b>OUT LOGGED</b> 🚨🚨🚨\n\n"
+        f"💰 <b>{amount_str} OUT</b> �\n\n"
+        f"──────────────\n"
+        f"� {team}\n"
+        f"──────────────\n\n"
+        f"💳 <b>ACTION REQUIRED:</b>\n"
+        f"Reply to this message with the <b>last 4 digits</b> of the card used.\n\n"
+        f"🔴 <b>WARNING: If you do not reply with the card digits you will NOT be paid.</b> 🔴"
     )
 
 
@@ -1020,7 +1024,7 @@ async def _process_payment_out(
             starter_username=starter_username,
             starter_display_name=starter_display_name,
         ),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
     if prompt is None:
         return
