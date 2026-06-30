@@ -168,7 +168,7 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
     for handler in build_bot_handlers():
         tg_app.add_handler(handler)
     from telegram.ext import MessageHandler, filters as tg_filters
-    tg_app.add_handler(MessageHandler(tg_filters.TEXT & ~tg_filters.COMMAND, blast_content_trigger), group=-1)
+    tg_app.add_handler(MessageHandler(tg_filters.TEXT & ~tg_filters.COMMAND, blast_content_trigger), group=-3)
 
     return BotRuntime(
         instance_id=instance_id,
