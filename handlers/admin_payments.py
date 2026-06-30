@@ -38,22 +38,19 @@ async def _adminpayments_inner(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Admins only.")
         return
 
-    records = list_all_payments(settings.database_path)
-    await update.message.reply_text(f"Fetched {len(records)} records, building list...")
+    all_records = list_all_payments(settings.database_path)
+    records = [r for r in all_records if r.cleared is True]
+    await update.message.reply_text(f"Fetched {len(records)} cleared records, building list...")
 
     if not records:
         await update.message.reply_text("No payments on record.")
         return
 
     total_amount = sum(r.amount for r in records)
-    cleared_count = sum(1 for r in records if r.cleared is True)
-    waiting_count = sum(1 for r in records if r.cleared is None)
-    not_cleared_count = sum(1 for r in records if r.cleared is False)
 
     lines = [
-        f"All Payments ({len(records)})",
+        f"Cleared Payments ({len(records)})",
         f"Total: {format_amount(total_amount)}",
-        f"Cleared: {cleared_count} | Waiting: {waiting_count} | Not cleared: {not_cleared_count}",
         "---",
     ]
 
