@@ -21,7 +21,7 @@ _COMMANDS = (
     "Example: /remind 30m call back John\n"
 )
 
-_CONTENT_TRIGGER = re.compile(r"\bcontent\b", re.IGNORECASE)
+_CONTENT_TRIGGER = re.compile(r"\bcontent", re.IGNORECASE)
 
 
 def _domain(settings) -> str:
