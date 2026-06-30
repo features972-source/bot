@@ -31,6 +31,7 @@ from notify import (
     daily_summary_loop,
     ensure_telegram_send_worker,
 )
+from queue_alert import queue_alert_loop
 from payments_excel_export import schedule_payments_excel_sync
 from threex_token import get_token_holder
 from threex_ws import ASYNCIO_LOOP_KEY
@@ -93,6 +94,10 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         asyncio.create_task(
             daily_summary_loop(app.bot, settings, app.bot_data),
             name=f"daily-summary-{instance_id}",
+        )
+        asyncio.create_task(
+            queue_alert_loop(app.bot, settings, app.bot_data),
+            name=f"queue-alert-{instance_id}",
         )
         from handlers.credo import credo_reminder_loop
         from handlers.nemesis import nemesis_loop
