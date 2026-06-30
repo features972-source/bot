@@ -5,24 +5,24 @@ from __future__ import annotations
 
 import html
 import logging
-from datetime import datetime, timezone
 
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
 from handlers.admin_access import is_bot_admin
-from database import (
-    list_links,
-    unlink_extension,
-    count_user_calls_since,
-)
+from database import list_links, unlink_extension
 
 logger = logging.getLogger(__name__)
 
 
-def _today_start() -> datetime:
-    now = datetime.now(timezone.utc)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+def _count_all_calls_for_user(database_path: str, telegram_user_id: int) -> int:
+    from database import _connect
+    with _connect(database_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM completed_calls WHERE telegram_user_id = ?",
+            (telegram_user_id,),
+        ).fetchone()
+    return int(row[0]) if row else 0
 
 
 async def attendance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -38,19 +38,13 @@ async def attendance_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("No agents currently linked.")
         return
 
-    today = _today_start()
     lines = ["👥 <b>Attendance — Linked Agents</b>\n──────────────"]
 
     for link in links:
         name = link.display_name or link.telegram_username or str(link.telegram_user_id)
-        calls_today = count_user_calls_since(
-            settings.database_path,
-            telegram_user_id=link.telegram_user_id,
-            since=today,
-        )
-        status = "🟢" if calls_today > 0 else "⚪"
+        total_calls = _count_all_calls_for_user(settings.database_path, link.telegram_user_id)
         lines.append(
-            f"{status} <b>{html.escape(name)}</b> — ext {html.escape(link.extension)} · {calls_today} call(s) today"
+            f"🟢 <b>{html.escape(name)}</b> — ext {html.escape(link.extension)} · {total_calls} total call(s)"
         )
 
     lines.append("──────────────")
