@@ -1653,17 +1653,15 @@ async def payments_page_callback(
 
 
 async def payments_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    since, period_label = current_payment_week_start()
     await _send_payments_summary(
         update,
         context,
-        since=since,
-        period_label=period_label,
+        since=None,
+        period_label="all time",
         empty_text=(
-            "**No payments this week yet.**\n\n"
-            "New week starts every **Sunday**.\n"
-            "Use `/alltimepayments` to see everything on record.\n\n"
-            "To log an out: reply to the starter’s notes, then send e.g. `5182 out`."
+            "**No payments on record yet.**\n\n"
+            "Reply to the starter notes, then send e.g. `5182 out`.\n"
+            "Use /clearpayments to reset once everyone is paid."
         ),
     )
 

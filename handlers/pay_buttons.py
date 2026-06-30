@@ -9,11 +9,10 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 from database import (
     get_payment_by_id,
-    list_payments_since,
+    list_all_payments,
     update_payment_cleared,
 )
 from handlers.admin_access import is_bot_admin
-from handlers.stats_period import current_payment_week_start
 from money_format import format_amount
 from payments_excel_export import sorted_payment_records
 from handlers.payment_reports import schedule_payment_report_refresh
@@ -48,15 +47,14 @@ async def paybuttons_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Admins only.")
         return
 
-    since, _ = current_payment_week_start()
-    records = sorted_payment_records(list_payments_since(settings.database_path, since=since))
+    records = sorted_payment_records(list_all_payments(settings.database_path))
 
     if not records:
-        await update.message.reply_text("No payments this week yet.")
+        await update.message.reply_text("No payments on record. Use /clearpayments to reset.")
         return
 
     await update.message.reply_text(
-        f"💰 <b>This week's payments — tap to update status</b>",
+        "💰 <b>All payments — tap to mark paid/not cleared</b>",
         parse_mode="HTML",
     )
 
