@@ -67,7 +67,7 @@ async def _adminpayments_inner(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             status = "WAIT"
 
-        finisher = (r.display_name or r.finisher_username or str(r.finisher_user_id)).strip()
+        finisher = (r.finisher_display_name or r.finisher_username or str(r.finisher_user_id)).strip()
         starter = (r.starter_display_name or r.starter_username or "").strip()
 
         date = ""
