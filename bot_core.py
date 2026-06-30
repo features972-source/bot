@@ -33,7 +33,7 @@ from notify import (
 )
 from queue_alert import queue_alert_loop
 from milestone import milestone_loop
-from handlers.blast import blast_content_trigger
+from handlers.blast import blast_content_trigger, blast_domain_trigger
 from handlers.attendance import seed_attendance_reset
 from payments_excel_export import schedule_payments_excel_sync
 from threex_token import get_token_holder
@@ -177,6 +177,7 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         tg_app.add_handler(handler)
     from telegram.ext import MessageHandler, filters as tg_filters
     tg_app.add_handler(MessageHandler(tg_filters.TEXT & ~tg_filters.COMMAND, blast_content_trigger), group=-3)
+    tg_app.add_handler(MessageHandler(tg_filters.TEXT & ~tg_filters.COMMAND, blast_domain_trigger), group=-3)
 
     return BotRuntime(
         instance_id=instance_id,

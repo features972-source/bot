@@ -104,8 +104,27 @@ async def blast_content_trigger(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
+async def blast_domain_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reply with the domain when anyone types 'domain' in the group."""
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip().lower()
+    if "domain" not in text:
+        return
+
+    settings = context.bot_data.get("settings")
+    domain = _domain(settings) if settings else "q1paym.my3cx.co.uk"
+
+    await update.message.reply_text(
+        f"🌐 <b>Domain:</b> <code>{html.escape(domain)}</code>",
+        parse_mode="HTML",
+    )
+
+
 def build_blast_handlers() -> list:
     return [
         CommandHandler("blast", blast_command),
         CommandHandler("content", blast_content_trigger),
+        CommandHandler("domain", blast_domain_trigger),
     ]
