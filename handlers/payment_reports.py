@@ -243,12 +243,15 @@ async def refresh_payment_report(bot, settings: Settings) -> None:
                 )
                 return
             except BadRequest as exc:
-                if "message is not modified" in str(exc).lower():
+                err = str(exc).lower()
+                if "message is not modified" in err:
                     return
-                logger.debug("Could not edit payment report msg %s: %s", message_id, exc)
+                # Stale/photo message — delete and repost
+                logger.debug("Clearing stale payment report msg %s: %s", message_id, exc)
             except Exception:
                 logger.exception("Failed to edit payment report text")
             await _delete_notify_message(bot, chat_id, message_id)
+            clear_payment_notify_message_id(settings.database_path)
 
         try:
             sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
