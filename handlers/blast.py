@@ -89,9 +89,10 @@ async def blast_content_trigger(update: Update, context: ContextTypes.DEFAULT_TY
 
     if "domain" in text:
         settings = context.bot_data.get("settings")
-        domain = _domain(settings) if settings else "q1paym.my3cx.co.uk"
+        full = _domain(settings) if settings else "q1paym.my3cx.co.uk"
+        short = full.split(".")[0] if full else "q1paym"
         await update.message.reply_text(
-            f"🌐 <b>Domain:</b> <code>{html.escape(domain)}</code>",
+            f"🌐 <b>Domain:</b> <code>{html.escape(short)}</code>",
             parse_mode="HTML",
         )
         return
