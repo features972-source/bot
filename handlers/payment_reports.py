@@ -184,8 +184,46 @@ async def _run_pending_refresh(key: str) -> None:
     await refresh_payment_report(bot, settings)
 
 
+def _build_live_text(settings: Settings) -> str:
+    from database import list_all_payments, get_payment_totals
+    from money_format import format_amount
+    records = sorted_payment_records(list_all_payments(settings.database_path))
+    total_count, total_amount = get_payment_totals(settings.database_path)
+    pending_count, pending_amount = get_payment_totals(settings.database_path, pending=True)
+    cleared_count, cleared_amount = get_payment_totals(settings.database_path, cleared=True)
+    not_cleared_count, not_cleared_amount = get_payment_totals(settings.database_path, cleared=False)
+
+    if not records:
+        return (
+            f"💰 <b>{html.escape(settings.bot_display_name)} — Payments</b>\n\n"
+            "No payments on record yet.\n\n"
+            "<i>Auto-updates when payments are logged.</i>"
+        )
+
+    lines = [f"💰 <b>{html.escape(settings.bot_display_name)} — Payments</b>\n"]
+    for r in records:
+        name = r.display_name or r.finisher_username or str(r.finisher_user_id)
+        amount = format_amount(r.amount)
+        card = f" ····{r.card_last4}" if r.card_last4 else ""
+        if r.cleared == "cleared":
+            status = "🟩"
+        elif r.cleared == "not_cleared":
+            status = "🟥"
+        else:
+            status = "🟧"
+        lines.append(f"{status} <b>#{r.id}</b> {html.escape(amount)} — {html.escape(name)}{html.escape(card)}")
+
+    lines.append(f"\n──────────────")
+    lines.append(f"<b>Total: {html.escape(format_amount(total_amount))}</b> ({total_count} payments)")
+    lines.append(f"🟧 Waiting: {html.escape(format_amount(pending_amount))} ({pending_count})")
+    lines.append(f"🟩 Cleared: {html.escape(format_amount(cleared_amount))} ({cleared_count})")
+    lines.append(f"🟥 Not cleared: {html.escape(format_amount(not_cleared_amount))} ({not_cleared_count})")
+    lines.append(f"──────────────\n<i>Auto-updates · /clearpayments to reset</i>")
+    return "\n".join(lines)
+
+
 async def refresh_payment_report(bot, settings: Settings) -> None:
-    """Edit the live payment report post (image), or create it if missing."""
+    """Edit the live payment report post (text), or create it if missing."""
     chat_id = get_payment_notify_chat_id(settings.database_path)
     if chat_id is None:
         return
@@ -193,53 +231,31 @@ async def refresh_payment_report(bot, settings: Settings) -> None:
     lock = _REFRESH_LOCKS[settings.database_path]
     async with lock:
         message_id = get_payment_notify_message_id(settings.database_path)
-        image_bytes = await asyncio.to_thread(build_payment_report_image, settings)
-
-        if image_bytes is None:
-            text = build_payment_report_empty_text(settings)
-            if message_id is not None:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        text=text,
-                        parse_mode="HTML",
-                    )
-                    return
-                except BadRequest as exc:
-                    if "message is not modified" in str(exc).lower():
-                        return
-                    logger.debug(
-                        "Could not edit empty payment report msg %s: %s",
-                        message_id,
-                        exc,
-                    )
-                except Exception:
-                    logger.exception("Failed to edit empty payment report")
-                await _delete_notify_message(bot, chat_id, message_id)
-                message_id = None
-            try:
-                sent = await bot.send_message(
-                    chat_id=chat_id, text=text, parse_mode="HTML"
-                )
-                set_payment_notify_message_id(settings.database_path, sent.message_id)
-            except Exception:
-                logger.exception("Failed to post empty payment report")
-            return
+        text = _build_live_text(settings)
 
         if message_id is not None:
-            if await _try_edit_photo(bot, chat_id, message_id, image_bytes):
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    parse_mode="HTML",
+                )
                 return
+            except BadRequest as exc:
+                if "message is not modified" in str(exc).lower():
+                    return
+                logger.debug("Could not edit payment report msg %s: %s", message_id, exc)
+            except Exception:
+                logger.exception("Failed to edit payment report text")
             await _delete_notify_message(bot, chat_id, message_id)
 
         try:
-            sent = await bot.send_photo(
-                chat_id=chat_id, photo=_photo_file(image_bytes)
-            )
+            sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
             set_payment_notify_message_id(settings.database_path, sent.message_id)
         except Exception:
             logger.exception(
-                "Failed to post payment report image for %s to chat %s",
+                "Failed to post payment report for %s to chat %s",
                 settings.bot_display_name,
                 chat_id,
             )
