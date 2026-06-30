@@ -15,6 +15,7 @@ from telegram.ext import (
 
 from handlers.admin_access import is_bot_admin
 from database import list_links
+from notify import send_to_notify_chats, _notify_chat_ids
 
 logger = logging.getLogger(__name__)
 
@@ -84,13 +85,8 @@ async def blast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     # Post + pin in notify chats (the group)
     bot_data = context.bot_data
-    notify_chat_ids: list[int] = []
-    if settings is not None:
-        raw = getattr(settings, "notify_chat_id", None)
-        if raw:
-            notify_chat_ids = [int(raw)]
-
-    for chat_id in notify_chat_ids:
+    chat_ids = _notify_chat_ids(settings, bot_data)
+    for chat_id in chat_ids:
         try:
             msg = await context.bot.send_message(
                 chat_id=chat_id,
@@ -106,7 +102,7 @@ async def blast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             except Exception:
                 pass
         except Exception:
-            pass
+            logger.exception("Blast: failed to post to chat %s", chat_id)
 
     # DM every linked agent
     sent = 0
