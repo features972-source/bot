@@ -118,9 +118,10 @@ async def payout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("❌ Admins only.")
         return
 
-    records = list_all_payments(settings.database_path)
+    all_records = list_all_payments(settings.database_path)
+    records = [r for r in all_records if r.cleared == "cleared"]
     if not records:
-        await update.message.reply_text("No payments on record.")
+        await update.message.reply_text("No cleared payments on record yet.")
         return
 
     agents = _build_agents(records)
@@ -177,8 +178,8 @@ async def payout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif action == "unpaid" and len(parts) >= 3:
         uname = parts[2]
         _clear_paid(settings.database_path, uname)
-        # Rebuild and re-show
-        records = list_all_payments(settings.database_path)
+        # Rebuild and re-show (cleared only)
+        records = [r for r in list_all_payments(settings.database_path) if r.cleared == "cleared"]
         agents = _build_agents(records)
         ukey = uname.lower()
         data = agents.get(ukey, {"label": f"@{uname}", "uname": uname, "owed": 0.0})
