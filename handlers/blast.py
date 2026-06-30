@@ -3,10 +3,8 @@ from __future__ import annotations
 
 import html
 import logging
-import re
-
 from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import CommandHandler, ContextTypes
 
 from handlers.admin_access import is_bot_admin
 from notify import _notify_chat_ids
@@ -20,8 +18,6 @@ _COMMANDS = (
     "/remind [time] [note] — set a personal reminder and the bot will ping you when the time is up\n"
     "Example: /remind 30m call back John\n"
 )
-
-_CONTENT_TRIGGER = re.compile(r"\bcontent", re.IGNORECASE)
 
 
 def _domain(settings) -> str:
@@ -87,14 +83,13 @@ async def blast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def blast_content_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reply with just the blast content when anyone types 'content' in the group."""
-    if not update.message or not update.message.text:
-        return
-    if not _CONTENT_TRIGGER.search(update.message.text):
+    """Reply with the blast content when anyone types /content in the group."""
+    if not update.message:
         return
 
     last_content = context.bot_data.get(LAST_BLAST_CONTENT_KEY)
     if not last_content:
+        await update.message.reply_text("⚠️ No active blast content set.")
         return
 
     await update.message.reply_text(
@@ -107,5 +102,5 @@ async def blast_content_trigger(update: Update, context: ContextTypes.DEFAULT_TY
 def build_blast_handlers() -> list:
     return [
         CommandHandler("blast", blast_command),
-        MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, blast_content_trigger),
+        CommandHandler("content", blast_content_trigger),
     ]
