@@ -21,13 +21,8 @@ logger = logging.getLogger(__name__)
 ASK_CONTENT = 0
 
 _COMMANDS = (
-    "/mystats — see your calls today & this week at a glance\n"
-    "/mypay — check your estimated earnings for the week\n"
-    "/remind [time] [note] — set a personal reminder, e.g:\n"
-    "  • /remind 30m call back ending 9423\n"
-    "  • /remind 1h follow up with client\n"
-    "  • /remind 2h30m check voicemail\n"
-    "  Bot will ping you when the time is up ⏰\n"
+    "/remind [time] [note] — set a personal reminder and the bot will ping you when the time is up\n"
+    "Example: /remind 30m call back John\n"
 )
 
 
