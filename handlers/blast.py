@@ -60,8 +60,20 @@ async def blast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     domain = _domain(settings)
     links = list_links(settings.database_path)
 
-    text = (
-        f"📣 <b>Message from management</b>\n\n"
+    group_text = (
+        f"�🚨🚨 <b>ATTENTION ALL AGENTS</b> 🚨🚨🚨\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{html.escape(content)}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>📌 Key commands:</b>\n"
+        f"{_COMMANDS}\n"
+        f"🌐 <b>Portal:</b> <code>{html.escape(domain)}</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>— Management</i>"
+    )
+
+    dm_text = (
+        f"� <b>Message from management</b>\n\n"
         f"{html.escape(content)}\n\n"
         f"━━━━━━━━━━━━━━━\n"
         f"<b>Key commands:</b>\n"
@@ -69,6 +81,33 @@ async def blast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         f"<b>Your portal:</b> <code>{html.escape(domain)}</code>"
     )
 
+    # Post + pin in notify chats (the group)
+    bot_data = context.bot_data
+    notify_chat_ids: list[int] = []
+    if settings is not None:
+        raw = getattr(settings, "notify_chat_id", None)
+        if raw:
+            notify_chat_ids = [int(raw)]
+
+    for chat_id in notify_chat_ids:
+        try:
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=group_text,
+                parse_mode="HTML",
+            )
+            try:
+                await context.bot.pin_chat_message(
+                    chat_id=chat_id,
+                    message_id=msg.message_id,
+                    disable_notification=True,
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # DM every linked agent
     sent = 0
     failed = 0
     for link in links:
@@ -77,7 +116,7 @@ async def blast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         try:
             await context.bot.send_message(
                 chat_id=link.telegram_user_id,
-                text=text,
+                text=dm_text,
                 parse_mode="HTML",
             )
             sent += 1
@@ -85,7 +124,7 @@ async def blast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             failed += 1
 
     await update.message.reply_text(
-        f"✅ Blast sent to {sent} agent(s)." + (f" ({failed} failed)" if failed else ""),
+        f"✅ Blast pinned in group + sent to {sent} agent(s)." + (f" ({failed} failed)" if failed else ""),
     )
     return ConversationHandler.END
 
