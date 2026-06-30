@@ -31,25 +31,31 @@ def _format_record(r) -> str:
     status = _status_label(r.cleared)
 
     finisher_name = r.display_name or r.finisher_username or str(r.finisher_user_id)
+    finisher_uname = f"@{r.finisher_username}" if r.finisher_username else ""
+    finisher_label = f"{finisher_name} ({finisher_uname})" if finisher_uname and finisher_name != finisher_uname.lstrip("@") else finisher_name
+
     starter_name = r.starter_display_name or r.starter_username
-    if r.starter_user_id and r.starter_user_id == r.finisher_user_id:
-        who = f"👤 {html.escape(finisher_name)} (starter &amp; finisher)"
-    elif starter_name:
-        who = f"🔓 {html.escape(starter_name)} → 🔒 {html.escape(finisher_name)}"
-    else:
-        who = f"👤 {html.escape(finisher_name)}"
+    starter_uname = f"@{r.starter_username}" if r.starter_username else ""
+    starter_label = f"{starter_name} ({starter_uname})" if starter_uname and starter_name != starter_uname.lstrip("@") else (starter_name or "")
 
     date = ""
     if r.created_at:
         try:
             dt = datetime.fromisoformat(r.created_at)
-            date = f" · {dt.strftime('%d %b')}"
+            date = dt.strftime("%d %b %Y")
         except Exception:
             pass
 
+    if r.starter_user_id and r.starter_user_id == r.finisher_user_id:
+        team = f"🔒 {html.escape(finisher_label)} (starter &amp; finisher)"
+    elif starter_label:
+        team = f"🔓 {html.escape(starter_label)} → 🔒 {html.escape(finisher_label)}"
+    else:
+        team = f"🔒 {html.escape(finisher_label)}"
+
     return (
-        f"<b>#{r.id}</b> {html.escape(amount)}{date}\n"
-        f"{who}\n"
+        f"<b>ID #{r.id}</b> · <b>{html.escape(amount)}</b> · {date}\n"
+        f"{team}\n"
         f"💳 {html.escape(card)} · {status}"
     )
 
