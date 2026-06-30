@@ -477,13 +477,14 @@ def _stored_user_label(
     display_name: str | None,
     user_id: int,
 ) -> str:
-    if username:
-        label = f"@{username.lstrip('@')}"
-        if display_name:
-            return f"{label} ({display_name})"
-        return label
-    if display_name:
-        return display_name
+    name = display_name.strip() if display_name else ""
+    uname = f"@{username.lstrip('@')}" if username else ""
+    if name and uname:
+        return f"{name} ({uname})"
+    if name:
+        return name
+    if uname:
+        return uname
     return str(user_id)
 
 
