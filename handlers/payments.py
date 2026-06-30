@@ -294,7 +294,7 @@ def _format_card_prompt(
     else:
         team = f"Starter: {starter}\nFinisher: {finisher}"
     return (
-        f"🔥🔥🔥 <b>{amount_str} OUT</b> 🔥🔥🔥\n\n"
+        f"⚠️🔥 <b>{amount_str} OUT</b> 🔥⚠️\n\n"
         f"──────────────\n"
         f"👤 {team}\n"
         f"──────────────\n\n"
