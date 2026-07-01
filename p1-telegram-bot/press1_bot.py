@@ -299,25 +299,20 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         }
         context.application.bot_data["dial_progress"] = progress
 
-        async def dial_worker() -> None:
-            try:
-                await asyncio.to_thread(vd.launch_dial_campaign, numbers, progress)
-            except Exception as e:
-                progress["error"] = str(e)
-                progress["running"] = False
-
-        dial_task = asyncio.create_task(dial_worker())
-        context.application.bot_data["dial_task"] = dial_task
-
-        # Wait for launch; then show stats (skip duplicate edit if unchanged)
-        await asyncio.sleep(3)
-        st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
-        text = await _format_live_stats(st, count)
-        if progress.get("error"):
-            text += f"\n\n⚠️ {progress['error']}"
-        await _safe_edit(msg, text)
-        if progress.get("error"):
+        try:
+            await asyncio.to_thread(vd.launch_dial_campaign, numbers, progress)
+        except Exception as e:
+            progress["error"] = str(e)
+            progress["running"] = False
+            st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
+            await _safe_edit(
+                msg,
+                await _format_live_stats(st, count) + f"\n\n⚠️ {e}",
+            )
             return
+
+        st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
+        await _safe_edit(msg, await _format_live_stats(st, count))
 
         stop_event = asyncio.Event()
         context.application.bot_data["live_updater_stop"] = stop_event

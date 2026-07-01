@@ -86,8 +86,8 @@ def run_remote(cmd: str, timeout: int = 120) -> str:
                 code = stdout.channel.recv_exit_status()
                 out = stdout.read().decode(errors="replace")
                 err = stderr.read().decode(errors="replace")
-                # Paramiko often returns -1 after background/detached commands even when OK.
-                if code != 0 and not (code == -1 and out.strip()):
+                # Paramiko returns -1 when the SSH channel closes oddly (common with nohup/&).
+                if code not in (0, -1):
                     raise RuntimeError((err or out or f"remote exit {code}").strip())
                 return out
         except Exception as exc:
@@ -135,7 +135,7 @@ def _fetch_server_dial_state() -> dict[str, int | bool]:
         f"cat {DIAL_TOTAL} 2>/dev/null || echo 0; "
         f"cat {DIAL_STARTED} 2>/dev/null || echo 0; "
         f"cat {DIAL_FAILED} 2>/dev/null || echo 0; "
-        f"pgrep -fc '[p]ress1_dial_run.sh' 2>/dev/null || echo 0",
+        f"pgrep -fc press1_dial_run.sh 2>/dev/null || echo 0",
         timeout=20,
     ).strip().splitlines()
     vals = [int((ln.strip().split() or ["0"])[-1]) for ln in raw[:4]] if raw else [0, 0, 0, 0]
@@ -435,10 +435,32 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
 
 
 def _stop_remote_dialer() -> None:
+    try:
+        run_remote(
+            f"touch {DIAL_STOP} 2>/dev/null; pkill -f press1_dial_run.sh 2>/dev/null; true",
+            timeout=20,
+        )
+    except Exception:
+        pass
+
+
+def _start_dial_script() -> None:
+    """Start dial script detached; verify with pgrep in a separate SSH call."""
+    import time
+
+    run_remote(f"chmod +x {DIAL_SCRIPT}", timeout=15)
     run_remote(
-        f"touch {DIAL_STOP} 2>/dev/null; pkill -f '[p]ress1_dial_run.sh' 2>/dev/null || true",
-        timeout=20,
+        f"rm -f {DIAL_STOP}; nohup setsid bash {DIAL_SCRIPT} >>{DIAL_LOG} 2>&1 </dev/null &",
+        timeout=15,
     )
+    time.sleep(2)
+    running = run_remote(
+        f"pgrep -fc press1_dial_run.sh 2>/dev/null || echo 0",
+        timeout=15,
+    ).strip().split()[-1]
+    if int(running or "0") < 1:
+        log = run_remote(f"tail -25 {DIAL_LOG} 2>/dev/null || echo empty", timeout=15)
+        raise RuntimeError(f"Dialer did not start: {log.strip()[:250]}")
 
 
 def launch_dial_campaign(phones: list[str], progress: dict) -> None:
@@ -466,8 +488,8 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         raise RuntimeError("No valid numbers to dial")
 
     run_remote(
-        f"pkill -f '[p]ress1_dial_run.sh' 2>/dev/null || true; "
-        f"pkill -f AST_VDauto_dial 2>/dev/null || true; "
+        f"pkill -f press1_dial_run.sh 2>/dev/null; true; "
+        f"pkill -f AST_VDauto_dial 2>/dev/null; true; "
         f"rm -f {DIAL_STOP}; "
         f"echo 0 > {DIAL_STARTED}; echo 0 > {DIAL_FAILED}; "
         f"echo {len(numbers)} > {DIAL_TOTAL}",
@@ -491,17 +513,7 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     if line_count < len(numbers):
         raise RuntimeError(f"Upload failed: expected {len(numbers)} lines, got {line_count}")
 
-    out = run_remote(
-        f"chmod +x {DIAL_SCRIPT}; "
-        f"nohup setsid bash {DIAL_SCRIPT} >>{DIAL_LOG} 2>&1 </dev/null & "
-        f"sleep 2; "
-        f"if pgrep -f '[p]ress1_dial_run.sh' >/dev/null; then echo STARTED; "
-        f"else echo START_FAIL; tail -20 {DIAL_LOG} 2>/dev/null; fi",
-        timeout=45,
-    )
-    if "START_FAIL" in out and "STARTED" not in out:
-        progress["running"] = False
-        raise RuntimeError(f"Dialer failed to start: {out.strip()[:300]}")
+    _start_dial_script()
 
 
 def dial_leads(phones: list[str], progress: dict) -> None:
