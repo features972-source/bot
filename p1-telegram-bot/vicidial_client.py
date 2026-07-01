@@ -150,9 +150,10 @@ def _ensure_daemons() -> None:
     """VDAD/manager processes must run or campaign calls never leave the queue."""
     run_remote(
         r"""
-for p in AST_manager_send.pl AST_VDhopper.pl AST_VDauto_dial.pl; do
+for p in AST_manager_listen.pl AST_manager_send.pl AST_VDhopper.pl AST_VDauto_dial.pl; do
   pgrep -f "$p" >/dev/null || nohup /usr/share/astguiclient/$p >>/var/log/astguiclient/${p%.pl}.log 2>&1 &
 done
+sleep 3
 if ! crontab -l 2>/dev/null | grep -q ADMIN_keepalive_ALL; then
   (crontab -l 2>/dev/null; echo '@reboot /usr/share/astguiclient/ADMIN_keepalive_ALL.pl --cuplogin >> /var/log/astguiclient/keepalive.log 2>&1') | crontab -
 fi
