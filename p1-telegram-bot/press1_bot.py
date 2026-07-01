@@ -138,16 +138,17 @@ async def _live_campaign_updater(
                 text += f"\n\n⚠️ {err}"
             hopper = int(st.get("hopper", 0) or 0)
             live = int(st.get("live", 0) or 0)
-            running = progress.get("running", False)
+            active = (st.get("campaign_active") or "N").upper() == "Y"
+            dialed = int(st.get("dialed", 0) or 0)
             if text != last_text:
                 try:
                     await msg.edit_text(text)
                     last_text = text
                 except Exception:
                     pass
-            if not running and hopper == 0 and live == 0:
+            if not active and hopper == 0:
                 idle_rounds += 1
-                if idle_rounds >= 3:
+                if idle_rounds >= 2:
                     final = await _format_live_stats(st, total_leads, finished=True)
                     err = progress.get("error")
                     if err:
@@ -157,8 +158,17 @@ async def _live_campaign_updater(
                     except Exception:
                         pass
                     break
+            elif not active and dialed == 0 and idle_rounds >= 6:
+                final = await _format_live_stats(st, total_leads, finished=True)
+                err = progress.get("error") or "Dialer never started — try /run again"
+                final += f"\n\n⚠️ {err}"
+                try:
+                    await msg.edit_text(final)
+                except Exception:
+                    pass
+                break
             else:
-                idle_rounds = 0
+                idle_rounds = 0 if active or dialed > 0 else idle_rounds + 1
         except Exception as e:
             try:
                 await msg.edit_text(f"Live update error: {e}")
@@ -276,13 +286,23 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         async def dial_worker() -> None:
             try:
-                await asyncio.to_thread(vd.dial_leads, numbers, progress)
+                await asyncio.to_thread(vd.launch_dial_campaign, numbers, progress)
             except Exception as e:
                 progress["error"] = str(e)
                 progress["running"] = False
 
         dial_task = asyncio.create_task(dial_worker())
         context.application.bot_data["dial_task"] = dial_task
+
+        # Brief wait so launch errors surface before live stats poll
+        await asyncio.sleep(3)
+        st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
+        if progress.get("error"):
+            await msg.edit_text(
+                await _format_live_stats(st, count) + f"\n\n⚠️ {progress['error']}"
+            )
+            return
+        await msg.edit_text(await _format_live_stats(st, count))
 
         stop_event = asyncio.Event()
         context.application.bot_data["live_updater_stop"] = stop_event

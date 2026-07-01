@@ -25,8 +25,17 @@ SERVER_IP = os.getenv("VICIDIAL_SERVER_IP", "206.189.118.204")
 MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "25"))
 BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "25"))
 BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "5"))
+MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
 CPS = int(os.getenv("VICIDIAL_CPS", "5"))
 MIN_PHONE_DIGITS = 9
+
+DIAL_SCRIPT = "/usr/local/bin/press1_dial_run.sh"
+DIAL_NUMBERS = "/tmp/press1_dial_numbers.txt"
+DIAL_TOTAL = "/tmp/press1_dial_total"
+DIAL_STARTED = "/tmp/press1_dial_started"
+DIAL_FAILED = "/tmp/press1_dial_failed"
+DIAL_STOP = "/tmp/press1_dial_stop"
+DIAL_LOG = "/tmp/press1_dial.log"
 
 
 def test_numbers() -> list[str]:
@@ -69,14 +78,87 @@ def ssh_connect():
 
 
 def run_remote(cmd: str, timeout: int = 120) -> str:
-    with ssh_connect() as client:
-        _stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
-        code = stdout.channel.recv_exit_status()
-        out = stdout.read().decode(errors="replace")
-        err = stderr.read().decode(errors="replace")
-        if code != 0:
-            raise RuntimeError((err or out or f"remote exit {code}").strip())
-        return out
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            with ssh_connect() as client:
+                _stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+                code = stdout.channel.recv_exit_status()
+                out = stdout.read().decode(errors="replace")
+                err = stderr.read().decode(errors="replace")
+                if code != 0:
+                    raise RuntimeError((err or out or f"remote exit {code}").strip())
+                return out
+        except Exception as exc:
+            last_err = exc
+            if attempt < 2:
+                import time
+
+                time.sleep(2 * (attempt + 1))
+    raise RuntimeError(str(last_err or "SSH failed"))
+
+
+def _server_dial_script() -> str:
+    return f"""#!/bin/bash
+set +e
+STOP={DIAL_STOP}
+STARTED={DIAL_STARTED}
+FAILED={DIAL_FAILED}
+NUMFILE={DIAL_NUMBERS}
+BATCH={BATCH_SIZE}
+PAUSE={BATCH_PAUSE_SEC}
+MAX={MAX_CONCURRENT}
+mapfile -t NUMS < "$NUMFILE"
+total=${{#NUMS[@]}}
+idx=0
+while [ "$idx" -lt "$total" ]; do
+  [ -f "$STOP" ] && exit 0
+  batch_n=0
+  while [ "$batch_n" -lt "$BATCH" ] && [ "$idx" -lt "$total" ]; do
+    [ -f "$STOP" ] && exit 0
+    live=$(asterisk -rx "core show channels" 2>/dev/null | grep -c "@bitcall" || echo 0)
+    while [ "$live" -ge "$MAX" ]; do
+      [ -f "$STOP" ] && exit 0
+      sleep 2
+      live=$(asterisk -rx "core show channels" 2>/dev/null | grep -c "@bitcall" || echo 0)
+    done
+    num=$(echo "${{NUMS[$idx]}}" | tr -d '\\r')
+    [ -z "$num" ] && {{ idx=$((idx+1)); continue; }}
+    if asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension s@press1-ivr" >>{DIAL_LOG} 2>&1; then
+      c=$(cat "$STARTED" 2>/dev/null || echo 0); echo $((c+1)) > "$STARTED"
+    else
+      f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
+    fi
+    idx=$((idx+1))
+    batch_n=$((batch_n+1))
+  done
+  if [ "$idx" -lt "$total" ]; then
+    sleep "$PAUSE"
+  fi
+done
+exit 0
+"""
+
+
+def _fetch_server_dial_state() -> dict[str, int | bool]:
+    raw = run_remote(
+        f"echo $(cat {DIAL_TOTAL} 2>/dev/null || echo 0); "
+        f"echo $(cat {DIAL_STARTED} 2>/dev/null || echo 0); "
+        f"echo $(cat {DIAL_FAILED} 2>/dev/null || echo 0); "
+        f"echo $(pgrep -f '[p]ress1_dial_run.sh' | wc -l); "
+        f"echo $(asterisk -rx 'core show channels' 2>/dev/null | grep -c '@bitcall' || echo 0)",
+        timeout=25,
+    ).strip().splitlines()
+    vals = [int((ln.strip().split() or ["0"])[-1]) for ln in raw[:5]] if raw else [0, 0, 0, 0, 0]
+    while len(vals) < 5:
+        vals.append(0)
+    return {
+        "total": vals[0],
+        "started": vals[1],
+        "failed": vals[2],
+        "script_running": vals[3] > 0,
+        "live": vals[4],
+    }
 
 
 def mysql(script: str, timeout: int = 120) -> str:
@@ -320,179 +402,106 @@ def live_bitcall_channels() -> int:
 
 
 def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
-    """Live stats for direct-dial /run (same originate path as /testcall)."""
+    """Read live counters from the server (source of truth for /run)."""
     prog = progress or {}
-    total = int(prog.get("total", 0) or 0)
-    started = int(prog.get("started", 0) or 0)
-    failed = int(prog.get("failed", 0) or 0)
+    try:
+        state = _fetch_server_dial_state()
+        total = int(state["total"] or prog.get("total", 0) or 0)
+        started = int(state["started"])
+        failed = int(state["failed"])
+        live = int(state["live"])
+        running = bool(state["script_running"])
+        if running:
+            prog["running"] = True
+        elif started + failed >= total and total > 0:
+            prog["running"] = False
+        prog["started"] = started
+        prog["failed"] = failed
+        if total:
+            prog["total"] = total
+    except Exception:
+        total = int(prog.get("total", 0) or 0)
+        started = int(prog.get("started", 0) or 0)
+        failed = int(prog.get("failed", 0) or 0)
+        live = 0
+        running = bool(prog.get("running"))
     left = max(0, total - started - failed)
-    live = "0"
-    if prog.get("running"):
-        try:
-            live = str(live_bitcall_channels())
-        except Exception:
-            live = "0"
     return {
         "hopper": str(left),
-        "live": live,
+        "live": str(live),
         "new_leads": str(left),
         "dialed": str(started),
         "press1": "0",
         "answered": "0",
-        "campaign_active": "Y" if prog.get("running") else "N",
+        "campaign_active": "Y" if running else "N",
         "agent_status": "—",
     }
 
 
 def _stop_remote_dialer() -> None:
-    run_remote("touch /tmp/press1_dial_stop 2>/dev/null; pkill -f press1_dial_run.sh 2>/dev/null || true", timeout=20)
-
-
-def _start_remote_dialer() -> None:
-    """Launch dial script detached so it survives SSH session close."""
     run_remote(
-        f"chmod +x /tmp/press1_dial_run.sh; "
-        f"setsid /tmp/press1_dial_run.sh >> /tmp/press1_dial.log 2>&1 < /dev/null & "
-        f"sleep 1; pgrep -f press1_dial_run.sh || (echo START_FAIL; tail -5 /tmp/press1_dial.log)",
-        timeout=30,
+        f"touch {DIAL_STOP} 2>/dev/null; pkill -f '[p]ress1_dial_run.sh' 2>/dev/null || true",
+        timeout=20,
     )
 
 
-def _poll_dial_progress() -> tuple[int, int, bool]:
-    """Read server counters; returns (started, failed, script_still_running)."""
-    raw = run_remote(
-        "cat /tmp/press1_dial_started 2>/dev/null || echo 0; "
-        "echo ---; cat /tmp/press1_dial_failed 2>/dev/null || echo 0; "
-        "echo ---; pgrep -f '[p]ress1_dial_run.sh' || true",
-        timeout=20,
-    ).strip().split("---")
-    started = failed = 0
-    try:
-        started = int((raw[0] if raw else "0").strip().split()[-1])
-    except ValueError:
-        pass
-    try:
-        failed = int((raw[1] if len(raw) > 1 else "0").strip().split()[-1])
-    except ValueError:
-        pass
-    running = len(raw) > 2 and bool(raw[2].strip())
-    return started, failed, running
+def launch_dial_campaign(phones: list[str], progress: dict) -> None:
+    """Upload list + start server-side dialer (handles 1k+ leads; bot only monitors)."""
+    seen: set[str] = set()
+    numbers: list[str] = []
+    for phone in phones:
+        digits = to_e164(phone)
+        if len(digits) >= MIN_PHONE_DIGITS + 2 and digits not in seen:
+            seen.add(digits)
+            numbers.append(digits)
+    if len(numbers) > MAX_LEADS:
+        numbers = numbers[:MAX_LEADS]
+        progress["truncated"] = MAX_LEADS
 
-
-def dial_leads(phones: list[str], progress: dict) -> None:
-    """Dial on server: batches of BATCH_SIZE, pause BATCH_PAUSE_SEC, max MAX_CONCURRENT live."""
-    import time
-
-    numbers = [
-        to_e164(p)
-        for p in phones
-        if len(to_e164(p)) >= MIN_PHONE_DIGITS + 2
-    ]
     progress["total"] = len(numbers)
     progress["started"] = 0
     progress["failed"] = 0
     progress["running"] = True
     progress["stop"] = False
+    progress.pop("error", None)
 
     if not numbers:
         progress["running"] = False
-        return
+        raise RuntimeError("No valid numbers to dial")
 
     run_remote(
-        "pkill -f press1_dial_run.sh 2>/dev/null || true; "
-        "pkill -f AST_VDauto_dial 2>/dev/null || true; "
-        "rm -f /tmp/press1_dial_stop; "
-        "echo 0 > /tmp/press1_dial_started; echo 0 > /tmp/press1_dial_failed",
+        f"pkill -f '[p]ress1_dial_run.sh' 2>/dev/null || true; "
+        f"pkill -f AST_VDauto_dial 2>/dev/null || true; "
+        f"rm -f {DIAL_STOP}; "
+        f"echo 0 > {DIAL_STARTED}; echo 0 > {DIAL_FAILED}; "
+        f"echo {len(numbers)} > {DIAL_TOTAL}",
         timeout=30,
     )
 
-    script = f"""#!/bin/bash
-set +e
-echo $$ > /tmp/press1_dial.pid
-STOP=/tmp/press1_dial_stop
-STARTED=/tmp/press1_dial_started
-FAILED=/tmp/press1_dial_failed
-NUMFILE=/tmp/press1_dial_numbers.txt
-BATCH={BATCH_SIZE}
-PAUSE={BATCH_PAUSE_SEC}
-MAX={MAX_CONCURRENT}
-mapfile -t NUMS < "$NUMFILE"
-total=${{#NUMS[@]}}
-idx=0
-while [ "$idx" -lt "$total" ]; do
-  [ -f "$STOP" ] && exit 0
-  batch_n=0
-  while [ "$batch_n" -lt "$BATCH" ] && [ "$idx" -lt "$total" ]; do
-    [ -f "$STOP" ] && exit 0
-    live=$(asterisk -rx "core show channels" 2>/dev/null | grep -c "@bitcall" || echo 0)
-    while [ "$live" -ge "$MAX" ]; do
-      [ -f "$STOP" ] && exit 0
-      sleep 2
-      live=$(asterisk -rx "core show channels" 2>/dev/null | grep -c "@bitcall" || echo 0)
-    done
-    num=$(echo "${{NUMS[$idx]}}" | tr -d '\\r')
-    [ -z "$num" ] && {{ idx=$((idx+1)); continue; }}
-    if asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension s@press1-ivr"; then
-      c=$(cat "$STARTED" 2>/dev/null || echo 0); echo $((c+1)) > "$STARTED"
-    else
-      f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
-    fi
-    idx=$((idx+1))
-    batch_n=$((batch_n+1))
-  done
-  if [ "$idx" -lt "$total" ]; then
-    sleep "$PAUSE"
-  fi
-done
-exit 0
-"""
-
-    remote_sh = "/tmp/press1_dial_run.sh"
-    remote_nums = "/tmp/press1_dial_numbers.txt"
+    script_body = _server_dial_script()
     with ssh_connect() as client:
         sftp = client.open_sftp()
-        with sftp.file(remote_nums, "w") as remote_file:
+        with sftp.file(DIAL_NUMBERS, "w") as remote_file:
             remote_file.write("\n".join(numbers) + "\n")
-        with sftp.file(remote_sh, "w") as remote_file:
-            remote_file.write(script)
+        with sftp.file(DIAL_SCRIPT, "w") as remote_file:
+            remote_file.write(script_body)
         sftp.close()
 
-    _start_remote_dialer()
+    out = run_remote(
+        f"chmod +x {DIAL_SCRIPT}; "
+        f"setsid {DIAL_SCRIPT} >> {DIAL_LOG} 2>&1 < /dev/null & "
+        f"sleep 2; pgrep -f '[p]ress1_dial_run.sh' || "
+        f"(echo START_FAIL; tail -10 {DIAL_LOG})",
+        timeout=40,
+    )
+    if "START_FAIL" in out:
+        progress["running"] = False
+        raise RuntimeError(f"Dialer failed to start: {out.strip()[:300]}")
 
-    missed = 0
-    still_running = False
-    time.sleep(2)
-    while True:
-        if progress.get("stop"):
-            run_remote("touch /tmp/press1_dial_stop", timeout=10)
-        try:
-            started, failed, still_running = _poll_dial_progress()
-            progress["started"] = started
-            progress["failed"] = failed
-            if still_running:
-                missed = 0
-            else:
-                missed += 1
-        except Exception as exc:
-            progress["error"] = str(exc)
-            missed += 1
-        done = progress["started"] + progress["failed"] >= len(numbers)
-        if done or progress.get("stop"):
-            break
-        if missed >= 5 and progress["started"] == 0:
-            try:
-                tail = run_remote("tail -20 /tmp/press1_dial.log 2>/dev/null || echo no-log", timeout=15)
-                progress["error"] = f"Dial script not running. Log: {tail.strip()[:200]}"
-            except Exception:
-                progress["error"] = "Dial script not running on server"
-            break
-        if missed >= 3 and done:
-            break
-        if not still_running and missed >= 3 and progress["started"] > 0:
-            break
-        time.sleep(3)
 
-    progress["running"] = False
+def dial_leads(phones: list[str], progress: dict) -> None:
+    """Alias: upload + start on server (monitoring is via get_dial_stats)."""
+    launch_dial_campaign(phones, progress)
 
 def test_calls(numbers: list[str] | None = None) -> list[str]:
     nums = numbers or test_numbers()
