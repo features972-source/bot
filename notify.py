@@ -920,20 +920,6 @@ async def _start_live_call(
             await asyncio.gather(*(_send_one(cid) for cid in chat_ids))
 
         await _send_initial()
-
-        # Pin after send — fire and forget so it never blocks or crashes the announcement.
-        async def _pin_all() -> None:
-            for chat_id, msg_id in live_call.message_ids.items():
-                try:
-                    await bot.pin_chat_message(
-                        chat_id=chat_id,
-                        message_id=msg_id,
-                        disable_notification=True,
-                    )
-                except Exception:
-                    pass
-
-        asyncio.ensure_future(_pin_all())
     except Exception:
         live_calls.pop(extension, None)
         raise
@@ -1044,18 +1030,6 @@ async def _stop_live_call(
 
     if live_call.silent:
         return live_call
-
-    # Unpin the on-call message now the call has ended.
-    _pinned_ids = dict(live_call.message_ids)
-
-    async def _unpin_all() -> None:
-        for chat_id, msg_id in _pinned_ids.items():
-            try:
-                await bot.unpin_chat_message(chat_id=chat_id, message_id=msg_id)
-            except Exception:
-                pass
-
-    asyncio.ensure_future(_unpin_all())
 
     ended_by_html = consume_telegram_hangup_label(bot_data, extension)
     if ended_by_html is None:
