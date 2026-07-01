@@ -16,7 +16,9 @@
    - `VICIDIAL_SSH_KEY` — SSH private key for `206.189.118.204` (use `\n` for newlines)
 8. Deploy
 
-URL: `https://p1-telegram-bot.onrender.com/health` → `{"ok":true,"id":"p1"}`
+URL: `https://p1-bot.onrender.com/health` or `https://p1-telegram-bot.onrender.com/health`
+
+**Important:** Use **one** Render Web Service for this bot. If you have both `p1-bot` and `p1-telegram-bot`, suspend/delete one — same `BOT_TOKEN` causes Telegram Conflict errors.
 
 ## Telegram commands
 

@@ -419,14 +419,22 @@ async def post_init(app: Application) -> None:
         print(f"[press1] VICIdial SSH warning: {e}")
 
 
+_conflict_logged = False
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global _conflict_logged
     err = context.error
     if isinstance(err, Conflict):
-        print(
-            "[press1] CONFLICT: another bot instance is using this token. "
-            "Stop local start-bot.bat and keep only one Render service."
-        )
-        await context.application.stop()
+        if not _conflict_logged:
+            _conflict_logged = True
+            print(
+                "[press1] CONFLICT: two bots share this token. "
+                "Keep ONE Render service (p1-bot OR p1-telegram-bot, not both) "
+                "and stop local start-bot.bat."
+            )
+        return
+    print(f"[press1] error: {err}")
 
 
 def build_application() -> Application:

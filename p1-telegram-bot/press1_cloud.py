@@ -34,7 +34,7 @@ def start_health_server() -> None:
 
     @app.get("/")
     def root():
-        return jsonify({"ok": True, "service": "p1-telegram-bot", "build": "single-instance"})
+        return jsonify({"ok": True, "service": "p1-telegram-bot", "build": "conflict-fix"})
 
     from werkzeug.serving import make_server
 
@@ -44,11 +44,10 @@ def start_health_server() -> None:
 
 
 def main() -> None:
-    if sys.version_info >= (3, 10):
-        try:
-            asyncio.get_event_loop()
-        except RuntimeError:
-            asyncio.set_event_loop(asyncio.new_event_loop())
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
     threading.Thread(target=start_health_server, daemon=True).start()
 
