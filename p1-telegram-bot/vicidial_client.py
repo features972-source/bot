@@ -134,28 +134,32 @@ exit 0
 
 
 def _fetch_server_dial_state() -> dict[str, int | bool]:
-    """Fast poll: counter files + pgrep only (no slow asterisk -rx per tick)."""
+    """Fast poll: counter files + pgrep + line count."""
     raw = run_remote(
         f"cat {DIAL_TOTAL} 2>/dev/null || echo 0; "
         f"cat {DIAL_STARTED} 2>/dev/null || echo 0; "
         f"cat {DIAL_FAILED} 2>/dev/null || echo 0; "
-        f"pgrep -fc press1_dial_run.sh 2>/dev/null || echo 0",
+        f"pgrep -fc press1_dial_run.sh 2>/dev/null || echo 0; "
+        f"wc -l < {DIAL_NUMBERS} 2>/dev/null || echo 0",
         timeout=20,
     ).strip().splitlines()
-    vals = [int((ln.strip().split() or ["0"])[-1]) for ln in raw[:4]] if raw else [0, 0, 0, 0]
-    while len(vals) < 4:
+    vals = [int((ln.strip().split() or ["0"])[-1]) for ln in raw[:5]] if raw else [0, 0, 0, 0, 0]
+    while len(vals) < 5:
         vals.append(0)
+    file_lines = vals[4]
+    total = max(vals[0], file_lines)
     live = 0
     try:
         live = live_bitcall_channels()
     except Exception:
         pass
     return {
-        "total": vals[0],
+        "total": total,
         "started": vals[1],
         "failed": vals[2],
         "script_running": vals[3] > 0,
         "live": live,
+        "file_lines": file_lines,
     }
 
 
@@ -419,24 +423,27 @@ def _fetch_outcome_stats() -> tuple[int, int]:
 def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
     """Read live counters from the server (source of truth for /run)."""
     prog = progress or {}
+    expected = int(prog.get("total", 0) or 0)
     try:
         state = _fetch_server_dial_state()
-        total = int(state["total"] or prog.get("total", 0) or 0)
+        total = max(expected, int(state["total"]))
         started = int(state["started"])
         failed = int(state["failed"])
-        if total > 0:
-            started = min(started, total)
-            failed = min(failed, max(0, total - started))
+        if expected > 0:
+            started = min(started, expected)
+            total = expected
         live = int(state["live"])
         running = bool(state["script_running"])
         if running:
             prog["running"] = True
-        elif started + failed >= total and total > 0:
+            prog.pop("stalled", None)
+        elif total > 0 and started + failed >= total:
             prog["running"] = False
+        elif not running and total > 0 and started < total:
+            prog["running"] = False
+            prog["stalled"] = True
         prog["started"] = started
         prog["failed"] = failed
-        if total:
-            prog["total"] = total
         if started > 0 or running:
             prog.pop("error", None)
     except Exception:
@@ -540,6 +547,7 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     if line_count < len(numbers):
         raise RuntimeError(f"Upload failed: expected {len(numbers)} lines, got {line_count}")
 
+    run_remote(f"echo {len(numbers)} > {DIAL_TOTAL}", timeout=15)
     _start_dial_script()
 
 
