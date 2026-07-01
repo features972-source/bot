@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from telegram import BotCommand, Message, Update
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -398,6 +399,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def post_init(app: Application) -> None:
+    # Only one process may poll this token (Render OR local — not both).
+    await app.bot.delete_webhook(drop_pending_updates=True)
     await app.bot.set_my_commands(
         [
             BotCommand("start", "Help"),
@@ -414,6 +417,16 @@ async def post_init(app: Application) -> None:
         print(f"[press1] VICIdial SSH OK: {ping.strip()[:80]}")
     except Exception as e:
         print(f"[press1] VICIdial SSH warning: {e}")
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = context.error
+    if isinstance(err, Conflict):
+        print(
+            "[press1] CONFLICT: another bot instance is using this token. "
+            "Stop local start-bot.bat and keep only one Render service."
+        )
+        await context.application.stop()
 
 
 def build_application() -> Application:
@@ -440,4 +453,5 @@ def build_application() -> Application:
     app.add_handler(MessageHandler(filters.AUDIO, on_audio))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_error_handler(on_error)
     return app
