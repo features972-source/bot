@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import os
 import re
 from contextlib import contextmanager
@@ -78,24 +77,36 @@ def run_remote(cmd: str, timeout: int = 120) -> str:
         return out
 
 
-def mysql(script: str) -> str:
-    b64 = base64.b64encode(script.encode()).decode()
-    return run_remote(f"echo {b64} | base64 -d | mysql asterisk")
-
-
-def ping() -> str:
-    return run_remote("echo ok && asterisk -rx 'pjsip show registrations' | grep -i bitcall | head -1")
+def mysql(script: str, timeout: int = 120) -> str:
+    """Run SQL on the remote server (piped via stdin — avoids ARG_MAX on large lead uploads)."""
+    with ssh_connect() as client:
+        _stdin, stdout, stderr = client.exec_command("mysql asterisk", timeout=timeout)
+        _stdin.write(script)
+        _stdin.channel.shutdown_write()
+        code = stdout.channel.recv_exit_status()
+        out = stdout.read().decode(errors="replace")
+        err = stderr.read().decode(errors="replace")
+        if code != 0:
+            raise RuntimeError((err or out or f"mysql exit {code}").strip())
+        return out
 
 
 def add_leads(phones: list[str]) -> int:
-    added = 0
-    chunks: list[str] = []
+    rows: list[tuple[str, str]] = []
     for phone in phones:
         code, num = normalize_uk(phone)
         if len(num) < MIN_PHONE_DIGITS:
             continue
-        chunks.append(
-            f"""
+        rows.append((code, num))
+    if not rows:
+        return 0
+    batch_size = 40
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i : i + batch_size]
+        statements: list[str] = []
+        for code, num in batch:
+            statements.append(
+                f"""
 INSERT INTO vicidial_list (entry_date,status,list_id,phone_code,phone_number,first_name,last_name)
 SELECT NOW(),'NEW',{LIST_ID},'{code}','{num}','Lead',''
 FROM DUAL WHERE NOT EXISTS (
@@ -104,12 +115,9 @@ FROM DUAL WHERE NOT EXISTS (
 UPDATE vicidial_list SET status='NEW', called_count=0, phone_code='{code}', phone_number='{num}'
 WHERE list_id={LIST_ID} AND phone_number='{num}';
 """
-        )
-        added += 1
-    if not chunks:
-        return 0
-    mysql("\n".join(chunks))
-    return added
+            )
+        mysql("\n".join(statements), timeout=180)
+    return len(rows)
 
 
 def refill_hopper() -> None:
