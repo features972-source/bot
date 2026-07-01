@@ -4,19 +4,16 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DATA_DIR=/data \
     CLOUD_DEPLOYED=true
 
-COPY requirements.txt .
+COPY requirements.press1.txt requirements.txt
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY . .
-
-RUN mkdir -p /data/exports
+COPY press1_cloud.py press1_bot.py press1_utils.py vicidial_client.py ./
 
 EXPOSE 10000
 
-CMD ["python", "bot_cloud.py"]
+CMD ["python", "-u", "press1_cloud.py"]

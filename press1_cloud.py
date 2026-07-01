@@ -30,11 +30,11 @@ def start_health_server() -> None:
 
     @app.get("/health")
     def health():
-        return jsonify({"ok": True, "bot": "press1-vicidial"})
+        return jsonify({"ok": True, "id": "p1", "bot": "P1 Press-1 Dialer"})
 
     @app.get("/")
     def root():
-        return jsonify({"ok": True, "service": "press1-telegram-bot"})
+        return jsonify({"ok": True, "service": "p1-telegram-bot"})
 
     from werkzeug.serving import make_server
 
