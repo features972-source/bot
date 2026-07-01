@@ -100,23 +100,32 @@ def add_leads(phones: list[str]) -> int:
         rows.append((code, num))
     if not rows:
         return 0
-    batch_size = 40
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i : i + batch_size]
-        statements: list[str] = []
-        for code, num in batch:
-            statements.append(
-                f"""
-INSERT INTO vicidial_list (entry_date,status,list_id,phone_code,phone_number,first_name,last_name)
-SELECT NOW(),'NEW',{LIST_ID},'{code}','{num}','Lead',''
-FROM DUAL WHERE NOT EXISTS (
-  SELECT 1 FROM vicidial_list WHERE list_id={LIST_ID} AND phone_number='{num}'
-);
-UPDATE vicidial_list SET status='NEW', called_count=0, phone_code='{code}', phone_number='{num}'
-WHERE list_id={LIST_ID} AND phone_number='{num}';
-"""
-            )
-        mysql("\n".join(statements), timeout=180)
+    statements: list[str] = []
+    for code, num in rows:
+        statements.append(
+            f"INSERT INTO vicidial_list (entry_date,status,list_id,phone_code,phone_number,first_name,last_name)"
+            f" SELECT NOW(),'NEW',{LIST_ID},'{code}','{num}','Lead',''"
+            f" FROM DUAL WHERE NOT EXISTS ("
+            f"SELECT 1 FROM vicidial_list WHERE list_id={LIST_ID} AND phone_number='{num}');"
+            f"UPDATE vicidial_list SET status='NEW',called_count=0,phone_code='{code}',phone_number='{num}'"
+            f" WHERE list_id={LIST_ID} AND phone_number='{num}';"
+        )
+    sql = "\n".join(statements)
+    remote_path = "/tmp/press1_leads_upload.sql"
+    with ssh_connect() as client:
+        sftp = client.open_sftp()
+        with sftp.file(remote_path, "w") as remote_file:
+            remote_file.write(sql)
+        sftp.close()
+        _stdin, stdout, stderr = client.exec_command(
+            f"mysql asterisk < {remote_path} && rm -f {remote_path}",
+            timeout=300,
+        )
+        code = stdout.channel.recv_exit_status()
+        out = stdout.read().decode(errors="replace")
+        err = stderr.read().decode(errors="replace")
+        if code != 0:
+            raise RuntimeError((err or out or f"lead upload exit {code}").strip())
     return len(rows)
 
 
