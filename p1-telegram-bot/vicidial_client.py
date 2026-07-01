@@ -22,12 +22,12 @@ SOUND_DIRS = (
     "/usr/share/asterisk/sounds/custom",
 )
 SERVER_IP = os.getenv("VICIDIAL_SERVER_IP", "206.189.118.204")
-MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "25"))
-BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "25"))
-BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "5"))
+MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "95"))
+BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "95"))
+BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "2"))
 CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "1"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
-CPS = int(os.getenv("VICIDIAL_CPS", "5"))
+CPS = int(os.getenv("VICIDIAL_CPS", "15"))
 MIN_PHONE_DIGITS = 9
 
 DIAL_SCRIPT = "/tmp/press1_dial_run.sh"
@@ -102,6 +102,7 @@ def run_remote(cmd: str, timeout: int = 120) -> str:
 
 
 def _server_dial_script() -> str:
+    batch, pause, gap = BATCH_SIZE, BATCH_PAUSE_SEC, CALL_GAP_SEC
     return f"""#!/bin/bash
 set +e
 STOP={DIAL_STOP}
@@ -109,15 +110,16 @@ STARTED={DIAL_STARTED}
 FAILED={DIAL_FAILED}
 NUMFILE={DIAL_NUMBERS}
 LOG={DIAL_LOG}
-BATCH={BATCH_SIZE}
-PAUSE={BATCH_PAUSE_SEC}
-GAP={CALL_GAP_SEC}
+BATCH={batch}
+PAUSE={pause}
+GAP={gap}
 batch_n=0
 while IFS= read -r num || [ -n "$num" ]; do
   [ -f "$STOP" ] && exit 0
   num=$(echo "$num" | tr -d '\\r' | tr -d ' ')
   [ -z "$num" ] && continue
-  if asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension s@press1-ivr" >>"$LOG" 2>&1; then
+  asterisk -rx "database put press1/lead ${{num}}" >>"$LOG" 2>&1
+  if asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr" >>"$LOG" 2>&1; then
     s=$(cat "$STARTED" 2>/dev/null || echo 0); echo $((s+1)) > "$STARTED"
   else
     f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
@@ -387,7 +389,8 @@ def originate_press1(phone: str) -> str:
     if len(digits) < MIN_PHONE_DIGITS + 2:
         raise ValueError(f"invalid number: {phone!r}")
     run_remote(
-        f"asterisk -rx 'channel originate PJSIP/{digits}@bitcall extension s@press1-ivr'"
+        f"asterisk -rx 'database put press1/lead {digits}'; "
+        f"asterisk -rx 'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr'"
     )
     return digits
 
@@ -548,6 +551,12 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         raise RuntimeError(f"Upload failed: expected {len(numbers)} lines, got {line_count}")
 
     run_remote(f"echo {len(numbers)} > {DIAL_TOTAL}", timeout=15)
+    run_remote(
+        f"sed -i 's/^GAP=.*/GAP={CALL_GAP_SEC}/' {DIAL_SCRIPT}; "
+        f"sed -i 's/^BATCH=.*/BATCH={BATCH_SIZE}/' {DIAL_SCRIPT}; "
+        f"sed -i 's/^PAUSE=.*/PAUSE={BATCH_PAUSE_SEC}/' {DIAL_SCRIPT}",
+        timeout=15,
+    )
     _start_dial_script()
 
 

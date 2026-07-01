@@ -33,9 +33,15 @@ services:
       - key: VICIDIAL_SERVER_IP
         value: 206.189.118.204
       - key: VICIDIAL_MAX_CONCURRENT
-        value: "25"
+        value: "95"
+      - key: VICIDIAL_BATCH_SIZE
+        value: "95"
+      - key: VICIDIAL_CALL_GAP_SEC
+        value: "1"
+      - key: VICIDIAL_BATCH_PAUSE_SEC
+        value: "2"
       - key: VICIDIAL_CPS
-        value: "5"
+        value: "15"
       - key: VICIDIAL_TEST_NUMBERS
         value: 447934567847,447300899954
       - key: BOT_TOKEN

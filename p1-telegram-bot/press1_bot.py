@@ -289,7 +289,7 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     s.numbers.clear()
     msg = await update.message.reply_text(
         f"Dialling {count} leads — {vd.BATCH_SIZE}/batch, "
-        f"{vd.CALL_GAP_SEC:.0f}s between calls, {vd.BATCH_PAUSE_SEC}s between batches…"
+        f"{vd.CALL_GAP_SEC:g}s between calls, {vd.BATCH_PAUSE_SEC}s between batches…"
     )
     try:
         run_since = await asyncio.to_thread(vd.server_now)
