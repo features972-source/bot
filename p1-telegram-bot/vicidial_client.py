@@ -160,11 +160,18 @@ UPDATE vicidial_campaigns SET active='N' WHERE campaign_id='{CAMPAIGN}';
 
 
 def get_status() -> dict[str, str]:
+    return get_live_stats()
+
+
+def get_live_stats() -> dict[str, str]:
     raw = mysql(
         f"""
 SELECT 'hopper' AS k, COUNT(*) AS v FROM vicidial_hopper WHERE campaign_id='{CAMPAIGN}'
 UNION ALL SELECT 'live', COUNT(*) FROM vicidial_auto_calls WHERE campaign_id='{CAMPAIGN}'
-UNION ALL SELECT 'new_leads', COUNT(*) FROM vicidial_list WHERE list_id={LIST_ID} AND status='NEW';
+UNION ALL SELECT 'new_leads', COUNT(*) FROM vicidial_list WHERE list_id={LIST_ID} AND status='NEW'
+UNION ALL SELECT 'dialed_today', COUNT(*) FROM vicidial_log WHERE campaign_id='{CAMPAIGN}' AND call_date >= CURDATE()
+UNION ALL SELECT 'press1_today', COUNT(*) FROM vicidial_log WHERE campaign_id='{CAMPAIGN}' AND call_date >= CURDATE() AND status IN ('SVYEXT','XFER','SVYCLM')
+UNION ALL SELECT 'answered_today', COUNT(*) FROM vicidial_log WHERE campaign_id='{CAMPAIGN}' AND call_date >= CURDATE() AND length_in_sec >= 5;
 """
     )
     out: dict[str, str] = {}

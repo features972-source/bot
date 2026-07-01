@@ -8,7 +8,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from telegram import BotCommand, Update
+from telegram import BotCommand, Message, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -36,7 +36,7 @@ Send:
 Commands:
 /start — this help
 /status — hopper, live calls, leads
-/run — upload leads & start campaign
+/run — upload leads & start campaign (live updates every 5s)
 /stop — pause campaign
 /testcall — ring both test numbers
 /leads — lead count in session
@@ -77,21 +77,87 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(HELP)
 
 
+async def _format_live_stats(st: dict[str, str], total_leads: int | None = None) -> str:
+    hopper = st.get("hopper", "?")
+    live = st.get("live", "?")
+    dialed = st.get("dialed_today", "?")
+    answered = st.get("answered_today", "?")
+    press1 = st.get("press1_today", "?")
+    active = st.get("campaign_active", "?")
+    lines = [
+        "📞 Campaign live",
+        f"Live calls: {live}/{vd.MAX_CONCURRENT}",
+        f"Hopper left: {hopper}",
+        f"Calls today: {dialed}",
+        f"Answered (5s+): {answered}",
+        f"Press-1: {press1}",
+        f"Campaign active: {active}",
+    ]
+    if total_leads is not None:
+        lines.append(f"Leads uploaded: {total_leads}")
+    return "\n".join(lines)
+
+
+async def _live_campaign_updater(
+    msg: Message,
+    total_leads: int,
+    stop_event: asyncio.Event,
+) -> None:
+    last_text = ""
+    idle_rounds = 0
+    while not stop_event.is_set():
+        try:
+            st = await asyncio.to_thread(vd.get_live_stats)
+            text = await _format_live_stats(st, total_leads)
+            hopper = int(st.get("hopper", 0) or 0)
+            live = int(st.get("live", 0) or 0)
+            active = (st.get("campaign_active") or "").upper()
+            if text != last_text:
+                try:
+                    await msg.edit_text(text)
+                    last_text = text
+                except Exception:
+                    pass
+            if active == "N" or (hopper == 0 and live == 0):
+                idle_rounds += 1
+                if idle_rounds >= 6:
+                    await msg.edit_text(text + "\n\n✅ Hopper empty — dialling finished.")
+                    break
+            else:
+                idle_rounds = 0
+        except Exception as e:
+            try:
+                await msg.edit_text(f"Live update error: {e}")
+            except Exception:
+                pass
+            break
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+
+def _stop_live_updater(context: ContextTypes.DEFAULT_TYPE) -> None:
+    task = context.application.bot_data.get("live_updater_task")
+    stop = context.application.bot_data.get("live_updater_stop")
+    if stop:
+        stop.set()
+    if task and not task.done():
+        task.cancel()
+    context.application.bot_data.pop("live_updater_task", None)
+    context.application.bot_data.pop("live_updater_stop", None)
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     msg = await update.message.reply_text("Checking server…")
     try:
-        st = await asyncio.to_thread(vd.get_status)
+        st = await asyncio.to_thread(vd.get_live_stats)
         s = session(update.effective_user.id, context)
-        lines = [
-            f"Hopper: {st.get('hopper', '?')}",
-            f"Live calls: {st.get('live', '?')}",
-            f"NEW leads (list): {st.get('new_leads', '?')}",
-            f"Campaign active: {st.get('campaign_active', '?')}",
-            f"Loaded in bot: {len(s.numbers)}",
-        ]
-        await msg.edit_text("\n".join(lines))
+        text = await _format_live_stats(st) + f"\nLoaded in bot: {len(s.numbers)}"
+        await msg.edit_text(text)
     except Exception as e:
         await msg.edit_text(f"Status failed: {e}")
 
@@ -124,6 +190,7 @@ async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
+    _stop_live_updater(context)
     msg = await update.message.reply_text("Stopping campaign…")
     try:
         await asyncio.to_thread(vd.stop_campaign)
@@ -139,6 +206,7 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not s.numbers:
         await update.message.reply_text("Load numbers first (paste list or send .csv).")
         return
+    _stop_live_updater(context)
     msg = await update.message.reply_text(
         f"Uploading {len(s.numbers)} leads and starting campaign…"
     )
@@ -146,11 +214,12 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         count = await asyncio.to_thread(vd.add_leads, list(s.numbers))
         await asyncio.to_thread(vd.start_campaign)
         s.numbers.clear()
-        await msg.edit_text(
-            f"Campaign started.\n"
-            f"Leads queued: {count}\n"
-            f"Max concurrent: {vd.MAX_CONCURRENT}, CPS: {vd.CPS}"
-        )
+        st = await asyncio.to_thread(vd.get_live_stats)
+        await msg.edit_text(await _format_live_stats(st, count))
+        stop_event = asyncio.Event()
+        context.application.bot_data["live_updater_stop"] = stop_event
+        task = asyncio.create_task(_live_campaign_updater(msg, count, stop_event))
+        context.application.bot_data["live_updater_task"] = task
     except Exception as e:
         await msg.edit_text(f"Run failed: {e}")
 
