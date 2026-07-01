@@ -286,7 +286,8 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     count = len(numbers)
     s.numbers.clear()
     msg = await update.message.reply_text(
-        f"Dialling {count} leads — {vd.BATCH_SIZE} per batch, {vd.BATCH_PAUSE_SEC}s pause…"
+        f"Dialling {count} leads — {vd.BATCH_SIZE}/batch, "
+        f"{vd.CALL_GAP_SEC:.0f}s between calls, {vd.BATCH_PAUSE_SEC}s between batches…"
     )
     try:
         run_since = await asyncio.to_thread(vd.server_now)
@@ -296,6 +297,7 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "total": count,
             "running": True,
             "stop": False,
+            "run_since": run_since,
         }
         context.application.bot_data["dial_progress"] = progress
 

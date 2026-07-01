@@ -25,6 +25,7 @@ SERVER_IP = os.getenv("VICIDIAL_SERVER_IP", "206.189.118.204")
 MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "25"))
 BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "25"))
 BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "5"))
+CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "1"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
 CPS = int(os.getenv("VICIDIAL_CPS", "5"))
 MIN_PHONE_DIGITS = 9
@@ -36,6 +37,7 @@ DIAL_STARTED = "/tmp/press1_dial_started"
 DIAL_FAILED = "/tmp/press1_dial_failed"
 DIAL_STOP = "/tmp/press1_dial_stop"
 DIAL_LOG = "/tmp/press1_dial.log"
+DIAL_RUN_MARK = "/tmp/press1_dial_run_mark"
 
 
 def test_numbers() -> list[str]:
@@ -109,6 +111,7 @@ NUMFILE={DIAL_NUMBERS}
 LOG={DIAL_LOG}
 BATCH={BATCH_SIZE}
 PAUSE={BATCH_PAUSE_SEC}
+GAP={CALL_GAP_SEC}
 batch_n=0
 while IFS= read -r num || [ -n "$num" ]; do
   [ -f "$STOP" ] && exit 0
@@ -120,6 +123,7 @@ while IFS= read -r num || [ -n "$num" ]; do
     f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
   fi
   batch_n=$((batch_n+1))
+  sleep "$GAP"
   if [ "$batch_n" -ge "$BATCH" ]; then
     batch_n=0
     sleep "$PAUSE"
@@ -395,6 +399,23 @@ def live_bitcall_channels() -> int:
         return 0
 
 
+def _fetch_outcome_stats() -> tuple[int, int]:
+    """Press-1 xfers and answered-ish events from recent asterisk log."""
+    try:
+        raw = run_remote(
+            "tail -4000 /var/log/asterisk/full 2>/dev/null | "
+            "grep -c 'PJSIP/8000@3cx' || echo 0; "
+            "tail -4000 /var/log/asterisk/full 2>/dev/null | "
+            "grep -c 'press1-ivr,s,1' || echo 0",
+            timeout=20,
+        ).strip().splitlines()
+        press1 = int((raw[0] if raw else "0").strip().split()[-1])
+        answered = int((raw[1] if len(raw) > 1 else "0").strip().split()[-1])
+        return press1, answered
+    except Exception:
+        return 0, 0
+
+
 def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
     """Read live counters from the server (source of truth for /run)."""
     prog = progress or {}
@@ -403,6 +424,9 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         total = int(state["total"] or prog.get("total", 0) or 0)
         started = int(state["started"])
         failed = int(state["failed"])
+        if total > 0:
+            started = min(started, total)
+            failed = min(failed, max(0, total - started))
         live = int(state["live"])
         running = bool(state["script_running"])
         if running:
@@ -422,13 +446,14 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         live = 0
         running = bool(prog.get("running"))
     left = max(0, total - started - failed)
+    press1, answered = _fetch_outcome_stats() if (running or started > 0) else (0, 0)
     return {
         "hopper": str(left),
         "live": str(live),
         "new_leads": str(left),
         "dialed": str(started),
-        "press1": "0",
-        "answered": "0",
+        "press1": str(press1),
+        "answered": str(answered),
         "campaign_active": "Y" if running else "N",
         "agent_status": "—",
     }
@@ -489,10 +514,12 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
 
     run_remote(
         f"pkill -f press1_dial_run.sh 2>/dev/null; true; "
+        f"sleep 1; "
         f"pkill -f AST_VDauto_dial 2>/dev/null; true; "
         f"rm -f {DIAL_STOP}; "
         f"echo 0 > {DIAL_STARTED}; echo 0 > {DIAL_FAILED}; "
-        f"echo {len(numbers)} > {DIAL_TOTAL}",
+        f"echo {len(numbers)} > {DIAL_TOTAL}; "
+        f"date '+%Y-%m-%d %H:%M:%S' > {DIAL_RUN_MARK}",
         timeout=30,
     )
 
