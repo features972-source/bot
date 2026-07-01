@@ -177,6 +177,8 @@ UPDATE vicidial_campaigns SET
   hopper_level='50',
   use_auto_hopper='Y',
   no_hopper_dialing='N',
+  dial_prefix='',
+  omit_phone_code='N',
   campaign_cid='443300592867',
   campaign_vdad_exten='8368',
   survey_first_audio_file='{SOUND_NAME}',
