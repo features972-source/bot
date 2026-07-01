@@ -101,7 +101,7 @@ SELECT NOW(),'NEW',{LIST_ID},'{code}','{num}','Lead',''
 FROM DUAL WHERE NOT EXISTS (
   SELECT 1 FROM vicidial_list WHERE list_id={LIST_ID} AND phone_number='{num}'
 );
-UPDATE vicidial_list SET status='NEW', called_count=0
+UPDATE vicidial_list SET status='NEW', called_count=0, phone_code='{code}', phone_number='{num}'
 WHERE list_id={LIST_ID} AND phone_number='{num}';
 """
         )
