@@ -177,7 +177,7 @@ UPDATE vicidial_campaigns SET
   hopper_level='50',
   use_auto_hopper='Y',
   no_hopper_dialing='N',
-  dial_prefix='',
+  dial_prefix='X',
   omit_phone_code='N',
   campaign_cid='443300592867',
   campaign_vdad_exten='8368',
@@ -187,6 +187,7 @@ UPDATE vicidial_campaigns SET
   survey_method='EXTENSION',
   survey_wait_sec='15'
 WHERE campaign_id='{CAMPAIGN}';
+UPDATE vicidial_lists SET dial_prefix='X' WHERE list_id={LIST_ID};
 UPDATE vicidial_live_agents SET
   status='READY', outbound_autodial='Y', on_hook_agent='Y', extension='8600',
   conf_exten='8600051', lead_id=0, last_update_time=NOW(), last_call_time=NOW(), last_call_finish=NOW()
