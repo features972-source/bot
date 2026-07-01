@@ -174,6 +174,10 @@ def _stop_dialer(context: ContextTypes.DEFAULT_TYPE) -> None:
     progress = context.application.bot_data.get("dial_progress")
     if progress:
         progress["stop"] = True
+    try:
+        vd._stop_remote_dialer()
+    except Exception:
+        pass
     task = context.application.bot_data.get("dial_task")
     if task and not task.done():
         task.cancel()
