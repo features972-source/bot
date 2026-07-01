@@ -22,12 +22,12 @@ SOUND_DIRS = (
     "/usr/share/asterisk/sounds/custom",
 )
 SERVER_IP = os.getenv("VICIDIAL_SERVER_IP", "206.189.118.204")
-MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "95"))
-BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "95"))
+MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "100"))
+BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "100"))
 BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "2"))
-CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "1"))
+CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.5"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
-CPS = int(os.getenv("VICIDIAL_CPS", "15"))
+CPS = int(os.getenv("VICIDIAL_CPS", "20"))
 MIN_PHONE_DIGITS = 9
 
 DIAL_SCRIPT = "/tmp/press1_dial_run.sh"
