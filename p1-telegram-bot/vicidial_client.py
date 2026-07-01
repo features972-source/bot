@@ -23,6 +23,8 @@ SOUND_DIRS = (
 )
 SERVER_IP = os.getenv("VICIDIAL_SERVER_IP", "206.189.118.204")
 MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "25"))
+BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "25"))
+BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "5"))
 CPS = int(os.getenv("VICIDIAL_CPS", "5"))
 MIN_PHONE_DIGITS = 9
 
@@ -346,8 +348,29 @@ def _stop_remote_dialer() -> None:
     run_remote("touch /tmp/press1_dial_stop 2>/dev/null; pkill -f press1_dial_run.sh 2>/dev/null || true", timeout=20)
 
 
+def _poll_dial_progress() -> tuple[int, int, bool]:
+    """Read server counters; returns (started, failed, script_still_running)."""
+    raw = run_remote(
+        "cat /tmp/press1_dial_started 2>/dev/null || echo 0; "
+        "echo ---; cat /tmp/press1_dial_failed 2>/dev/null || echo 0; "
+        "echo ---; pgrep -f press1_dial_run.sh || true",
+        timeout=20,
+    ).strip().split("---")
+    started = failed = 0
+    try:
+        started = int((raw[0] if raw else "0").strip().split()[-1])
+    except ValueError:
+        pass
+    try:
+        failed = int((raw[1] if len(raw) > 1 else "0").strip().split()[-1])
+    except ValueError:
+        pass
+    running = len(raw) > 2 and bool(raw[2].strip())
+    return started, failed, running
+
+
 def dial_leads(phones: list[str], progress: dict) -> None:
-    """Dial on the VICIdial server (same originate as /testcall) — one SSH session, not per lead."""
+    """Dial on server: batches of BATCH_SIZE, pause BATCH_PAUSE_SEC, max MAX_CONCURRENT live."""
     import time
 
     numbers = [
@@ -365,72 +388,78 @@ def dial_leads(phones: list[str], progress: dict) -> None:
         progress["running"] = False
         return
 
-    # Old VICIdial VDAD can steal leads / block channels — stop it for direct dial.
     run_remote(
+        "pkill -f press1_dial_run.sh 2>/dev/null || true; "
         "pkill -f AST_VDauto_dial 2>/dev/null || true; "
-        "rm -f /tmp/press1_dial_stop; echo 0 > /tmp/press1_dial_started; echo 0 > /tmp/press1_dial_failed",
+        "rm -f /tmp/press1_dial_stop; "
+        "echo 0 > /tmp/press1_dial_started; echo 0 > /tmp/press1_dial_failed",
         timeout=30,
     )
 
-    delay = max(0.2, 1.0 / CPS) if CPS > 0 else 0.2
-    script_lines = [
-        "#!/bin/bash",
-        "set +e",
-        'STOP=/tmp/press1_dial_stop',
-        'STARTED=/tmp/press1_dial_started',
-        'FAILED=/tmp/press1_dial_failed',
-    ]
-    for num in numbers:
-        script_lines.append('[ -f "$STOP" ] && exit 0')
-        script_lines.append(
-            f'while [ "$(asterisk -rx \\"core show channels\\" 2>/dev/null | grep -c \\"@bitcall\\")" -ge {MAX_CONCURRENT} ]; do'
-        )
-        script_lines.append('  [ -f "$STOP" ] && exit 0')
-        script_lines.append("  sleep 2")
-        script_lines.append("done")
-        script_lines.append(
-            f'if asterisk -rx "channel originate PJSIP/{num}@bitcall extension s@press1-ivr" >/dev/null 2>&1; then'
-        )
-        script_lines.append('  c=$(cat "$STARTED"); echo $((c+1)) > "$STARTED"')
-        script_lines.append("else")
-        script_lines.append('  f=$(cat "$FAILED"); echo $((f+1)) > "$FAILED"')
-        script_lines.append("fi")
-        script_lines.append(f"sleep {delay}")
-    script_lines.append("exit 0")
-    script = "\n".join(script_lines) + "\n"
+    script = f"""#!/bin/bash
+set +e
+STOP=/tmp/press1_dial_stop
+STARTED=/tmp/press1_dial_started
+FAILED=/tmp/press1_dial_failed
+NUMFILE=/tmp/press1_dial_numbers.txt
+BATCH={BATCH_SIZE}
+PAUSE={BATCH_PAUSE_SEC}
+MAX={MAX_CONCURRENT}
+mapfile -t NUMS < "$NUMFILE"
+total=${{#NUMS[@]}}
+idx=0
+while [ "$idx" -lt "$total" ]; do
+  [ -f "$STOP" ] && exit 0
+  batch_n=0
+  while [ "$batch_n" -lt "$BATCH" ] && [ "$idx" -lt "$total" ]; do
+    [ -f "$STOP" ] && exit 0
+    while [ "$(asterisk -rx \\"core show channels\\" 2>/dev/null | grep -c \\"@bitcall\\")" -ge "$MAX" ]; do
+      [ -f "$STOP" ] && exit 0
+      sleep 2
+    done
+    num="${{NUMS[$idx]}}"
+    [ -z "$num" ] && {{ idx=$((idx+1)); continue; }}
+    if asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension s@press1-ivr" >/dev/null 2>&1; then
+      c=$(cat "$STARTED"); echo $((c+1)) > "$STARTED"
+    else
+      f=$(cat "$FAILED"); echo $((f+1)) > "$FAILED"
+    fi
+    idx=$((idx+1))
+    batch_n=$((batch_n+1))
+  done
+  if [ "$idx" -lt "$total" ]; then
+    sleep "$PAUSE"
+  fi
+done
+exit 0
+"""
 
     remote_sh = "/tmp/press1_dial_run.sh"
+    remote_nums = "/tmp/press1_dial_numbers.txt"
     with ssh_connect() as client:
         sftp = client.open_sftp()
+        with sftp.file(remote_nums, "w") as remote_file:
+            remote_file.write("\n".join(numbers) + "\n")
         with sftp.file(remote_sh, "w") as remote_file:
             remote_file.write(script)
         sftp.close()
         client.exec_command(f"chmod +x {remote_sh}")
         client.exec_command(f"nohup {remote_sh} > /tmp/press1_dial.log 2>&1 &")
-        time.sleep(1)
 
-        while True:
-            if progress.get("stop"):
-                client.exec_command("touch /tmp/press1_dial_stop")
-            _i, stdout, _e = client.exec_command(
-                "cat /tmp/press1_dial_started 2>/dev/null || echo 0; "
-                "echo ---; cat /tmp/press1_dial_failed 2>/dev/null || echo 0; "
-                "echo ---; pgrep -f press1_dial_run.sh || true"
-            )
-            out = stdout.read().decode(errors="replace").strip().split("---")
-            try:
-                progress["started"] = int((out[0] if out else "0").strip().split()[-1])
-            except ValueError:
-                pass
-            try:
-                progress["failed"] = int((out[1] if len(out) > 1 else "0").strip().split()[-1])
-            except ValueError:
-                pass
-            still_running = len(out) > 2 and bool(out[2].strip())
-            done = progress["started"] + progress["failed"] >= len(numbers)
-            if not still_running or done or progress.get("stop"):
-                break
-            time.sleep(2)
+    time.sleep(1)
+    while True:
+        if progress.get("stop"):
+            run_remote("touch /tmp/press1_dial_stop", timeout=10)
+        try:
+            started, failed, still_running = _poll_dial_progress()
+            progress["started"] = started
+            progress["failed"] = failed
+        except Exception:
+            still_running = True
+        done = progress["started"] + progress["failed"] >= len(numbers)
+        if not still_running or done or progress.get("stop"):
+            break
+        time.sleep(3)
 
     progress["running"] = False
 

@@ -256,7 +256,7 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     count = len(numbers)
     s.numbers.clear()
     msg = await update.message.reply_text(
-        f"Dialling {count} leads (BitCall → press1-ivr, same as /testcall)…"
+        f"Dialling {count} leads — {vd.BATCH_SIZE} per batch, {vd.BATCH_PAUSE_SEC}s pause…"
     )
     try:
         run_since = await asyncio.to_thread(vd.server_now)
