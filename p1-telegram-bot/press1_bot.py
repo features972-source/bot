@@ -87,46 +87,78 @@ async def _safe_edit(msg: Message, text: str) -> None:
             raise
 
 
+_STATE_LABELS = {
+    "running": "🟢 Dialling",
+    "finishing": "🟡 Finishing (list done, calls in flight)",
+    "finished": "✅ Finished",
+    "stalled": "⚠️ Stopped early",
+    "idle": "⚪ Idle",
+}
+
+
+def _state_line(st: dict[str, str]) -> str:
+    label = _STATE_LABELS.get(st.get("dial_state", ""), "⚪ Unknown")
+    return f"Status: {label}"
+
+
 async def _format_live_stats(
     st: dict[str, str],
     total_leads: int,
     *,
     finished: bool = False,
 ) -> str:
+    total = int(st.get("list_size", 0) or 0) or total_leads
     dialed = st.get("dialed", "0")
     answered = st.get("answered", "0")
     press1 = st.get("press1", "0")
     left = st.get("hopper", "0")
     live = st.get("live", "0")
-    header = "✅ Campaign finished" if finished else "📊 Campaign live"
-    return (
-        f"{header} — {total_leads} leads\n\n"
-        f"📞 Calls Made: {dialed}\n"
-        f"⏳ Left to dial: {left}\n"
-        f"📡 Live now: {live}\n"
-        f"✅ Answered: {answered}\n"
-        f"🔥 Press-1: {press1}"
-    )
+    failed = st.get("failed", "0")
+    dial_state = st.get("dial_state", "")
+    if finished or dial_state in ("finished", "stalled"):
+        header = "✅ Campaign finished"
+    elif dial_state == "finishing":
+        header = f"🟡 Campaign finishing — {total} leads"
+    else:
+        header = f"📊 Campaign live — {total} leads"
+    lines = [
+        header + "\n",
+        f"📞 Dialed: {dialed} / {total}",
+        f"⏳ Left: {left}",
+        f"📡 Live now: {live}",
+        f"✅ Answered: {answered}",
+        f"🔥 Press-1: {press1}",
+    ]
+    if int(failed or 0) > 0:
+        lines.append(f"❌ Failed: {failed}")
+    if not finished:
+        lines.append(_state_line(st))
+    return "\n".join(lines)
 
 
 async def _format_status(st: dict[str, str], loaded_in_bot: int) -> str:
-    """Shorter view for /status (today's totals)."""
+    total = int(st.get("list_size", 0) or 0)
     dialed = st.get("dialed", "?")
     answered = st.get("answered", "?")
     press1 = st.get("press1", "?")
     left = st.get("hopper", "?")
     live = st.get("live", "?")
-    active = st.get("campaign_active", "?")
-    return (
-        f"📊 Server status\n\n"
-        f"📞 Calls Made (today): {dialed}\n"
-        f"⏳ Left to dial: {left}\n"
-        f"📡 Live now: {live}\n"
-        f"✅ Answered (today): {answered}\n"
-        f"🔥 Press-1 (today): {press1}\n"
-        f"Campaign active: {active}\n"
-        f"Loaded in bot: {loaded_in_bot}"
-    )
+    failed = st.get("failed", "0")
+    lines = [
+        "📊 Server status\n",
+        f"📋 List on server: {total}",
+        f"📞 Dialed: {dialed} / {total}",
+        f"⏳ Left: {left}",
+        f"📡 Live now: {live}",
+        f"✅ Answered: {answered}",
+        f"🔥 Press-1: {press1}",
+    ]
+    if int(failed or 0) > 0:
+        lines.append(f"❌ Failed: {failed}")
+    lines.append(_state_line(st))
+    if loaded_in_bot != total:
+        lines.append(f"💾 In bot session: {loaded_in_bot}")
+    return "\n".join(lines)
 
 
 async def _live_campaign_updater(
@@ -150,12 +182,13 @@ async def _live_campaign_updater(
                 text += f"\n\n⚠️ {err}"
             hopper = int(st.get("hopper", 0) or 0)
             live = int(st.get("live", 0) or 0)
-            active = (st.get("campaign_active") or "N").upper() == "Y"
+            dial_state = st.get("dial_state", "")
+            active = dial_state == "running"
             dialed = int(st.get("dialed", 0) or 0)
             if text != last_text:
                 await _safe_edit(msg, text)
                 last_text = text
-            if not active and hopper == 0:
+            if dial_state in ("finished", "stalled") and hopper == 0:
                 idle_rounds += 1
                 if idle_rounds >= 2:
                     final = await _format_live_stats(st, total_leads, finished=True)
@@ -167,7 +200,16 @@ async def _live_campaign_updater(
                     except BadRequest:
                         pass
                     break
-            elif not active and hopper > 0 and dialed > 0:
+            elif dial_state == "finishing" and hopper == 0 and live == 0:
+                idle_rounds += 1
+                if idle_rounds >= 3:
+                    final = await _format_live_stats(st, total_leads, finished=True)
+                    try:
+                        await _safe_edit(msg, final)
+                    except BadRequest:
+                        pass
+                    break
+            elif dial_state == "stalled" and hopper > 0 and dialed > 0:
                 idle_rounds += 1
                 if idle_rounds >= 4:
                     final = await _format_live_stats(st, total_leads, finished=True)
@@ -231,11 +273,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     msg = await update.message.reply_text("Checking server…")
     try:
-        progress = context.application.bot_data.get("dial_progress")
-        if progress and progress.get("running"):
-            st = await asyncio.to_thread(vd.get_dial_stats, None, progress)
-        else:
-            st = await asyncio.to_thread(vd.get_dial_stats, None, {})
+        st = await asyncio.to_thread(vd.get_dial_stats, None, context.application.bot_data.get("dial_progress"))
         s = session(update.effective_user.id, context)
         text = await _format_status(st, len(s.numbers))
         await msg.edit_text(text)

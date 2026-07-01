@@ -141,7 +141,7 @@ def _fetch_server_dial_state() -> dict[str, int | bool]:
         f"cat {DIAL_TOTAL} 2>/dev/null || echo 0; "
         f"cat {DIAL_STARTED} 2>/dev/null || echo 0; "
         f"cat {DIAL_FAILED} 2>/dev/null || echo 0; "
-        f"pgrep -fc press1_dial_run.sh 2>/dev/null || echo 0; "
+        f"ps aux 2>/dev/null | grep -c '[b]ash /tmp/press1_dial_run.sh' || echo 0; "
         f"wc -l < {DIAL_NUMBERS} 2>/dev/null || echo 0",
         timeout=20,
     ).strip().splitlines()
@@ -397,7 +397,8 @@ def originate_press1(phone: str) -> str:
 
 def live_bitcall_channels() -> int:
     out = run_remote(
-        r"asterisk -rx 'core show channels' 2>/dev/null | grep -c '@bitcall' || echo 0",
+        r"asterisk -rx 'core show channels concise' 2>/dev/null | grep -ci 'bitcall' || "
+        r"asterisk -rx 'core show channels' 2>/dev/null | grep -ci 'PJSIP/bitcall' || echo 0",
         timeout=15,
     ).strip()
     try:
@@ -407,14 +408,14 @@ def live_bitcall_channels() -> int:
 
 
 def _fetch_outcome_stats() -> tuple[int, int]:
-    """Press-1 xfers and answered-ish events from recent asterisk log."""
+    """Press-1 xfers and answered events from recent Asterisk log."""
     try:
         raw = run_remote(
-            "tail -4000 /var/log/asterisk/full 2>/dev/null | "
-            "grep -c 'PJSIP/8000@3cx' || echo 0; "
-            "tail -4000 /var/log/asterisk/full 2>/dev/null | "
-            "grep -c 'press1-ivr,s,1' || echo 0",
-            timeout=20,
+            "tail -20000 /var/log/asterisk/full 2>/dev/null | "
+            "grep -cE 'Press1Xfer|PJSIP/8000@3cx' || echo 0; "
+            "tail -20000 /var/log/asterisk/full 2>/dev/null | "
+            "grep -cE 'press1-ivr,(ivr|s),[12]|Read\\(DIGIT,press1_alice' || echo 0",
+            timeout=25,
         ).strip().splitlines()
         press1 = int((raw[0] if raw else "0").strip().split()[-1])
         answered = int((raw[1] if len(raw) > 1 else "0").strip().split()[-1])
@@ -423,30 +424,51 @@ def _fetch_outcome_stats() -> tuple[int, int]:
         return 0, 0
 
 
+def _dial_state_label(running: bool, total: int, left: int, failed: int) -> str:
+    if total <= 0 and not running:
+        return "idle"
+    if running and left > 0:
+        return "running"
+    if running and left == 0:
+        return "finishing"
+    if not running and total > 0 and left == 0:
+        return "finished"
+    if not running and total > 0 and left > 0:
+        return "stalled"
+    return "idle"
+
+
 def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
     """Read live counters from the server (source of truth for /run)."""
     prog = progress or {}
     expected = int(prog.get("total", 0) or 0)
     try:
         state = _fetch_server_dial_state()
-        total = max(expected, int(state["total"]))
-        started = int(state["started"])
-        failed = int(state["failed"])
+        file_lines = int(state["file_lines"])
+        file_total = int(state["total"])
+        total = file_lines or file_total
         if expected > 0:
-            started = min(started, expected)
-            total = expected
+            total = max(expected, file_lines, file_total)
+        started_raw = int(state["started"])
+        failed = int(state["failed"])
+        started = min(started_raw, total) if total > 0 else started_raw
         live = int(state["live"])
         running = bool(state["script_running"])
-        if running:
+        left = max(0, total - started - failed)
+        dial_state = _dial_state_label(running, total, left, failed)
+
+        if dial_state == "running":
             prog["running"] = True
             prog.pop("stalled", None)
-        elif total > 0 and started + failed >= total:
+        else:
             prog["running"] = False
-        elif not running and total > 0 and started < total:
-            prog["running"] = False
-            prog["stalled"] = True
+            if dial_state == "stalled":
+                prog["stalled"] = True
+            else:
+                prog.pop("stalled", None)
         prog["started"] = started
         prog["failed"] = failed
+        prog["total"] = total
         if started > 0 or running:
             prog.pop("error", None)
     except Exception:
@@ -455,16 +477,21 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         failed = int(prog.get("failed", 0) or 0)
         live = 0
         running = bool(prog.get("running"))
-    left = max(0, total - started - failed)
-    press1, answered = _fetch_outcome_stats() if (running or started > 0) else (0, 0)
+        left = max(0, total - started - failed)
+        dial_state = _dial_state_label(running, total, left, failed)
+
+    press1, answered = _fetch_outcome_stats() if (total > 0 and (running or started > 0)) else (0, 0)
     return {
         "hopper": str(left),
         "live": str(live),
         "new_leads": str(left),
+        "list_size": str(total),
         "dialed": str(started),
         "press1": str(press1),
         "answered": str(answered),
-        "campaign_active": "Y" if running else "N",
+        "failed": str(failed),
+        "campaign_active": "Y" if dial_state == "running" else "N",
+        "dial_state": dial_state,
         "agent_status": "—",
     }
 
@@ -490,7 +517,7 @@ def _start_dial_script() -> None:
     )
     time.sleep(2)
     running = run_remote(
-        f"pgrep -fc press1_dial_run.sh 2>/dev/null || echo 0",
+        f"ps aux 2>/dev/null | grep -c '[b]ash {DIAL_SCRIPT}' || echo 0",
         timeout=15,
     ).strip().split()[-1]
     if int(running or "0") < 1:
