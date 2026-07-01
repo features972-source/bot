@@ -120,6 +120,10 @@ WHERE list_id={LIST_ID} AND phone_number='{num}';
     return len(rows)
 
 
+def ping() -> str:
+    return run_remote("echo ok && asterisk -rx 'pjsip show registrations' | grep -i bitcall | head -1")
+
+
 def refill_hopper() -> None:
     mysql(
         f"""
