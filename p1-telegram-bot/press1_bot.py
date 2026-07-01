@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from telegram import BotCommand, Message, Update
-from telegram.error import Conflict
+from telegram.error import BadRequest, Conflict
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -78,6 +78,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(HELP)
 
 
+async def _safe_edit(msg: Message, text: str) -> None:
+    """Edit message; ignore Telegram 'message is not modified' (same text)."""
+    try:
+        await msg.edit_text(text)
+    except BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            raise
+
+
 async def _format_live_stats(
     st: dict[str, str],
     total_leads: int,
@@ -142,11 +151,8 @@ async def _live_campaign_updater(
             active = (st.get("campaign_active") or "N").upper() == "Y"
             dialed = int(st.get("dialed", 0) or 0)
             if text != last_text:
-                try:
-                    await msg.edit_text(text)
-                    last_text = text
-                except Exception:
-                    pass
+                await _safe_edit(msg, text)
+                last_text = text
             if not active and hopper == 0:
                 idle_rounds += 1
                 if idle_rounds >= 2:
@@ -155,8 +161,8 @@ async def _live_campaign_updater(
                     if err:
                         final += f"\n\n⚠️ {err}"
                     try:
-                        await msg.edit_text(final)
-                    except Exception:
+                        await _safe_edit(msg, final)
+                    except BadRequest:
                         pass
                     break
             elif not active and dialed == 0 and idle_rounds >= 6:
@@ -164,8 +170,8 @@ async def _live_campaign_updater(
                 err = progress.get("error") or "Dialer never started — try /run again"
                 final += f"\n\n⚠️ {err}"
                 try:
-                    await msg.edit_text(final)
-                except Exception:
+                    await _safe_edit(msg, final)
+                except BadRequest:
                     pass
                 break
             else:
@@ -282,8 +288,6 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "stop": False,
         }
         context.application.bot_data["dial_progress"] = progress
-        st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
-        await msg.edit_text(await _format_live_stats(st, count))
 
         async def dial_worker() -> None:
             try:
@@ -295,15 +299,15 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         dial_task = asyncio.create_task(dial_worker())
         context.application.bot_data["dial_task"] = dial_task
 
-        # Brief wait so launch errors surface before live stats poll
+        # Wait for launch; then show stats (skip duplicate edit if unchanged)
         await asyncio.sleep(3)
         st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
+        text = await _format_live_stats(st, count)
         if progress.get("error"):
-            await msg.edit_text(
-                await _format_live_stats(st, count) + f"\n\n⚠️ {progress['error']}"
-            )
+            text += f"\n\n⚠️ {progress['error']}"
+        await _safe_edit(msg, text)
+        if progress.get("error"):
             return
-        await msg.edit_text(await _format_live_stats(st, count))
 
         stop_event = asyncio.Event()
         context.application.bot_data["live_updater_stop"] = stop_event
@@ -312,7 +316,10 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         context.application.bot_data["live_updater_task"] = task
     except Exception as e:
-        await msg.edit_text(f"Run failed: {e}")
+        try:
+            await _safe_edit(msg, f"Run failed: {e}")
+        except Exception:
+            await update.message.reply_text(f"Run failed: {e}")
 
 
 async def _save_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, dest: Path) -> None:
