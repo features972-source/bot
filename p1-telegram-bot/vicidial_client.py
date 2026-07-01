@@ -29,7 +29,7 @@ MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
 CPS = int(os.getenv("VICIDIAL_CPS", "5"))
 MIN_PHONE_DIGITS = 9
 
-DIAL_SCRIPT = "/usr/local/bin/press1_dial_run.sh"
+DIAL_SCRIPT = "/tmp/press1_dial_run.sh"
 DIAL_NUMBERS = "/tmp/press1_dial_numbers.txt"
 DIAL_TOTAL = "/tmp/press1_dial_total"
 DIAL_STARTED = "/tmp/press1_dial_started"
@@ -86,7 +86,8 @@ def run_remote(cmd: str, timeout: int = 120) -> str:
                 code = stdout.channel.recv_exit_status()
                 out = stdout.read().decode(errors="replace")
                 err = stderr.read().decode(errors="replace")
-                if code != 0:
+                # Paramiko often returns -1 after background/detached commands even when OK.
+                if code != 0 and not (code == -1 and out.strip()):
                     raise RuntimeError((err or out or f"remote exit {code}").strip())
                 return out
         except Exception as exc:
@@ -141,23 +142,28 @@ exit 0
 
 
 def _fetch_server_dial_state() -> dict[str, int | bool]:
+    """Fast poll: counter files + pgrep only (no slow asterisk -rx per tick)."""
     raw = run_remote(
-        f"echo $(cat {DIAL_TOTAL} 2>/dev/null || echo 0); "
-        f"echo $(cat {DIAL_STARTED} 2>/dev/null || echo 0); "
-        f"echo $(cat {DIAL_FAILED} 2>/dev/null || echo 0); "
-        f"echo $(pgrep -f '[p]ress1_dial_run.sh' | wc -l); "
-        f"echo $(asterisk -rx 'core show channels' 2>/dev/null | grep -c '@bitcall' || echo 0)",
-        timeout=25,
+        f"cat {DIAL_TOTAL} 2>/dev/null || echo 0; "
+        f"cat {DIAL_STARTED} 2>/dev/null || echo 0; "
+        f"cat {DIAL_FAILED} 2>/dev/null || echo 0; "
+        f"pgrep -fc '[p]ress1_dial_run.sh' 2>/dev/null || echo 0",
+        timeout=20,
     ).strip().splitlines()
-    vals = [int((ln.strip().split() or ["0"])[-1]) for ln in raw[:5]] if raw else [0, 0, 0, 0, 0]
-    while len(vals) < 5:
+    vals = [int((ln.strip().split() or ["0"])[-1]) for ln in raw[:4]] if raw else [0, 0, 0, 0]
+    while len(vals) < 4:
         vals.append(0)
+    live = 0
+    try:
+        live = live_bitcall_channels()
+    except Exception:
+        pass
     return {
         "total": vals[0],
         "started": vals[1],
         "failed": vals[2],
         "script_running": vals[3] > 0,
-        "live": vals[4],
+        "live": live,
     }
 
 
@@ -419,6 +425,8 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         prog["failed"] = failed
         if total:
             prog["total"] = total
+        if started > 0 or running:
+            prog.pop("error", None)
     except Exception:
         total = int(prog.get("total", 0) or 0)
         started = int(prog.get("started", 0) or 0)
@@ -489,12 +497,13 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
 
     out = run_remote(
         f"chmod +x {DIAL_SCRIPT}; "
-        f"setsid {DIAL_SCRIPT} >> {DIAL_LOG} 2>&1 < /dev/null & "
-        f"sleep 2; pgrep -f '[p]ress1_dial_run.sh' || "
-        f"(echo START_FAIL; tail -10 {DIAL_LOG})",
-        timeout=40,
+        f"nohup setsid bash {DIAL_SCRIPT} >>{DIAL_LOG} 2>&1 </dev/null & "
+        f"sleep 2; "
+        f"if pgrep -f '[p]ress1_dial_run.sh' >/dev/null; then echo STARTED; "
+        f"else echo START_FAIL; tail -20 {DIAL_LOG} 2>/dev/null; fi",
+        timeout=45,
     )
-    if "START_FAIL" in out:
+    if "START_FAIL" in out and "STARTED" not in out:
         progress["running"] = False
         raise RuntimeError(f"Dialer failed to start: {out.strip()[:300]}")
 
