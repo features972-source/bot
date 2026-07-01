@@ -132,7 +132,10 @@ async def _live_campaign_updater(
     while not stop_event.is_set():
         try:
             st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
+            err = progress.get("error")
             text = await _format_live_stats(st, total_leads)
+            if err:
+                text += f"\n\n⚠️ {err}"
             hopper = int(st.get("hopper", 0) or 0)
             live = int(st.get("live", 0) or 0)
             running = progress.get("running", False)

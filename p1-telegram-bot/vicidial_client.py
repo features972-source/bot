@@ -348,12 +348,22 @@ def _stop_remote_dialer() -> None:
     run_remote("touch /tmp/press1_dial_stop 2>/dev/null; pkill -f press1_dial_run.sh 2>/dev/null || true", timeout=20)
 
 
+def _start_remote_dialer() -> None:
+    """Launch dial script detached so it survives SSH session close."""
+    run_remote(
+        f"chmod +x /tmp/press1_dial_run.sh; "
+        f"setsid /tmp/press1_dial_run.sh >> /tmp/press1_dial.log 2>&1 < /dev/null & "
+        f"sleep 1; pgrep -f press1_dial_run.sh || (echo START_FAIL; tail -5 /tmp/press1_dial.log)",
+        timeout=30,
+    )
+
+
 def _poll_dial_progress() -> tuple[int, int, bool]:
     """Read server counters; returns (started, failed, script_still_running)."""
     raw = run_remote(
         "cat /tmp/press1_dial_started 2>/dev/null || echo 0; "
         "echo ---; cat /tmp/press1_dial_failed 2>/dev/null || echo 0; "
-        "echo ---; pgrep -f press1_dial_run.sh || true",
+        "echo ---; pgrep -f '[p]ress1_dial_run.sh' || true",
         timeout=20,
     ).strip().split("---")
     started = failed = 0
@@ -398,6 +408,7 @@ def dial_leads(phones: list[str], progress: dict) -> None:
 
     script = f"""#!/bin/bash
 set +e
+echo $$ > /tmp/press1_dial.pid
 STOP=/tmp/press1_dial_stop
 STARTED=/tmp/press1_dial_started
 FAILED=/tmp/press1_dial_failed
@@ -413,16 +424,18 @@ while [ "$idx" -lt "$total" ]; do
   batch_n=0
   while [ "$batch_n" -lt "$BATCH" ] && [ "$idx" -lt "$total" ]; do
     [ -f "$STOP" ] && exit 0
-    while [ "$(asterisk -rx \\"core show channels\\" 2>/dev/null | grep -c \\"@bitcall\\")" -ge "$MAX" ]; do
+    live=$(asterisk -rx "core show channels" 2>/dev/null | grep -c "@bitcall" || echo 0)
+    while [ "$live" -ge "$MAX" ]; do
       [ -f "$STOP" ] && exit 0
       sleep 2
+      live=$(asterisk -rx "core show channels" 2>/dev/null | grep -c "@bitcall" || echo 0)
     done
-    num="${{NUMS[$idx]}}"
+    num=$(echo "${{NUMS[$idx]}}" | tr -d '\\r')
     [ -z "$num" ] && {{ idx=$((idx+1)); continue; }}
-    if asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension s@press1-ivr" >/dev/null 2>&1; then
-      c=$(cat "$STARTED"); echo $((c+1)) > "$STARTED"
+    if asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension s@press1-ivr"; then
+      c=$(cat "$STARTED" 2>/dev/null || echo 0); echo $((c+1)) > "$STARTED"
     else
-      f=$(cat "$FAILED"); echo $((f+1)) > "$FAILED"
+      f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
     fi
     idx=$((idx+1))
     batch_n=$((batch_n+1))
@@ -443,10 +456,12 @@ exit 0
         with sftp.file(remote_sh, "w") as remote_file:
             remote_file.write(script)
         sftp.close()
-        client.exec_command(f"chmod +x {remote_sh}")
-        client.exec_command(f"nohup {remote_sh} > /tmp/press1_dial.log 2>&1 &")
 
-    time.sleep(1)
+    _start_remote_dialer()
+
+    missed = 0
+    still_running = False
+    time.sleep(2)
     while True:
         if progress.get("stop"):
             run_remote("touch /tmp/press1_dial_stop", timeout=10)
@@ -454,10 +469,26 @@ exit 0
             started, failed, still_running = _poll_dial_progress()
             progress["started"] = started
             progress["failed"] = failed
-        except Exception:
-            still_running = True
+            if still_running:
+                missed = 0
+            else:
+                missed += 1
+        except Exception as exc:
+            progress["error"] = str(exc)
+            missed += 1
         done = progress["started"] + progress["failed"] >= len(numbers)
-        if not still_running or done or progress.get("stop"):
+        if done or progress.get("stop"):
+            break
+        if missed >= 5 and progress["started"] == 0:
+            try:
+                tail = run_remote("tail -20 /tmp/press1_dial.log 2>/dev/null || echo no-log", timeout=15)
+                progress["error"] = f"Dial script not running. Log: {tail.strip()[:200]}"
+            except Exception:
+                progress["error"] = "Dial script not running on server"
+            break
+        if missed >= 3 and done:
+            break
+        if not still_running and missed >= 3 and progress["started"] > 0:
             break
         time.sleep(3)
 
