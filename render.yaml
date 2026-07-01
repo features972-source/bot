@@ -11,6 +11,9 @@ services:
     plan: starter
     healthCheckPath: /health
     autoDeployTrigger: commit
+    buildFilter:
+      ignoredPaths:
+        - p1-telegram-bot/**
     disk:
       name: q1-bot-data
       mountPath: /data
@@ -73,6 +76,9 @@ services:
     plan: starter
     healthCheckPath: /health
     autoDeployTrigger: commit
+    buildFilter:
+      ignoredPaths:
+        - p1-telegram-bot/**
     disk:
       name: q2-bot-data
       mountPath: /data
@@ -135,6 +141,9 @@ services:
     plan: starter
     healthCheckPath: /health
     autoDeployTrigger: commit
+    buildFilter:
+      ignoredPaths:
+        - p1-telegram-bot/**
     disk:
       name: q1australia-bot-data
       mountPath: /data
@@ -191,6 +200,9 @@ services:
     plan: starter
     healthCheckPath: /health
     autoDeployTrigger: commit
+    buildFilter:
+      ignoredPaths:
+        - p1-telegram-bot/**
     dockerCommand: python bot_credo.py
     disk:
       name: credo-bot-data
@@ -220,42 +232,4 @@ services:
       - key: WEBHOOK_SECRET
         generateValue: true
       - key: ADMIN_CHAT_ID
-        sync: false
-
-  - type: web
-    name: p1-telegram-bot
-    runtime: docker
-    plan: starter
-    healthCheckPath: /health
-    autoDeployTrigger: commit
-    dockerfilePath: ./Dockerfile.press1
-    dockerCommand: python -u press1_cloud.py
-    envVars:
-      - key: CLOUD_DEPLOYED
-        value: "true"
-      - key: WEBHOOK_HOST
-        value: 0.0.0.0
-      - key: VICIDIAL_SSH_HOST
-        value: 206.189.118.204
-      - key: VICIDIAL_SSH_USER
-        value: root
-      - key: VICIDIAL_CAMPAIGN
-        value: press1
-      - key: VICIDIAL_LIST_ID
-        value: "101"
-      - key: VICIDIAL_SOUND_NAME
-        value: press1_alice
-      - key: VICIDIAL_SERVER_IP
-        value: 206.189.118.204
-      - key: VICIDIAL_MAX_CONCURRENT
-        value: "25"
-      - key: VICIDIAL_CPS
-        value: "5"
-      - key: VICIDIAL_TEST_NUMBERS
-        value: 447934567847,447300899954
-      - key: BOT_TOKEN
-        sync: false
-      - key: TELEGRAM_ALLOWED_IDS
-        sync: false
-      - key: VICIDIAL_SSH_KEY
         sync: false

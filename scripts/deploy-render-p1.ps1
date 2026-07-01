@@ -144,9 +144,10 @@ if ($sshKey) {
 }
 
 $dockerDetails = @{
-    dockerfilePath = "./Dockerfile.press1"
+    dockerfilePath = "./Dockerfile"
     dockerCommand  = "python -u press1_cloud.py"
 }
+$rootDir = "p1-telegram-bot"
 
 if (-not $p1) {
     Write-Host "Creating service $ServiceName in $Region ..."
@@ -163,6 +164,7 @@ if (-not $p1) {
             plan            = "starter"
             region          = $Region
             healthCheckPath = "/health"
+            rootDir         = $rootDir
             envSpecificDetails = $dockerDetails
         }
     }
@@ -173,6 +175,7 @@ if (-not $p1) {
     Write-Host "Found existing $($p1.slug) ($($p1.id)) ..."
     $patchBody = @{
         serviceDetails = @{
+            rootDir            = $rootDir
             envSpecificDetails = $dockerDetails
         }
     }

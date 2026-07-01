@@ -6,7 +6,6 @@ import csv
 import io
 import re
 import subprocess
-import uuid
 from pathlib import Path
 
 MIN_PHONE_DIGITS = 9
@@ -60,7 +59,6 @@ def normalize_uk(phone: str) -> tuple[str, str]:
 
 
 def convert_audio_for_asterisk(src: Path, dest_dir: Path, stem: str) -> dict[str, Path]:
-    """Convert to 8 kHz mono wav/ulaw/alaw for Asterisk."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     base_cmd = ["ffmpeg", "-y", "-i", str(src), "-ar", "8000", "-ac", "1"]
     formats = {

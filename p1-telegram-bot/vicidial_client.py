@@ -29,10 +29,7 @@ MIN_PHONE_DIGITS = 9
 
 
 def test_numbers() -> list[str]:
-    raw = os.getenv(
-        "VICIDIAL_TEST_NUMBERS",
-        "447934567847,447300899954",
-    )
+    raw = os.getenv("VICIDIAL_TEST_NUMBERS", "447934567847,447300899954")
     return [re.sub(r"\D", "", n) for n in raw.split(",") if n.strip()]
 
 

@@ -1,0 +1,46 @@
+# Standalone blueprint — deploy ONLY the P1 Press-1 bot (not Q1/Q2/Credo).
+# In Render: New -> Blueprint -> connect this repo, or New -> Web Service with Root Directory = p1-telegram-bot
+#
+# After deploy set in dashboard:
+#   BOT_TOKEN, TELEGRAM_ALLOWED_IDS, VICIDIAL_SSH_KEY
+
+services:
+  - type: web
+    name: p1-telegram-bot
+    runtime: docker
+    plan: starter
+    rootDir: p1-telegram-bot
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    buildFilter:
+      paths:
+        - p1-telegram-bot/**
+    envVars:
+      - key: CLOUD_DEPLOYED
+        value: "true"
+      - key: WEBHOOK_HOST
+        value: 0.0.0.0
+      - key: VICIDIAL_SSH_HOST
+        value: 206.189.118.204
+      - key: VICIDIAL_SSH_USER
+        value: root
+      - key: VICIDIAL_CAMPAIGN
+        value: press1
+      - key: VICIDIAL_LIST_ID
+        value: "101"
+      - key: VICIDIAL_SOUND_NAME
+        value: press1_alice
+      - key: VICIDIAL_SERVER_IP
+        value: 206.189.118.204
+      - key: VICIDIAL_MAX_CONCURRENT
+        value: "25"
+      - key: VICIDIAL_CPS
+        value: "5"
+      - key: VICIDIAL_TEST_NUMBERS
+        value: 447934567847,447300899954
+      - key: BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ALLOWED_IDS
+        sync: false
+      - key: VICIDIAL_SSH_KEY
+        sync: false
