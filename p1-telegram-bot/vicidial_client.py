@@ -283,15 +283,123 @@ def deploy_audio(files: dict[str, Path]) -> None:
     run_remote("asterisk -rx 'dialplan reload'")
 
 
+def to_e164(phone: str) -> str:
+    """Full UK digits for BitCall originate (same format as /testcall)."""
+    digits = re.sub(r"\D", "", phone)
+    if not digits:
+        return ""
+    if digits.startswith("44"):
+        return digits
+    if digits.startswith("0"):
+        return "44" + digits[1:]
+    return "44" + digits
+
+
+def originate_press1(phone: str) -> str:
+    """Place one outbound call — identical path to /testcall."""
+    digits = to_e164(phone)
+    if len(digits) < MIN_PHONE_DIGITS + 2:
+        raise ValueError(f"invalid number: {phone!r}")
+    run_remote(
+        f"asterisk -rx 'channel originate PJSIP/{digits}@bitcall extension s@press1-ivr'"
+    )
+    return digits
+
+
+def live_bitcall_channels() -> int:
+    out = run_remote(
+        r"asterisk -rx 'core show channels' 2>/dev/null | grep -c '@bitcall' || echo 0",
+        timeout=15,
+    ).strip()
+    try:
+        return int(out.split()[0])
+    except ValueError:
+        return 0
+
+
+def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
+    """Live stats for direct-dial /run (same originate path as /testcall)."""
+    prog = progress or {}
+    total = int(prog.get("total", 0) or 0)
+    started = int(prog.get("started", 0) or 0)
+    failed = int(prog.get("failed", 0) or 0)
+    left = max(0, total - started - failed)
+    press1 = "0"
+    answered = "0"
+    if since:
+        try:
+            press1 = (
+                run_remote(
+                    "grep -c 'PJSIP/8000@3cx' /var/log/asterisk/full 2>/dev/null || echo 0",
+                    timeout=15,
+                ).strip()
+                or "0"
+            )
+            answered = (
+                run_remote(
+                    r"asterisk -rx 'core show channels' 2>/dev/null | grep -c 'press1-ivr' || echo 0",
+                    timeout=15,
+                ).strip()
+                or "0"
+            )
+        except Exception:
+            pass
+    return {
+        "hopper": str(left),
+        "live": str(live_bitcall_channels()),
+        "new_leads": str(left),
+        "dialed": str(started),
+        "press1": press1,
+        "answered": answered,
+        "campaign_active": "Y" if prog.get("running") else "N",
+        "agent_status": "—",
+    }
+
+
+def dial_leads(phones: list[str], progress: dict) -> None:
+    """Dial leads via BitCall → press1-ivr (same as /testcall), with CPS + concurrency caps."""
+    import time
+
+    progress.setdefault("started", 0)
+    progress.setdefault("failed", 0)
+    progress["total"] = len(phones)
+    progress["running"] = True
+    progress["stop"] = False
+
+    last_send = 0.0
+    interval = 1.0 / CPS if CPS > 0 else 0.0
+
+    for phone in phones:
+        if progress.get("stop"):
+            break
+        while not progress.get("stop"):
+            if live_bitcall_channels() < MAX_CONCURRENT:
+                break
+            time.sleep(2)
+
+        if progress.get("stop"):
+            break
+
+        if interval > 0:
+            wait = last_send + interval - time.time()
+            if wait > 0:
+                time.sleep(wait)
+
+        try:
+            originate_press1(phone)
+            progress["started"] = int(progress.get("started", 0)) + 1
+            last_send = time.time()
+        except Exception:
+            progress["failed"] = int(progress.get("failed", 0)) + 1
+
+    progress["running"] = False
+
 def test_calls(numbers: list[str] | None = None) -> list[str]:
     nums = numbers or test_numbers()
     placed: list[str] = []
     for num in nums:
-        digits = re.sub(r"\D", "", num)
-        if not digits:
+        try:
+            placed.append(originate_press1(num))
+        except Exception:
             continue
-        run_remote(
-            f"asterisk -rx 'channel originate PJSIP/{digits}@bitcall extension s@press1-ivr'"
-        )
-        placed.append(digits)
     return placed

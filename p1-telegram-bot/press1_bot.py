@@ -27,7 +27,7 @@ ALLOWED = {
     if x.strip().isdigit()
 }
 
-HELP = """Press-1 dialer (VICIdial + BitCall)
+HELP = """Press-1 dialer (BitCall + press1-ivr)
 
 Send:
 • Voice or MP3/WAV — IVR message (press 1)
@@ -35,10 +35,10 @@ Send:
 
 Commands:
 /start — this help
-/status — hopper, live calls, leads
-/run — upload leads & start (live stats every 5s)
-/stop — pause campaign
-/testcall — ring both test numbers
+/status — live calls & progress
+/run — dial loaded leads (same path as /testcall)
+/stop — stop dialing
+/testcall — ring test numbers
 /leads — lead count in session
 /clear — clear loaded numbers"""
 
@@ -124,26 +124,31 @@ async def _live_campaign_updater(
     total_leads: int,
     run_since: str,
     stop_event: asyncio.Event,
+    context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     last_text = ""
     idle_rounds = 0
+    progress = context.application.bot_data.get("dial_progress", {})
     while not stop_event.is_set():
         try:
-            st = await asyncio.to_thread(vd.get_live_stats, run_since)
+            st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
             text = await _format_live_stats(st, total_leads)
             hopper = int(st.get("hopper", 0) or 0)
             live = int(st.get("live", 0) or 0)
-            active = (st.get("campaign_active") or "").upper()
+            running = progress.get("running", False)
             if text != last_text:
                 try:
                     await msg.edit_text(text)
                     last_text = text
                 except Exception:
                     pass
-            if active == "N" or (hopper == 0 and live == 0):
+            if not running and hopper == 0 and live == 0:
                 idle_rounds += 1
-                if idle_rounds >= 6:
+                if idle_rounds >= 3:
                     final = await _format_live_stats(st, total_leads, finished=True)
+                    err = progress.get("error")
+                    if err:
+                        final += f"\n\n⚠️ {err}"
                     try:
                         await msg.edit_text(final)
                     except Exception:
@@ -162,9 +167,19 @@ async def _live_campaign_updater(
             break
         except asyncio.TimeoutError:
             pass
+    progress["running"] = False
 
 
+def _stop_dialer(context: ContextTypes.DEFAULT_TYPE) -> None:
+    progress = context.application.bot_data.get("dial_progress")
+    if progress:
+        progress["stop"] = True
+    task = context.application.bot_data.get("dial_task")
+    if task and not task.done():
+        task.cancel()
+    context.application.bot_data.pop("dial_task", None)
 def _stop_live_updater(context: ContextTypes.DEFAULT_TYPE) -> None:
+    _stop_dialer(context)
     task = context.application.bot_data.get("live_updater_task")
     stop = context.application.bot_data.get("live_updater_stop")
     if stop:
@@ -180,7 +195,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     msg = await update.message.reply_text("Checking server…")
     try:
-        st = await asyncio.to_thread(vd.get_live_stats)
+        progress = context.application.bot_data.get("dial_progress")
+        if progress and progress.get("running"):
+            st = await asyncio.to_thread(vd.get_dial_stats, None, progress)
+        else:
+            st = await asyncio.to_thread(vd.get_dial_stats, None, {})
         s = session(update.effective_user.id, context)
         text = await _format_status(st, len(s.numbers))
         await msg.edit_text(text)
@@ -217,12 +236,8 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
     _stop_live_updater(context)
-    msg = await update.message.reply_text("Stopping campaign…")
-    try:
-        await asyncio.to_thread(vd.stop_campaign)
-        await msg.edit_text("Campaign paused.")
-    except Exception as e:
-        await msg.edit_text(f"Stop failed: {e}")
+    msg = await update.message.reply_text("Stopping dialer…")
+    await msg.edit_text("Dialer stopped.")
 
 
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -233,20 +248,39 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Load numbers first (paste list or send .csv).")
         return
     _stop_live_updater(context)
+    numbers = list(s.numbers)
+    count = len(numbers)
+    s.numbers.clear()
     msg = await update.message.reply_text(
-        f"Uploading {len(s.numbers)} leads and starting campaign…"
+        f"Dialling {count} leads (BitCall → press1-ivr, same as /testcall)…"
     )
     try:
-        count = await asyncio.to_thread(vd.add_leads, list(s.numbers))
-        await asyncio.to_thread(vd.start_campaign)
         run_since = await asyncio.to_thread(vd.server_now)
-        s.numbers.clear()
-        st = await asyncio.to_thread(vd.get_live_stats, run_since)
+        progress: dict = {
+            "started": 0,
+            "failed": 0,
+            "total": count,
+            "running": True,
+            "stop": False,
+        }
+        context.application.bot_data["dial_progress"] = progress
+        st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
         await msg.edit_text(await _format_live_stats(st, count))
+
+        async def dial_worker() -> None:
+            try:
+                await asyncio.to_thread(vd.dial_leads, numbers, progress)
+            except Exception as e:
+                progress["error"] = str(e)
+                progress["running"] = False
+
+        dial_task = asyncio.create_task(dial_worker())
+        context.application.bot_data["dial_task"] = dial_task
+
         stop_event = asyncio.Event()
         context.application.bot_data["live_updater_stop"] = stop_event
         task = asyncio.create_task(
-            _live_campaign_updater(msg, count, run_since, stop_event)
+            _live_campaign_updater(msg, count, run_since, stop_event, context)
         )
         context.application.bot_data["live_updater_task"] = task
     except Exception as e:
