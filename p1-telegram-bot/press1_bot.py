@@ -165,6 +165,16 @@ async def _live_campaign_updater(
                     except BadRequest:
                         pass
                     break
+            elif not active and hopper > 0 and dialed > 0:
+                idle_rounds += 1
+                if idle_rounds >= 4:
+                    final = await _format_live_stats(st, total_leads, finished=True)
+                    final += "\n\n⚠️ Dialer stopped early on server — /run again"
+                    try:
+                        await _safe_edit(msg, final)
+                    except BadRequest:
+                        pass
+                    break
             elif not active and dialed == 0 and idle_rounds >= 6:
                 final = await _format_live_stats(st, total_leads, finished=True)
                 err = progress.get("error") or "Dialer never started — try /run again"

@@ -106,37 +106,25 @@ STOP={DIAL_STOP}
 STARTED={DIAL_STARTED}
 FAILED={DIAL_FAILED}
 NUMFILE={DIAL_NUMBERS}
+LOG={DIAL_LOG}
 BATCH={BATCH_SIZE}
 PAUSE={BATCH_PAUSE_SEC}
-MAX={MAX_CONCURRENT}
-mapfile -t NUMS < "$NUMFILE"
-total=${{#NUMS[@]}}
-idx=0
-while [ "$idx" -lt "$total" ]; do
+batch_n=0
+while IFS= read -r num || [ -n "$num" ]; do
   [ -f "$STOP" ] && exit 0
-  batch_n=0
-  while [ "$batch_n" -lt "$BATCH" ] && [ "$idx" -lt "$total" ]; do
-    [ -f "$STOP" ] && exit 0
-    live=$(asterisk -rx "core show channels" 2>/dev/null | grep -c "@bitcall" || echo 0)
-    while [ "$live" -ge "$MAX" ]; do
-      [ -f "$STOP" ] && exit 0
-      sleep 2
-      live=$(asterisk -rx "core show channels" 2>/dev/null | grep -c "@bitcall" || echo 0)
-    done
-    num=$(echo "${{NUMS[$idx]}}" | tr -d '\\r')
-    [ -z "$num" ] && {{ idx=$((idx+1)); continue; }}
-    if asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension s@press1-ivr" >>{DIAL_LOG} 2>&1; then
-      c=$(cat "$STARTED" 2>/dev/null || echo 0); echo $((c+1)) > "$STARTED"
-    else
-      f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
-    fi
-    idx=$((idx+1))
-    batch_n=$((batch_n+1))
-  done
-  if [ "$idx" -lt "$total" ]; then
+  num=$(echo "$num" | tr -d '\\r' | tr -d ' ')
+  [ -z "$num" ] && continue
+  if asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension s@press1-ivr" >>"$LOG" 2>&1; then
+    s=$(cat "$STARTED" 2>/dev/null || echo 0); echo $((s+1)) > "$STARTED"
+  else
+    f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
+  fi
+  batch_n=$((batch_n+1))
+  if [ "$batch_n" -ge "$BATCH" ]; then
+    batch_n=0
     sleep "$PAUSE"
   fi
-done
+done < "$NUMFILE"
 exit 0
 """
 
@@ -494,6 +482,14 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         with sftp.file(DIAL_SCRIPT, "w") as remote_file:
             remote_file.write(script_body)
         sftp.close()
+
+    verify = run_remote(
+        f"wc -l < {DIAL_NUMBERS}; grep -c 'while IFS' {DIAL_SCRIPT}",
+        timeout=20,
+    ).strip().splitlines()
+    line_count = int(verify[0].strip()) if verify else 0
+    if line_count < len(numbers):
+        raise RuntimeError(f"Upload failed: expected {len(numbers)} lines, got {line_count}")
 
     out = run_remote(
         f"chmod +x {DIAL_SCRIPT}; "
