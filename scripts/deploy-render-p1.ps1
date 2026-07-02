@@ -130,7 +130,7 @@ $envVars = @(
     @{ key = "VICIDIAL_SERVER_IP"; value = "206.189.118.204" }
     @{ key = "VICIDIAL_MAX_CONCURRENT"; value = "25" }
     @{ key = "VICIDIAL_CPS"; value = "5" }
-    @{ key = "VICIDIAL_TEST_NUMBERS"; value = "447934567847,447300899954" }
+    @{ key = "VICIDIAL_TEST_NUMBERS"; value = "447934567847,447300899954,447448336101" }
 )
 
 if ($local["TELEGRAM_ALLOWED_IDS"]) {

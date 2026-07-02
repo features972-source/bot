@@ -121,9 +121,11 @@ async def _format_live_stats(
         header = f"🟡 Campaign finishing — {total} leads"
     else:
         header = f"📊 Campaign live — {total} leads"
+    dialed_n = int(dialed or 0)
+    pct = (dialed_n * 100 // total) if total > 0 else 0
     lines = [
         header + "\n",
-        f"📞 Dialed: {dialed} / {total}",
+        f"📞 Dialed: {dialed} / {total} ({pct}%)",
         f"⏳ Left: {left}",
         f"📡 Live now: {live}",
         f"✅ Answered: {answered}",
@@ -144,10 +146,12 @@ async def _format_status(st: dict[str, str], loaded_in_bot: int) -> str:
     left = st.get("hopper", "?")
     live = st.get("live", "?")
     failed = st.get("failed", "0")
+    dialed_n = int(dialed or 0) if str(dialed).isdigit() else 0
+    pct = (dialed_n * 100 // total) if total > 0 else 0
     lines = [
         "📊 Server status\n",
         f"📋 List on server: {total}",
-        f"📞 Dialed: {dialed} / {total}",
+        f"📞 Dialed: {dialed} / {total}" + (f" ({pct}%)" if total > 0 else ""),
         f"⏳ Left: {left}",
         f"📡 Live now: {live}",
         f"✅ Answered: {answered}",
@@ -177,7 +181,7 @@ async def _live_campaign_updater(
             err = progress.get("error")
             text = await _format_live_stats(st, total_leads)
             if progress.get("stalled"):
-                text += "\n\n⚠️ Dialer stopped early on server — /run to resume remaining"
+                text += "\n\n⚠️ Dialer stopped early on server — upload a new list and /run"
             if err:
                 text += f"\n\n⚠️ {err}"
             hopper = int(st.get("hopper", 0) or 0)
@@ -213,7 +217,7 @@ async def _live_campaign_updater(
                 idle_rounds += 1
                 if idle_rounds >= 4:
                     final = await _format_live_stats(st, total_leads, finished=True)
-                    final += "\n\n⚠️ Dialer stopped early on server — /run again"
+                    final += "\n\n⚠️ Dialer stopped early on server — upload a new list and /run"
                     try:
                         await _safe_edit(msg, final)
                     except BadRequest:
