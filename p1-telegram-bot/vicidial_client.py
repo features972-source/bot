@@ -149,7 +149,7 @@ def settings_summary() -> dict[str, str]:
 
 
 def test_numbers() -> list[str]:
-    raw = os.getenv("VICIDIAL_TEST_NUMBERS", "447934567847,447300899954")
+    raw = os.getenv("VICIDIAL_TEST_NUMBERS", "447769799593")
     nums: list[str] = []
     seen: set[str] = set()
     for n in raw.split(","):
@@ -848,6 +848,10 @@ def unpause_dial_campaign() -> dict[str, str]:
             raise RuntimeError("Cannot resume — numbers file missing. Upload a list and /run again.")
         run_remote(f"rm -f {DIAL_STOP}", timeout=15)
         _start_dial_script()
+    elif _dial_script_supports_pause():
+        pass  # pause file already removed; running dialer continues on its own
+    else:
+        raise RuntimeError("Dialer still running — wait a few seconds and try /unpause again")
     return {
         "paused": "N",
         "dialed": str(started),
