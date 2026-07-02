@@ -233,7 +233,13 @@ GAP={gap}
 CAP={DIALER_CONCURRENT_CAP}
 exec 9>"$LOCK"
 flock -n 9 || {{ echo "$(date '+%Y-%m-%d %H:%M:%S') skip duplicate dialer (locked)" >>"$LOG"; exit 0; }}
-touch "$DONE"
+# This dialer owns the lock, so it is the single source of truth for THIS run.
+# Start from a clean slate: an empty DONE list and zeroed counters. This makes
+# `started` (derived from wc -l DONE) reflect only numbers dialed by this run,
+# even if a launch-time reset was skipped or raced by an overlapping launch.
+: > "$DONE"
+echo 0 > "$STARTED"
+echo 0 > "$FAILED"
 batch_n=0
 while IFS= read -r num || [ -n "$num" ]; do
   [ -f "$STOP" ] && exit 0
