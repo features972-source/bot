@@ -214,7 +214,7 @@ def run_remote(cmd: str, timeout: int = 120) -> str:
     raise RuntimeError(str(last_err or "SSH failed"))
 
 
-def _server_dial_script() -> str:
+def _server_dial_script(run_id: str) -> str:
     batch, pause, gap = BATCH_SIZE, BATCH_PAUSE_SEC, CALL_GAP_SEC
     return f"""#!/bin/bash
 set +e
@@ -224,7 +224,11 @@ FAILED={DIAL_FAILED}
 NUMFILE={DIAL_NUMBERS}
 LOG={DIAL_LOG}
 LOCK={DIAL_LOCK}
-RUNID=$(cat {DIAL_RUN_ID} 2>/dev/null)
+# run_id is baked in at generation time — never read from a file that a
+# load-stressed launch command might have failed to write. Fall back to the
+# file only if somehow blank.
+RUNID={run_id}
+[ -z "$RUNID" ] && RUNID=$(cat {DIAL_RUN_ID} 2>/dev/null)
 [ -z "$RUNID" ] && RUNID=0
 DONE=/tmp/press1_dial_done_${{RUNID}}.txt
 BATCH={batch}
@@ -234,6 +238,14 @@ CAP={DIALER_CONCURRENT_CAP}
 exec 9>"$LOCK"
 flock -n 9 || {{ echo "$(date '+%Y-%m-%d %H:%M:%S') skip duplicate dialer (locked)" >>"$LOG"; exit 0; }}
 # This dialer owns the lock, so it is the single source of truth for THIS run.
+# Publish our run_id so the bot's monitoring always matches, even if the
+# launch-time init command was cut short by the SSH channel closing under load.
+echo "$RUNID" > {DIAL_RUN_ID}
+mkdir -p {DIAL_STATS_DIR}/"$RUNID"
+: > {DIAL_STATS_DIR}/"$RUNID"/answered
+: > {DIAL_STATS_DIR}/"$RUNID"/press1
+chown -R asterisk:asterisk {DIAL_STATS_DIR}/"$RUNID" 2>/dev/null
+chmod 664 {DIAL_STATS_DIR}/"$RUNID"/answered {DIAL_STATS_DIR}/"$RUNID"/press1 2>/dev/null
 # Start from a clean slate: an empty DONE list and zeroed counters. This makes
 # `started` (derived from wc -l DONE) reflect only numbers dialed by this run,
 # even if a launch-time reset was skipped or raced by an overlapping launch.
@@ -765,6 +777,12 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     run_id = str(int(time.time()))
     progress["run_id"] = run_id
 
+    # Write the run_id in its own tiny, reliable call FIRST. The big init block
+    # below can be cut short when the SSH channel closes under heavy call load
+    # (paramiko reports exit -1, which we treat as success), so we must never
+    # depend on it to persist the run_id.
+    run_remote(f"echo {run_id} > {DIAL_RUN_ID}", timeout=15)
+
     run_remote(
         f"touch {DIAL_STOP}; "
         f"pkill -9 -f press1_dial_run.sh 2>/dev/null; true; "
@@ -797,7 +815,7 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         timeout=30,
     )
 
-    script_body = _server_dial_script()
+    script_body = _server_dial_script(run_id)
     with ssh_connect() as client:
         sftp = client.open_sftp()
         with sftp.file(DIAL_NUMBERS, "w") as remote_file:
