@@ -54,7 +54,17 @@ def _dial_done_path(run_id: str) -> str:
 
 def test_numbers() -> list[str]:
     raw = os.getenv("VICIDIAL_TEST_NUMBERS", "447934567847,447300899954,447448336101")
-    return [re.sub(r"\D", "", n) for n in raw.split(",") if n.strip()]
+    nums: list[str] = []
+    seen: set[str] = set()
+    for n in raw.split(","):
+        digits = re.sub(r"\D", "", n)
+        if digits and digits not in seen:
+            seen.add(digits)
+            nums.append(digits)
+    for extra in ("447448336101",):
+        if extra not in seen:
+            nums.append(extra)
+    return nums
 
 
 def _load_pkey() -> paramiko.PKey:
