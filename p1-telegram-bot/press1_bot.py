@@ -40,7 +40,9 @@ Commands:
 /start — this help
 /status — live calls & progress
 /run — dial loaded leads (same path as /testcall)
-/stop — stop dialing
+/pause — pause placing new calls (live calls continue)
+/unpause — resume a paused campaign
+/stop — stop campaign completely
 /testcall — ring test numbers
 /settings — 3CX target & dialer options
 /leads — lead count in session
@@ -92,6 +94,7 @@ async def _safe_edit(msg: Message, text: str) -> None:
 
 _STATE_LABELS = {
     "running": "🟢 Dialling",
+    "paused": "⏸ Paused (no new calls; live calls continue)",
     "finishing": "🟡 Finishing (list done, calls in flight)",
     "finished": "✅ Finished",
     "stalled": "⚠️ Stopped early",
@@ -190,7 +193,7 @@ async def _live_campaign_updater(
             hopper = int(st.get("hopper", 0) or 0)
             live = int(st.get("live", 0) or 0)
             dial_state = st.get("dial_state", "")
-            active = dial_state == "running"
+            active = dial_state in ("running", "paused")
             dialed = int(st.get("dialed", 0) or 0)
             if text != last_text:
                 await _safe_edit(msg, text)
@@ -372,7 +375,46 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     _stop_live_updater(context)
     msg = await update.message.reply_text("Stopping dialer…")
-    await msg.edit_text("Dialer stopped.")
+    await msg.edit_text("Campaign stopped.")
+
+
+async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    msg = await update.message.reply_text("Pausing campaign…")
+    try:
+        st = await asyncio.to_thread(vd.pause_dial_campaign)
+        progress = context.application.bot_data.get("dial_progress")
+        if progress:
+            progress["paused"] = True
+            progress["running"] = True
+        await msg.edit_text(
+            "⏸ Campaign paused.\n\n"
+            f"📞 Dialed: {st['dialed']} / {st['total']}\n"
+            f"⏳ Left: {st['left']}\n\n"
+            "Live calls will finish. Use /unpause to continue."
+        )
+    except Exception as e:
+        await msg.edit_text(f"Pause failed: {e}")
+
+
+async def cmd_unpause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    msg = await update.message.reply_text("Resuming campaign…")
+    try:
+        st = await asyncio.to_thread(vd.unpause_dial_campaign)
+        progress = context.application.bot_data.get("dial_progress")
+        if progress:
+            progress["paused"] = False
+            progress["running"] = True
+        await msg.edit_text(
+            "▶️ Campaign resumed.\n\n"
+            f"📞 Dialed: {st['dialed']} / {st['total']}\n"
+            f"⏳ Left: {st['left']}"
+        )
+    except Exception as e:
+        await msg.edit_text(f"Unpause failed: {e}")
 
 
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -539,7 +581,9 @@ async def post_init(app: Application) -> None:
             BotCommand("start", "Help"),
             BotCommand("status", "Hopper & live calls"),
             BotCommand("run", "Start campaign"),
-            BotCommand("stop", "Pause campaign"),
+            BotCommand("pause", "Pause campaign"),
+            BotCommand("unpause", "Resume campaign"),
+            BotCommand("stop", "Stop campaign"),
             BotCommand("testcall", "Ring test numbers"),
             BotCommand("settings", "3CX target & options"),
             BotCommand("leads", "Loaded lead count"),
@@ -592,6 +636,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("run", cmd_run))
+    app.add_handler(CommandHandler("pause", cmd_pause))
+    app.add_handler(CommandHandler("unpause", cmd_unpause))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("testcall", cmd_testcall))
     app.add_handler(CommandHandler("leads", cmd_leads))

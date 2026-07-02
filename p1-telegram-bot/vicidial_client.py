@@ -44,6 +44,7 @@ DIAL_TOTAL = "/tmp/press1_dial_total"
 DIAL_STARTED = "/tmp/press1_dial_started"
 DIAL_FAILED = "/tmp/press1_dial_failed"
 DIAL_STOP = "/tmp/press1_dial_stop"
+DIAL_PAUSE = "/tmp/press1_dial_pause"
 DIAL_LOG = "/tmp/press1_dial.log"
 DIAL_RUN_MARK = "/tmp/press1_dial_run_mark"
 DIAL_RUN_ID = "/tmp/press1_dial_run_id"
@@ -220,6 +221,7 @@ def _server_dial_script(run_id: str) -> str:
     return f"""#!/bin/bash
 set +e
 STOP={DIAL_STOP}
+PAUSEFILE={DIAL_PAUSE}
 STARTED={DIAL_STARTED}
 FAILED={DIAL_FAILED}
 NUMFILE={DIAL_NUMBERS}
@@ -239,6 +241,12 @@ CAP={DIALER_CONCURRENT_CAP}
 CALLERID={OUTBOUND_CALLER_ID}
 SPOOLDIR=/var/spool/asterisk/outgoing
 TMPDIR=/var/spool/asterisk/tmp
+wait_if_paused() {{
+  while [ -f "$PAUSEFILE" ]; do
+    [ -f "$STOP" ] && exit 0
+    sleep 1
+  done
+}}
 exec 9>"$LOCK"
 flock -n 9 || {{ echo "$(date '+%Y-%m-%d %H:%M:%S') skip duplicate dialer (locked)" >>"$LOG"; exit 0; }}
 # This dialer owns the lock, so it is the single source of truth for THIS run.
@@ -246,18 +254,21 @@ flock -n 9 || {{ echo "$(date '+%Y-%m-%d %H:%M:%S') skip duplicate dialer (locke
 # launch-time init command was cut short by the SSH channel closing under load.
 echo "$RUNID" > {DIAL_RUN_ID}
 mkdir -p {DIAL_STATS_DIR}/"$RUNID"
-: > {DIAL_STATS_DIR}/"$RUNID"/answered
-: > {DIAL_STATS_DIR}/"$RUNID"/press1
+if [ ! -s "$DONE" ]; then
+  : > "$DONE"
+  echo 0 > "$STARTED"
+  echo 0 > "$FAILED"
+  : > {DIAL_STATS_DIR}/"$RUNID"/answered
+  : > {DIAL_STATS_DIR}/"$RUNID"/press1
+else
+  s=$(wc -l < "$DONE" 2>/dev/null || echo 0); echo "$s" > "$STARTED"
+  touch {DIAL_STATS_DIR}/"$RUNID"/answered {DIAL_STATS_DIR}/"$RUNID"/press1 2>/dev/null
+fi
 chown -R asterisk:asterisk {DIAL_STATS_DIR}/"$RUNID" 2>/dev/null
 chmod 664 {DIAL_STATS_DIR}/"$RUNID"/answered {DIAL_STATS_DIR}/"$RUNID"/press1 2>/dev/null
-# Start from a clean slate: an empty DONE list and zeroed counters. This makes
-# `started` (derived from wc -l DONE) reflect only numbers dialed by this run,
-# even if a launch-time reset was skipped or raced by an overlapping launch.
-: > "$DONE"
-echo 0 > "$STARTED"
-echo 0 > "$FAILED"
 batch_n=0
 while IFS= read -r num || [ -n "$num" ]; do
+  wait_if_paused
   [ -f "$STOP" ] && exit 0
   num=$(echo "$num" | tr -d '\\r' | tr -d ' ')
   [ -z "$num" ] && continue
@@ -265,6 +276,7 @@ while IFS= read -r num || [ -n "$num" ]; do
   # Optional concurrency gate. CAP=0 means unlimited provider capacity, so only
   # the placement rate (GAP/BATCH/PAUSE) controls dialing speed.
   while [ "$CAP" -gt 0 ]; do
+    wait_if_paused
     [ -f "$STOP" ] && exit 0
     live=$(asterisk -rx "core show channels concise" 2>/dev/null | grep -ci 'bitcall')
     [ "$live" -lt "$CAP" ] && break
@@ -298,9 +310,11 @@ CALLFILE
     echo "$(date '+%Y-%m-%d %H:%M:%S') fail $num" >>"$LOG"
   fi
   batch_n=$((batch_n+1))
+  wait_if_paused
   sleep "$GAP"
   if [ "$batch_n" -ge "$BATCH" ]; then
     batch_n=0
+    wait_if_paused
     sleep "$PAUSE"
   fi
 done < "$NUMFILE"
@@ -330,13 +344,14 @@ def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, in
         f"ps aux 2>/dev/null | grep -c '[b]ash {DIAL_SCRIPT}' || echo 0; "
         f"wc -l < {DIAL_NUMBERS} 2>/dev/null || echo 0; "
         f"rid=$(cat {DIAL_RUN_ID} 2>/dev/null); "
-        f"if [ -n \"$rid\" ] && [ -f /tmp/press1_dial_done_${{rid}}.txt ]; then wc -l < /tmp/press1_dial_done_${{rid}}.txt; else echo 0; fi",
+        f"if [ -n \"$rid\" ] && [ -f /tmp/press1_dial_done_${{rid}}.txt ]; then wc -l < /tmp/press1_dial_done_${{rid}}.txt; else echo 0; fi; "
+        f"test -f {DIAL_PAUSE} && echo 1 || echo 0",
         timeout=25,
     ).strip().splitlines()
     vals: list[str] = []
-    for ln in raw[:11]:
+    for ln in raw[:12]:
         vals.append((ln.strip().split() or ["0"])[-1])
-    while len(vals) < 11:
+    while len(vals) < 12:
         vals.append("0")
     server_run_id = vals[3].strip()
     file_lines = int(vals[9] or 0)
@@ -352,6 +367,7 @@ def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, in
     press1 = max(press1_file, press1_ast)
     answered = max(answered_file, answered_ast)
     script_running = int(vals[8] or 0) > 0
+    paused = int(vals[11] or 0) > 0
 
   # Empty server run_id must not match — otherwise stale global counters bleed in.
     run_match = (
@@ -383,6 +399,7 @@ def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, in
         "answered": answered,
         "server_run_id": server_run_id,
         "run_match": run_match,
+        "paused": paused,
     }
 
 
@@ -645,7 +662,9 @@ def _fetch_outcome_stats(run_id: str | None) -> tuple[int, int]:
         return 0, 0
 
 
-def _dial_state_label(running: bool, total: int, left: int, failed: int) -> str:
+def _dial_state_label(running: bool, total: int, left: int, failed: int, *, paused: bool = False) -> str:
+    if paused and total > 0:
+        return "paused"
     if total <= 0 and not running:
         return "idle"
     if running and left > 0:
@@ -675,8 +694,9 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         failed = int(state["failed"])
         live = int(state["live"])
         running = bool(state["script_running"])
+        paused = bool(state.get("paused"))
         left = max(0, total - started - failed)
-        dial_state = _dial_state_label(running, total, left, failed)
+        dial_state = _dial_state_label(running, total, left, failed, paused=paused)
 
         press1 = int(state["press1"])
         answered = int(state["answered"])
@@ -694,6 +714,11 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
 
         if dial_state == "running":
             prog["running"] = True
+            prog.pop("stalled", None)
+            prog.pop("paused", None)
+        elif dial_state == "paused":
+            prog["running"] = True
+            prog["paused"] = True
             prog.pop("stalled", None)
         else:
             prog["running"] = False
@@ -714,8 +739,9 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         failed = int(prog.get("failed", 0) or 0)
         live = 0
         running = bool(prog.get("running"))
+        paused = bool(prog.get("paused"))
         left = max(0, total - started - failed)
-        dial_state = _dial_state_label(running, total, left, failed)
+        dial_state = _dial_state_label(running, total, left, failed, paused=paused)
         press1 = int(prog.get("press1", 0) or 0)
         answered = int(prog.get("answered", 0) or 0)
 
@@ -732,17 +758,88 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         "dial_state": dial_state,
         "agent_status": "—",
         "run_id": run_id,
+        "paused": "Y" if dial_state == "paused" else "N",
     }
 
 
 def _stop_remote_dialer() -> None:
     try:
         run_remote(
-            f"touch {DIAL_STOP} 2>/dev/null; pkill -9 -f press1_dial_run.sh 2>/dev/null; true",
+            f"touch {DIAL_STOP} 2>/dev/null; rm -f {DIAL_PAUSE} 2>/dev/null; "
+            f"pkill -9 -f press1_dial_run.sh 2>/dev/null; true",
             timeout=20,
         )
     except Exception:
         pass
+
+
+def _dialer_process_count() -> int:
+    try:
+        raw = run_remote(
+            f"ps aux 2>/dev/null | grep -c '[b]ash {DIAL_SCRIPT}' || echo 0",
+            timeout=15,
+        ).strip().split()[-1]
+        return int(raw or 0)
+    except Exception:
+        return 0
+
+
+def _campaign_counters() -> tuple[int, int, int, int]:
+    """total, started, failed, left"""
+    try:
+        raw = run_remote(
+            f"cat {DIAL_TOTAL} 2>/dev/null || echo 0; "
+            f"cat {DIAL_STARTED} 2>/dev/null || echo 0; "
+            f"cat {DIAL_FAILED} 2>/dev/null || echo 0",
+            timeout=15,
+        ).strip().splitlines()
+        total = int((raw[0] if raw else "0").strip().split()[-1])
+        started = int((raw[1] if len(raw) > 1 else "0").strip().split()[-1])
+        failed = int((raw[2] if len(raw) > 2 else "0").strip().split()[-1])
+        left = max(0, total - started - failed)
+        return total, started, failed, left
+    except Exception:
+        return 0, 0, 0, 0
+
+
+def pause_dial_campaign() -> dict[str, str]:
+    """Pause placing new calls; live calls continue. Does not kill the dialer."""
+    running = _dialer_process_count()
+    total, started, failed, left = _campaign_counters()
+    if running < 1 and left <= 0:
+        raise RuntimeError("No active campaign to pause")
+    if running < 1 and left > 0:
+        raise RuntimeError("Campaign stalled — use /unpause to resume dialing")
+    run_remote(f"touch {DIAL_PAUSE}", timeout=15)
+    return {
+        "paused": "Y",
+        "dialed": str(started),
+        "left": str(left),
+        "total": str(total),
+        "failed": str(failed),
+    }
+
+
+def unpause_dial_campaign() -> dict[str, str]:
+    """Resume a paused campaign, or restart the dialer if it exited with leads left."""
+    run_remote(f"rm -f {DIAL_PAUSE}", timeout=15)
+    total, started, failed, left = _campaign_counters()
+    if total <= 0:
+        raise RuntimeError("No campaign loaded on server")
+    if left <= 0:
+        raise RuntimeError("Nothing left to dial")
+    if _dialer_process_count() < 1:
+        if not run_remote(f"test -f {DIAL_NUMBERS} && echo yes || echo no", timeout=15).strip().endswith("yes"):
+            raise RuntimeError("Cannot resume — numbers file missing. Upload a list and /run again.")
+        run_remote(f"rm -f {DIAL_STOP}", timeout=15)
+        _start_dial_script()
+    return {
+        "paused": "N",
+        "dialed": str(started),
+        "left": str(left),
+        "total": str(total),
+        "failed": str(failed),
+    }
 
 
 def _start_dial_script() -> None:
@@ -751,7 +848,7 @@ def _start_dial_script() -> None:
 
     run_remote(f"chmod +x {DIAL_SCRIPT}", timeout=15)
     run_remote(
-        f"rm -f {DIAL_STOP}; nohup setsid bash {DIAL_SCRIPT} >>{DIAL_LOG} 2>&1 </dev/null &",
+        f"rm -f {DIAL_STOP}; rm -f {DIAL_PAUSE}; nohup setsid bash {DIAL_SCRIPT} >>{DIAL_LOG} 2>&1 </dev/null &",
         timeout=15,
     )
     time.sleep(2)
@@ -809,7 +906,7 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         f"sleep 1; "
         f"pkill -9 -f AST_VDauto_dial 2>/dev/null; true; "
         f"mysql asterisk -e \"UPDATE vicidial_campaigns SET active='N' WHERE campaign_id='{CAMPAIGN}'\" 2>/dev/null; "
-        f"rm -f {DIAL_STOP}; "
+        f"rm -f {DIAL_STOP}; rm -f {DIAL_PAUSE}; "
         f"echo 0 > {DIAL_STARTED}; echo 0 > {DIAL_FAILED}; "
         # Self-clean: drop stale per-run dirs, any bare root counters, and the
         # accumulated per-number run tags so stats always start from a clean slate.
