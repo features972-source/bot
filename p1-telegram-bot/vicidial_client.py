@@ -149,7 +149,7 @@ def settings_summary() -> dict[str, str]:
 
 
 def test_numbers() -> list[str]:
-    raw = os.getenv("VICIDIAL_TEST_NUMBERS", "447769799593")
+    raw = os.getenv("VICIDIAL_TEST_NUMBERS", "447769799593,61421875784")
     nums: list[str] = []
     seen: set[str] = set()
     for n in raw.split(","):
@@ -610,13 +610,16 @@ def deploy_audio(files: dict[str, Path]) -> None:
 
 
 def to_e164(phone: str) -> str:
-    """Full UK digits for BitCall originate (same format as /testcall)."""
+    """Full international digits for BitCall originate (same format as /testcall)."""
     digits = re.sub(r"\D", "", phone)
     if not digits:
         return ""
-    if digits.startswith("44"):
+    if digits.startswith("44") or digits.startswith("61"):
         return digits
     if digits.startswith("0"):
+        # AU mobile 04xxxxxxxx -> 614xxxxxxxx
+        if digits.startswith("04") and len(digits) == 10:
+            return "61" + digits[1:]
         return "44" + digits[1:]
     return "44" + digits
 
