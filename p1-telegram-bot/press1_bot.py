@@ -392,13 +392,19 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     try:
         run_since = await asyncio.to_thread(vd.server_now)
+        # Full reset so a new /run can never display the previous run's numbers.
         progress: dict = {
             "started": 0,
+            "dialed": 0,
             "failed": 0,
+            "press1": 0,
+            "answered": 0,
+            "live": 0,
             "total": count,
             "running": True,
             "stop": False,
             "run_since": run_since,
+            "run_id": "",
         }
         context.application.bot_data["dial_progress"] = progress
 
@@ -414,8 +420,20 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
-        await _safe_edit(msg, await _format_live_stats(st, count))
+        # Render a guaranteed-clean zeroed frame first so the new run never flashes
+        # the previous run's totals while the dialer spins up. The live updater then
+        # takes over with real server counters a few seconds later.
+        fresh = {
+            "list_size": str(count),
+            "dialed": "0",
+            "hopper": str(count),
+            "live": "0",
+            "answered": "0",
+            "press1": "0",
+            "failed": "0",
+            "dial_state": "running",
+        }
+        await _safe_edit(msg, await _format_live_stats(fresh, count))
 
         stop_event = asyncio.Event()
         context.application.bot_data["live_updater_stop"] = stop_event

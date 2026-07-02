@@ -12,3 +12,9 @@ __pycache__/
 .venv/
 venv/
 logs/
+# Local helper scripts that may embed tokens/secrets — never commit
+check*.sh
+push*.sh
+set_render_env.sh
+fix_out_hype.py
+p1-telegram-bot/export-ssh-key-for-render.sh
