@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import paramiko
 
+from press1_settings import DEFAULT_THREECX, THREECX_PROFILES, profile
 from press1_utils import normalize_uk
 
 HOST = os.getenv("VICIDIAL_SSH_HOST", "206.189.118.204")
@@ -50,6 +52,8 @@ DIAL_RUN_PRESS1 = "/var/lib/asterisk/press1_run_press1"
 DIAL_RUN_ANSWERED = "/var/lib/asterisk/press1_run_answered"
 DIAL_STATS_DIR = "/var/lib/asterisk/stats"
 DIAL_LOCK = "/tmp/press1_dial.lock"
+SETTINGS_PATH = "/var/lib/asterisk/press1_bot_settings.json"
+PJSIP_CONF = "/etc/asterisk/pjsip.conf"
 
 
 def _dial_done_path(run_id: str) -> str:
@@ -62,6 +66,84 @@ def _stats_answered_path(run_id: str) -> str:
 
 def _stats_press1_path(run_id: str) -> str:
     return f"{DIAL_STATS_DIR}/{run_id}/press1"
+
+
+def _default_settings() -> dict[str, str]:
+    return {"threex_target": DEFAULT_THREECX}
+
+
+def load_bot_settings() -> dict[str, str]:
+    """Read persisted bot settings from the dial server."""
+    try:
+        raw = run_remote(f"cat {SETTINGS_PATH} 2>/dev/null", timeout=15).strip()
+        if not raw:
+            return _default_settings()
+        data = json.loads(raw)
+        target = str(data.get("threex_target", DEFAULT_THREECX)).strip().lower()
+        if target not in THREECX_PROFILES:
+            target = DEFAULT_THREECX
+        return {"threex_target": target}
+    except Exception:
+        return _default_settings()
+
+
+def save_bot_settings(data: dict[str, str]) -> None:
+    target = str(data.get("threex_target", DEFAULT_THREECX)).strip().lower()
+    profile(target)  # validate
+    payload = json.dumps({"threex_target": target})
+    run_remote(
+        f"mkdir -p $(dirname {SETTINGS_PATH}); "
+        f"cat > {SETTINGS_PATH} <<'EOF'\n{payload}\nEOF\n"
+        f"chmod 644 {SETTINGS_PATH}",
+        timeout=20,
+    )
+
+
+def get_threex_target() -> str:
+    return load_bot_settings().get("threex_target", DEFAULT_THREECX)
+
+
+def apply_threex_target(profile_id: str) -> dict[str, str]:
+    """Point the Asterisk 3cx trunk at the selected 3CX and persist the choice."""
+    p = profile(profile_id)
+    contact = p["sip_contact"]
+    host = p["host"]
+    ext = p["ext"]
+    run_remote(
+        f"cp -a {PJSIP_CONF} {PJSIP_CONF}.bak.settings-$(date +%s); "
+        f"sed -i '/^\\[3cx-aor\\]/,/^\\[/ s|^contact=.*|contact=sip:{contact}:5060|' {PJSIP_CONF}; "
+        f"sed -i '/^\\[3cx\\]/,/^\\[/ s|^from_domain=.*|from_domain={contact}|' {PJSIP_CONF}; "
+        f"sed -i '/^\\[3cx-identify\\]/,/^\\[/ s|^match=.*|match={host}|' {PJSIP_CONF}; "
+        f"asterisk -rx 'pjsip reload' >/dev/null; "
+        f"mysql asterisk -e \"UPDATE vicidial_campaigns SET survey_xfer_exten='{ext}' WHERE campaign_id='{CAMPAIGN}';\"",
+        timeout=30,
+    )
+    save_bot_settings({"threex_target": profile_id})
+    return p
+
+
+def ensure_threex_target() -> dict[str, str]:
+    """Apply saved 3CX target on startup (idempotent)."""
+    target = get_threex_target()
+    return apply_threex_target(target)
+
+
+def settings_summary() -> dict[str, str]:
+    target = get_threex_target()
+    p = profile(target)
+    return {
+        "threex_target": target,
+        "threex_label": p["label"],
+        "threex_fqdn": p["fqdn"],
+        "threex_host": p["host"],
+        "threex_ext": p["ext"],
+        "sound_name": SOUND_NAME,
+        "call_gap": str(CALL_GAP_SEC),
+        "batch_size": str(BATCH_SIZE),
+        "batch_pause": str(BATCH_PAUSE_SEC),
+        "max_concurrent": str(MAX_CONCURRENT),
+        "dialer_cap": str(DIALER_CONCURRENT_CAP),
+    }
 
 
 def test_numbers() -> list[str]:

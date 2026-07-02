@@ -8,10 +8,11 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from telegram import BotCommand, Message, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.error import BadRequest, Conflict
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -19,6 +20,7 @@ from telegram.ext import (
 )
 
 import vicidial_client as vd
+from press1_settings import THREECX_PROFILES, format_settings_text
 from press1_utils import convert_audio_for_asterisk, parse_csv, parse_numbers
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -40,6 +42,7 @@ Commands:
 /run — dial loaded leads (same path as /testcall)
 /stop — stop dialing
 /testcall — ring test numbers
+/settings — 3CX target & dialer options
 /leads — lead count in session
 /clear — clear loaded numbers"""
 
@@ -299,6 +302,60 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Cleared loaded numbers.")
 
 
+def _threex_keyboard(active_id: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for pid, info in THREECX_PROFILES.items():
+        mark = " ✅" if pid == active_id else ""
+        rows.append(
+            [InlineKeyboardButton(f"{info['label']}{mark}", callback_data=f"p1_3cx:{pid}")]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
+def _settings_message() -> tuple[str, InlineKeyboardMarkup]:
+    summary = vd.settings_summary()
+    text = format_settings_text(
+        threex_id=summary["threex_target"],
+        sound_name=summary["sound_name"],
+        call_gap=float(summary["call_gap"]),
+        batch_size=int(summary["batch_size"]),
+        batch_pause=int(summary["batch_pause"]),
+        max_concurrent=int(summary["max_concurrent"]),
+    )
+    return text, _threex_keyboard(summary["threex_target"])
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    msg = await update.message.reply_text("Loading settings…")
+    try:
+        text, keyboard = await asyncio.to_thread(_settings_message)
+        await msg.edit_text(text, reply_markup=keyboard)
+    except Exception as e:
+        await msg.edit_text(f"Settings failed: {e}")
+
+
+async def on_threex_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    if not allowed(query.from_user.id if query.from_user else 0):
+        await query.answer("Access denied.", show_alert=True)
+        return
+    if not query.data.startswith("p1_3cx:"):
+        return
+    profile_id = query.data.split(":", 1)[1]
+    await query.answer("Updating 3CX target…")
+    try:
+        p = await asyncio.to_thread(vd.apply_threex_target, profile_id)
+        text, keyboard = await asyncio.to_thread(_settings_message)
+        note = f"\n\n✅ Press-1 calls now transfer to {p['label']} ({p['fqdn']})."
+        await query.edit_message_text(text + note, reply_markup=keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"3CX update failed: {e}")
+
+
 async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -466,6 +523,7 @@ async def post_init(app: Application) -> None:
             BotCommand("run", "Start campaign"),
             BotCommand("stop", "Pause campaign"),
             BotCommand("testcall", "Ring test numbers"),
+            BotCommand("settings", "3CX target & options"),
             BotCommand("leads", "Loaded lead count"),
             BotCommand("clear", "Clear loaded numbers"),
         ]
@@ -475,6 +533,11 @@ async def post_init(app: Application) -> None:
         print(f"[press1] VICIdial SSH OK: {ping.strip()[:80]}")
     except Exception as e:
         print(f"[press1] VICIdial SSH warning: {e}")
+    try:
+        p = await asyncio.to_thread(vd.ensure_threex_target)
+        print(f"[press1] 3CX target: {p['label']} ({p['fqdn']})")
+    except Exception as e:
+        print(f"[press1] 3CX settings warning: {e}")
 
 
 _conflict_logged = False
@@ -515,6 +578,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("testcall", cmd_testcall))
     app.add_handler(CommandHandler("leads", cmd_leads))
     app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CallbackQueryHandler(on_threex_choice, pattern=r"^p1_3cx:"))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.AUDIO, on_audio))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
