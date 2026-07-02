@@ -43,8 +43,10 @@ DIAL_STOP = "/tmp/press1_dial_stop"
 DIAL_LOG = "/tmp/press1_dial.log"
 DIAL_RUN_MARK = "/tmp/press1_dial_run_mark"
 DIAL_RUN_ID = "/tmp/press1_dial_run_id"
-DIAL_RUN_PRESS1 = "/tmp/press1_run_press1"
-DIAL_RUN_ANSWERED = "/tmp/press1_run_answered"
+# Written by the dialplan (System app) — must live under /var/lib/asterisk so the
+# SELinux-confined asterisk_t domain is allowed to append to them (not /tmp).
+DIAL_RUN_PRESS1 = "/var/lib/asterisk/press1_run_press1"
+DIAL_RUN_ANSWERED = "/var/lib/asterisk/press1_run_answered"
 DIAL_LOCK = "/tmp/press1_dial.lock"
 
 
@@ -177,10 +179,10 @@ def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, in
         f"cat {DIAL_STARTED} 2>/dev/null || echo 0; "
         f"cat {DIAL_FAILED} 2>/dev/null || echo 0; "
         f"cat {DIAL_RUN_ID} 2>/dev/null || echo; "
-        f"cat {DIAL_RUN_PRESS1} 2>/dev/null || echo 0; "
-        f"cat {DIAL_RUN_ANSWERED} 2>/dev/null || echo 0; "
-        f"asterisk -rx 'database get press1/run_press1' 2>/dev/null | awk -F': ' '/Value/{{print $2; ok=1}} END{{if(!ok) print 0}}'; "
-        f"asterisk -rx 'database get press1/run_answered' 2>/dev/null | awk -F': ' '/Value/{{print $2; ok=1}} END{{if(!ok) print 0}}'; "
+        f"wc -l < {DIAL_RUN_PRESS1} 2>/dev/null || echo 0; "
+        f"wc -l < {DIAL_RUN_ANSWERED} 2>/dev/null || echo 0; "
+        f"echo 0; "
+        f"echo 0; "
         f"ps aux 2>/dev/null | grep -c '[b]ash {DIAL_SCRIPT}' || echo 0; "
         f"wc -l < {DIAL_NUMBERS} 2>/dev/null || echo 0; "
         f"rid=$(cat {DIAL_RUN_ID} 2>/dev/null); "
@@ -482,32 +484,17 @@ def live_bitcall_channels() -> int:
 
 
 def _fetch_outcome_stats(run_id: str | None) -> tuple[int, int]:
-    """Press-1 xfers and human answers for the current campaign run."""
+    """Press-1 xfers and answers for the current run (one line per event, appended by dialplan)."""
     if not run_id:
         return 0, 0
     try:
         raw = run_remote(
-            f"rid=$(cat {DIAL_RUN_ID} 2>/dev/null); "
-            f"if [ \"$rid\" != \"{run_id}\" ]; then echo 0; echo 0; exit 0; fi; "
-            f"cat {DIAL_RUN_PRESS1} 2>/dev/null || echo 0; "
-            f"cat {DIAL_RUN_ANSWERED} 2>/dev/null || echo 0",
+            f"wc -l < {DIAL_RUN_PRESS1} 2>/dev/null || echo 0; "
+            f"wc -l < {DIAL_RUN_ANSWERED} 2>/dev/null || echo 0",
             timeout=20,
         ).strip().splitlines()
         press1 = int((raw[0] if raw else "0").strip().split()[-1])
         answered = int((raw[1] if len(raw) > 1 else "0").strip().split()[-1])
-        if press1 > 0 or answered > 0:
-            return press1, answered
-        # Fallback before dialplan counters exist: grep since run marker in log
-        raw2 = run_remote(
-            f"LOG=/var/log/asterisk/full; RID={run_id}; "
-            f"line=$(grep -n \"PRESS1_RUN_START $RID\" \"$LOG\" 2>/dev/null | tail -1 | cut -d: -f1); "
-            f"if [ -z \"$line\" ]; then echo 0; echo 0; exit 0; fi; "
-            f"tail -n +\"$line\" \"$LOG\" | grep -cE 'Press1Xfer|Executing \\[xfer@press1-ivr:8\\] Dial' || echo 0; "
-            f"tail -n +\"$line\" \"$LOG\" | grep -cE 'Executing \\[ivr@press1-ivr:1\\] Answer.*bitcall' || echo 0",
-            timeout=30,
-        ).strip().splitlines()
-        press1 = int((raw2[0] if raw2 else "0").strip().split()[-1])
-        answered = int((raw2[1] if len(raw2) > 1 else "0").strip().split()[-1])
         return press1, answered
     except Exception:
         return 0, 0
@@ -667,9 +654,11 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         f"mysql asterisk -e \"UPDATE vicidial_campaigns SET active='N' WHERE campaign_id='{CAMPAIGN}'\" 2>/dev/null; "
         f"rm -f {DIAL_STOP}; "
         f"echo 0 > {DIAL_STARTED}; echo 0 > {DIAL_FAILED}; "
-        f"echo 0 > {DIAL_RUN_PRESS1}; echo 0 > {DIAL_RUN_ANSWERED}; "
-        f"asterisk -rx 'database put press1 run_press1 0' 2>/dev/null; "
-        f"asterisk -rx 'database put press1 run_answered 0' 2>/dev/null; "
+        # Answered/press-1 counters are append-logs (one line per event) written by
+        # the dialplan; truncate to empty and make world-writable for the asterisk user.
+        f": > {DIAL_RUN_PRESS1}; : > {DIAL_RUN_ANSWERED}; "
+        f"chown asterisk:asterisk {DIAL_RUN_PRESS1} {DIAL_RUN_ANSWERED} 2>/dev/null; "
+        f"chmod 664 {DIAL_RUN_PRESS1} {DIAL_RUN_ANSWERED} 2>/dev/null; "
         f"echo {run_id} > {DIAL_RUN_ID}; "
         f"rm -f /tmp/press1_dial_done_{run_id}.txt; "
         f"echo {len(numbers)} > {DIAL_TOTAL}; "
