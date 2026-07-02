@@ -27,6 +27,7 @@ SOUND_DIRS = (
 )
 SERVER_IP = os.getenv("VICIDIAL_SERVER_IP", "206.189.118.204")
 MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "100"))
+DIALER_CONCURRENT_CAP = int(os.getenv("VICIDIAL_DIALER_CAP", "0"))
 BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "100"))
 BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "2"))
 CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.5"))
@@ -138,7 +139,7 @@ DONE=/tmp/press1_dial_done_${{RUNID}}.txt
 BATCH={batch}
 PAUSE={pause}
 GAP={gap}
-CAP={MAX_CONCURRENT}
+CAP={DIALER_CONCURRENT_CAP}
 exec 9>"$LOCK"
 flock -n 9 || {{ echo "$(date '+%Y-%m-%d %H:%M:%S') skip duplicate dialer (locked)" >>"$LOG"; exit 0; }}
 touch "$DONE"
@@ -148,8 +149,9 @@ while IFS= read -r num || [ -n "$num" ]; do
   num=$(echo "$num" | tr -d '\\r' | tr -d ' ')
   [ -z "$num" ] && continue
   grep -qxF "$num" "$DONE" 2>/dev/null && continue
-  # Concurrency gate: never exceed CAP simultaneous live BitCall channels.
-  while :; do
+  # Optional concurrency gate. CAP=0 means unlimited provider capacity, so only
+  # the placement rate (GAP/BATCH/PAUSE) controls dialing speed.
+  while [ "$CAP" -gt 0 ]; do
     [ -f "$STOP" ] && exit 0
     live=$(asterisk -rx "core show channels concise" 2>/dev/null | grep -ci 'bitcall')
     [ "$live" -lt "$CAP" ] && break
@@ -695,7 +697,7 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         f"sed -i 's/^GAP=.*/GAP={CALL_GAP_SEC}/' {DIAL_SCRIPT}; "
         f"sed -i 's/^BATCH=.*/BATCH={BATCH_SIZE}/' {DIAL_SCRIPT}; "
         f"sed -i 's/^PAUSE=.*/PAUSE={BATCH_PAUSE_SEC}/' {DIAL_SCRIPT}; "
-        f"sed -i 's/^CAP=.*/CAP={MAX_CONCURRENT}/' {DIAL_SCRIPT}",
+        f"sed -i 's/^CAP=.*/CAP={DIALER_CONCURRENT_CAP}/' {DIAL_SCRIPT}",
         timeout=15,
     )
     _start_dial_script()
