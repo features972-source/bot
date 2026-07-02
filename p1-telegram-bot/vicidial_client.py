@@ -35,6 +35,7 @@ BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "0"))
 CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.2"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
 CPS = int(os.getenv("VICIDIAL_CPS", "20"))
+OUTBOUND_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038969244")) or "442038969244"
 MIN_PHONE_DIGITS = 9
 
 DIAL_SCRIPT = "/tmp/press1_dial_run.sh"
@@ -235,6 +236,9 @@ BATCH={batch}
 PAUSE={pause}
 GAP={gap}
 CAP={DIALER_CONCURRENT_CAP}
+CALLERID={OUTBOUND_CALLER_ID}
+SPOOLDIR=/var/spool/asterisk/outgoing
+TMPDIR=/var/spool/asterisk/tmp
 exec 9>"$LOCK"
 flock -n 9 || {{ echo "$(date '+%Y-%m-%d %H:%M:%S') skip duplicate dialer (locked)" >>"$LOG"; exit 0; }}
 # This dialer owns the lock, so it is the single source of truth for THIS run.
@@ -269,7 +273,23 @@ while IFS= read -r num || [ -n "$num" ]; do
   digits=$(echo "$num" | tr -cd '0-9')
   asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >>"$LOG" 2>&1
   asterisk -rx "database put press1 lead ${{num}}" >>"$LOG" 2>&1
-  if asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr" >>"$LOG" 2>&1; then
+  callfile="$TMPDIR/press1_${{RUNID}}_${{digits}}_$$.call"
+  mkdir -p "$TMPDIR" "$SPOOLDIR" 2>/dev/null
+  if cat > "$callfile" <<CALLFILE
+Channel: PJSIP/${{num}}@bitcall
+CallerID: "${{CALLERID}}" <${{CALLERID}}>
+MaxRetries: 0
+RetryTime: 60
+WaitTime: 30
+Context: press1-ivr
+Extension: ${{num}}
+Priority: 1
+Setvar: LEADNUM=${{num}}
+CALLFILE
+    chown asterisk:asterisk "$callfile" 2>/dev/null
+    chmod 0640 "$callfile" 2>/dev/null
+    mv "$callfile" "$SPOOLDIR/" 2>>"$LOG"
+  then
     echo "$num" >>"$DONE"
     s=$(wc -l < "$DONE" 2>/dev/null || echo 0); echo "$s" > "$STARTED"
     echo "$(date '+%Y-%m-%d %H:%M:%S') ok $num" >>"$LOG"
