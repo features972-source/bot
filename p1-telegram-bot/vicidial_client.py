@@ -802,6 +802,17 @@ def _campaign_counters() -> tuple[int, int, int, int]:
         return 0, 0, 0, 0
 
 
+def _dial_script_supports_pause() -> bool:
+    try:
+        raw = run_remote(
+            f"grep -c wait_if_paused {DIAL_SCRIPT} 2>/dev/null || echo 0",
+            timeout=15,
+        ).strip().split()[-1]
+        return int(raw or 0) > 0
+    except Exception:
+        return False
+
+
 def pause_dial_campaign() -> dict[str, str]:
     """Pause placing new calls; live calls continue. Does not kill the dialer."""
     running = _dialer_process_count()
@@ -810,7 +821,11 @@ def pause_dial_campaign() -> dict[str, str]:
         raise RuntimeError("No active campaign to pause")
     if running < 1 and left > 0:
         raise RuntimeError("Campaign stalled — use /unpause to resume dialing")
-    run_remote(f"touch {DIAL_PAUSE}", timeout=15)
+    if _dial_script_supports_pause():
+        run_remote(f"touch {DIAL_PAUSE}", timeout=15)
+    else:
+        # Older dialer scripts ignore PAUSEFILE — stop gracefully without pkill.
+        run_remote(f"touch {DIAL_STOP}", timeout=15)
     return {
         "paused": "Y",
         "dialed": str(started),
