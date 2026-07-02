@@ -704,6 +704,17 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     )
     _start_dial_script()
 
+    # Trust the server's run_id as the source of truth for monitoring. The dialer
+    # reads the run_id from the file at startup; reading it back here guarantees the
+    # bot's expected run_id matches what the dialer actually used, so a successful
+    # run can never be zeroed by a run_id mismatch.
+    try:
+        actual = run_remote(f"cat {DIAL_RUN_ID} 2>/dev/null", timeout=15).strip().split()
+        if actual and actual[-1]:
+            progress["run_id"] = actual[-1]
+    except Exception:
+        pass
+
 
 def dial_leads(phones: list[str], progress: dict) -> None:
     """Alias: upload + start on server (monitoring is via get_dial_stats)."""
