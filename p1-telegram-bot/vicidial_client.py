@@ -767,9 +767,15 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         f"mysql asterisk -e \"UPDATE vicidial_campaigns SET active='N' WHERE campaign_id='{CAMPAIGN}'\" 2>/dev/null; "
         f"rm -f {DIAL_STOP}; "
         f"echo 0 > {DIAL_STARTED}; echo 0 > {DIAL_FAILED}; "
+        # Self-clean: drop stale per-run dirs, any bare root counters, and the
+        # accumulated per-number run tags so stats always start from a clean slate.
+        f"mkdir -p {DIAL_STATS_DIR}; "
+        f"rm -f {DIAL_STATS_DIR}/answered {DIAL_STATS_DIR}/press1 2>/dev/null; "
+        f"find {DIAL_STATS_DIR} -mindepth 1 -maxdepth 1 -type d ! -name {run_id} -exec rm -rf {{}} + 2>/dev/null; "
+        f"asterisk -rx 'database deltree press1/runs' >/dev/null 2>&1; "
         f"mkdir -p {DIAL_STATS_DIR}/{run_id}; "
         f": > {_stats_answered_path(run_id)}; : > {_stats_press1_path(run_id)}; "
-        f"chown -R asterisk:asterisk {DIAL_STATS_DIR}/{run_id} 2>/dev/null; "
+        f"chown -R asterisk:asterisk {DIAL_STATS_DIR} 2>/dev/null; "
         f"chmod 664 {_stats_answered_path(run_id)} {_stats_press1_path(run_id)} 2>/dev/null; "
         # Legacy global counters (kept empty for backwards compatibility).
         f": > {DIAL_RUN_PRESS1}; : > {DIAL_RUN_ANSWERED}; "
