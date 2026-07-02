@@ -48,11 +48,20 @@ DIAL_RUN_ID = "/tmp/press1_dial_run_id"
 # SELinux-confined asterisk_t domain is allowed to append to them (not /tmp).
 DIAL_RUN_PRESS1 = "/var/lib/asterisk/press1_run_press1"
 DIAL_RUN_ANSWERED = "/var/lib/asterisk/press1_run_answered"
+DIAL_STATS_DIR = "/var/lib/asterisk/stats"
 DIAL_LOCK = "/tmp/press1_dial.lock"
 
 
 def _dial_done_path(run_id: str) -> str:
     return f"/tmp/press1_dial_done_{run_id}.txt"
+
+
+def _stats_answered_path(run_id: str) -> str:
+    return f"{DIAL_STATS_DIR}/{run_id}/answered"
+
+
+def _stats_press1_path(run_id: str) -> str:
+    return f"{DIAL_STATS_DIR}/{run_id}/press1"
 
 
 def test_numbers() -> list[str]:
@@ -157,6 +166,8 @@ while IFS= read -r num || [ -n "$num" ]; do
     [ "$live" -lt "$CAP" ] && break
     sleep 1
   done
+  digits=$(echo "$num" | tr -cd '0-9')
+  asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >>"$LOG" 2>&1
   asterisk -rx "database put press1 lead ${{num}}" >>"$LOG" 2>&1
   if asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr" >>"$LOG" 2>&1; then
     echo "$num" >>"$DONE"
@@ -181,13 +192,19 @@ exit 0
 
 def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, int | bool | str]:
     """Counter files + pgrep + live channels in one SSH round-trip."""
+    if expected_run_id:
+        press1_path = _stats_press1_path(expected_run_id)
+        answered_path = _stats_answered_path(expected_run_id)
+    else:
+        press1_path = DIAL_RUN_PRESS1
+        answered_path = DIAL_RUN_ANSWERED
     raw = run_remote(
         f"cat {DIAL_TOTAL} 2>/dev/null || echo 0; "
         f"cat {DIAL_STARTED} 2>/dev/null || echo 0; "
         f"cat {DIAL_FAILED} 2>/dev/null || echo 0; "
         f"cat {DIAL_RUN_ID} 2>/dev/null || echo; "
-        f"wc -l < {DIAL_RUN_PRESS1} 2>/dev/null || echo 0; "
-        f"wc -l < {DIAL_RUN_ANSWERED} 2>/dev/null || echo 0; "
+        f"wc -l < {press1_path} 2>/dev/null || echo 0; "
+        f"wc -l < {answered_path} 2>/dev/null || echo 0; "
         f"echo 0; "
         f"echo 0; "
         f"ps aux 2>/dev/null | grep -c '[b]ash {DIAL_SCRIPT}' || echo 0; "
@@ -216,10 +233,10 @@ def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, in
     answered = max(answered_file, answered_ast)
     script_running = int(vals[8] or 0) > 0
 
+  # Empty server run_id must not match — otherwise stale global counters bleed in.
     run_match = (
         not expected_run_id
-        or not server_run_id
-        or server_run_id == expected_run_id
+        or (bool(server_run_id) and server_run_id == expected_run_id)
     )
     if not run_match:
         started_raw = 0
@@ -497,8 +514,8 @@ def _fetch_outcome_stats(run_id: str | None) -> tuple[int, int]:
         return 0, 0
     try:
         raw = run_remote(
-            f"wc -l < {DIAL_RUN_PRESS1} 2>/dev/null || echo 0; "
-            f"wc -l < {DIAL_RUN_ANSWERED} 2>/dev/null || echo 0",
+            f"wc -l < {_stats_press1_path(run_id)} 2>/dev/null || echo 0; "
+            f"wc -l < {_stats_answered_path(run_id)} 2>/dev/null || echo 0",
             timeout=20,
         ).strip().splitlines()
         press1 = int((raw[0] if raw else "0").strip().split()[-1])
@@ -548,6 +565,12 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
                 press1, answered = _fetch_outcome_stats(run_id)
         elif not run_id:
             press1, answered = 0, 0
+
+        # Answered/press-1 can never exceed dialed for the current run.
+        if started > 0:
+            answered = min(answered, started)
+        if answered > 0:
+            press1 = min(press1, answered)
 
         if dial_state == "running":
             prog["running"] = True
@@ -662,8 +685,11 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         f"mysql asterisk -e \"UPDATE vicidial_campaigns SET active='N' WHERE campaign_id='{CAMPAIGN}'\" 2>/dev/null; "
         f"rm -f {DIAL_STOP}; "
         f"echo 0 > {DIAL_STARTED}; echo 0 > {DIAL_FAILED}; "
-        # Answered/press-1 counters are append-logs (one line per event) written by
-        # the dialplan; truncate to empty and make world-writable for the asterisk user.
+        f"mkdir -p {DIAL_STATS_DIR}/{run_id}; "
+        f": > {_stats_answered_path(run_id)}; : > {_stats_press1_path(run_id)}; "
+        f"chown -R asterisk:asterisk {DIAL_STATS_DIR}/{run_id} 2>/dev/null; "
+        f"chmod 664 {_stats_answered_path(run_id)} {_stats_press1_path(run_id)} 2>/dev/null; "
+        # Legacy global counters (kept empty for backwards compatibility).
         f": > {DIAL_RUN_PRESS1}; : > {DIAL_RUN_ANSWERED}; "
         f"chown asterisk:asterisk {DIAL_RUN_PRESS1} {DIAL_RUN_ANSWERED} 2>/dev/null; "
         f"chmod 664 {DIAL_RUN_PRESS1} {DIAL_RUN_ANSWERED} 2>/dev/null; "
