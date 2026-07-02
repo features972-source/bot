@@ -13,6 +13,14 @@ THREECX_PROFILES: dict[str, dict[str, str]] = {
         "sip_contact": "146.190.173.110",
         "ext": "8000",
     },
+    "4wf": {
+        "id": "4wf",
+        "label": "4wf 3CX",
+        "fqdn": "142.93.125.92",
+        "host": "142.93.125.92",
+        "sip_contact": "142.93.125.92",
+        "ext": "8000",
+    },
     "q2premium": {
         "id": "q2premium",
         "label": "Q2 Premium",
