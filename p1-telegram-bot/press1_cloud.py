@@ -34,7 +34,7 @@ def start_health_server() -> None:
 
     @app.get("/")
     def root():
-        return jsonify({"ok": True, "service": "p1-telegram-bot", "build": "stats-run-counters"})
+        return jsonify({"ok": True, "service": "p1-telegram-bot", "build": "stats-run-reset-v3"})
 
     from werkzeug.serving import make_server
 
@@ -54,7 +54,7 @@ def main() -> None:
     app = build_application()
     logger.info("Press-1 VICIdial bot polling…")
     app.run_polling(
-        allowed_updates=["message"],
+        allowed_updates=["message", "callback_query"],
         drop_pending_updates=True,
         poll_interval=1.0,
         timeout=30,
