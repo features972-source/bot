@@ -138,6 +138,7 @@ DONE=/tmp/press1_dial_done_${{RUNID}}.txt
 BATCH={batch}
 PAUSE={pause}
 GAP={gap}
+CAP={MAX_CONCURRENT}
 exec 9>"$LOCK"
 flock -n 9 || {{ echo "$(date '+%Y-%m-%d %H:%M:%S') skip duplicate dialer (locked)" >>"$LOG"; exit 0; }}
 touch "$DONE"
@@ -147,6 +148,13 @@ while IFS= read -r num || [ -n "$num" ]; do
   num=$(echo "$num" | tr -d '\\r' | tr -d ' ')
   [ -z "$num" ] && continue
   grep -qxF "$num" "$DONE" 2>/dev/null && continue
+  # Concurrency gate: never exceed CAP simultaneous live BitCall channels.
+  while :; do
+    [ -f "$STOP" ] && exit 0
+    live=$(asterisk -rx "core show channels concise" 2>/dev/null | grep -ci 'bitcall')
+    [ "$live" -lt "$CAP" ] && break
+    sleep 1
+  done
   asterisk -rx "database put press1 lead ${{num}}" >>"$LOG" 2>&1
   if asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr" >>"$LOG" 2>&1; then
     echo "$num" >>"$DONE"
@@ -686,7 +694,8 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     run_remote(
         f"sed -i 's/^GAP=.*/GAP={CALL_GAP_SEC}/' {DIAL_SCRIPT}; "
         f"sed -i 's/^BATCH=.*/BATCH={BATCH_SIZE}/' {DIAL_SCRIPT}; "
-        f"sed -i 's/^PAUSE=.*/PAUSE={BATCH_PAUSE_SEC}/' {DIAL_SCRIPT}",
+        f"sed -i 's/^PAUSE=.*/PAUSE={BATCH_PAUSE_SEC}/' {DIAL_SCRIPT}; "
+        f"sed -i 's/^CAP=.*/CAP={MAX_CONCURRENT}/' {DIAL_SCRIPT}",
         timeout=15,
     )
     _start_dial_script()
