@@ -5,6 +5,14 @@ from __future__ import annotations
 import os
 
 THREECX_PROFILES: dict[str, dict[str, str]] = {
+    "swapofica": {
+        "id": "swapofica",
+        "label": "Swapofica 3CX",
+        "fqdn": "swapofica.ga.3cx.us",
+        "host": "146.190.173.110",
+        "sip_contact": "146.190.173.110",
+        "ext": "8000",
+    },
     "q2premium": {
         "id": "q2premium",
         "label": "Q2 Premium",
@@ -23,7 +31,7 @@ THREECX_PROFILES: dict[str, dict[str, str]] = {
     },
 }
 
-DEFAULT_THREECX = os.getenv("PRESS1_THREECX_DEFAULT", "q2premium")
+DEFAULT_THREECX = os.getenv("PRESS1_THREECX_DEFAULT", "swapofica")
 
 
 def profile(profile_id: str) -> dict[str, str]:
