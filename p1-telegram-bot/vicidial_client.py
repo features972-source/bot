@@ -226,6 +226,7 @@ def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, in
         failed = 0
         press1 = 0
         answered = 0
+        done_count = 0
 
     started = min(max(started_raw, done_count), total) if total > 0 else max(started_raw, done_count)
     live = 0
@@ -667,6 +668,7 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         f"chown asterisk:asterisk {DIAL_RUN_PRESS1} {DIAL_RUN_ANSWERED} 2>/dev/null; "
         f"chmod 664 {DIAL_RUN_PRESS1} {DIAL_RUN_ANSWERED} 2>/dev/null; "
         f"echo {run_id} > {DIAL_RUN_ID}; "
+        f"rm -f /tmp/press1_dial_done_*.txt; "
         f"rm -f /tmp/press1_dial_done_{run_id}.txt; "
         f"echo {len(numbers)} > {DIAL_TOTAL}; "
         f"date '+%Y-%m-%d %H:%M:%S' > {DIAL_RUN_MARK}; "
