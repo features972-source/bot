@@ -37,7 +37,7 @@ services:
       - key: VICIDIAL_BATCH_SIZE
         value: "100"
       - key: VICIDIAL_CALL_GAP_SEC
-        value: "0.05"
+        value: "0.2"
       - key: VICIDIAL_BATCH_PAUSE_SEC
         value: "0"
       - key: VICIDIAL_CPS
