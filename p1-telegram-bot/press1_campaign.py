@@ -147,7 +147,6 @@ def format_campaign_body(
     batch_pause: int = 0,
     frame: int = 0,
     finished: bool = False,
-    include_batch: bool = True,
 ) -> str:
     """Return the campaign status as a single HTML blockquote card."""
     progress = progress or {}
@@ -162,11 +161,6 @@ def format_campaign_body(
     pct = (dialed * 100 // total) if total > 0 else 0
 
     lines: list[str] = [ui.esc(f"{gauge(pct)}  {pct}%  ·  {dialed}/{total}")]
-    if include_batch and dial_state in ("running", "paused", "finishing") and total > 0:
-        current, total_batches = batch_numbers(dialed, total, batch_size)
-        if total_batches > 0:
-            icon = _ANIM_FRAMES[frame % len(_ANIM_FRAMES)]
-            lines.append(ui.esc(f"{icon} batch {current}/{total_batches}"))
 
     lines.append("")
     lines.append(ui.bullet("Dialed", dialed, icon="📞"))
@@ -257,7 +251,6 @@ def format_dashboard(
         batch_pause=batch_pause,
         frame=frame,
         finished=dial_state in ("finished", "stalled", "idle") and dialed == 0,
-        include_batch=dial_state in ("running", "paused", "finishing"),
     )
     config = ui.card("⚙️  CONFIG", config_lines)
     return f"{body}\n{config}\n<i>refresh 3s · /stop to end</i>"
