@@ -59,26 +59,38 @@ def normalize_uk(phone: str) -> tuple[str, str]:
 
 
 def convert_audio_for_asterisk(src: Path, dest_dir: Path, stem: str) -> dict[str, Path]:
+    """Convert to 8 kHz telephony formats with clip-safe processing (no loudnorm)."""
     dest_dir.mkdir(parents=True, exist_ok=True)
-    base_cmd = ["ffmpeg", "-y", "-i", str(src), "-ar", "8000", "-ac", "1"]
-    formats = {
-        "wav": ["-acodec", "pcm_s16le"],
-        "alaw": ["-acodec", "pcm_alaw", "-f", "alaw"],
-        "ulaw": ["-acodec", "pcm_mulaw", "-f", "mulaw"],
-    }
-    outputs: dict[str, Path] = {}
-    for ext, codec_args in formats.items():
+    wav = dest_dir / f"{stem}.wav"
+    # Quiet MP3s: fixed +8 dB after phone-band filter; no dynamics/limiter (avoids crackle).
+    af = "aresample=8000:resampler=soxr:precision=28,highpass=f=200,lowpass=f=3400,volume=8dB"
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", str(src),
+            "-af", af,
+            "-ar", "8000", "-ac", "1",
+            "-sample_fmt", "s16", "-acodec", "pcm_s16le",
+            "-dither_method", "none",
+            str(wav),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "ffmpeg WAV conversion failed")
+
+    outputs: dict[str, Path] = {"wav": wav}
+    for ext, codec_args in (
+        ("alaw", ["-acodec", "pcm_alaw", "-f", "alaw"]),
+        ("ulaw", ["-acodec", "pcm_mulaw", "-f", "mulaw"]),
+        ("sln", ["-f", "s16le"]),
+    ):
         dest = dest_dir / f"{stem}.{ext}"
         proc = subprocess.run(
-            base_cmd + codec_args + [str(dest)],
+            ["ffmpeg", "-y", "-i", str(wav), "-ar", "8000", "-ac", "1"] + codec_args + [str(dest)],
             capture_output=True,
             text=True,
         )
-        if proc.returncode != 0:
-            if ext == "wav":
-                raise RuntimeError(proc.stderr.strip() or "ffmpeg failed")
-            continue
-        outputs[ext] = dest
-    if "wav" not in outputs:
-        raise RuntimeError("WAV conversion failed")
+        if proc.returncode == 0:
+            outputs[ext] = dest
     return outputs

@@ -773,11 +773,15 @@ def deploy_audio(files: dict[str, Path]) -> None:
                 sftp.put(str(local), remote)
         sftp.close()
     globs = " ".join(f"{d}/{SOUND_NAME}.*" for d in SOUND_DIRS)
-    run_remote(f"chown asterisk:asterisk {globs} 2>/dev/null; chmod 644 {globs}")
+    run_remote(
+        f"chown asterisk:asterisk {globs} 2>/dev/null; chmod 644 {globs}; "
+        f"for d in {' '.join(SOUND_DIRS)}; do "
+        f"rm -f $d/{SOUND_NAME}.gsm $d/{SOUND_NAME}.g722 2>/dev/null; done; "
+        f"asterisk -rx 'core reload' >/dev/null 2>&1 || asterisk -rx 'dialplan reload' >/dev/null"
+    )
     mysql(
         f"UPDATE vicidial_campaigns SET survey_first_audio_file='{SOUND_NAME}' WHERE campaign_id='{CAMPAIGN}';"
     )
-    run_remote("asterisk -rx 'dialplan reload'")
 
 
 def to_e164(phone: str) -> str:

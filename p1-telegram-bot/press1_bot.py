@@ -33,11 +33,11 @@ ALLOWED = {
 HELP = """Press-1 dialer (BitCall + press1-ivr)
 
 Send:
-• Voice or MP3/WAV — IVR message (press 1)
 • Numbers or .csv / .txt — lead list
 
 Commands:
 /start — this help
+/audio — change IVR message (then send MP3/WAV/voice, or reply /audio to a file)
 /status — live calls & progress
 /run — dial loaded leads (same path as /testcall)
 /pause — pause placing new calls (live calls continue)
@@ -492,6 +492,30 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(f"Run failed: {e}")
 
 
+_AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".opus", ".flac", ".aac")
+
+
+def _message_has_audio(msg: Message) -> bool:
+    if msg.voice or msg.audio:
+        return True
+    doc = msg.document
+    if not doc or not doc.file_name:
+        return False
+    return doc.file_name.lower().endswith(_AUDIO_EXTS)
+
+
+async def _download_audio_message(msg: Message, dest: Path) -> None:
+    if msg.voice:
+        tg_file = await msg.voice.get_file()
+    elif msg.audio:
+        tg_file = await msg.audio.get_file()
+    elif msg.document:
+        tg_file = await msg.document.get_file()
+    else:
+        raise ValueError("No audio in message")
+    await tg_file.download_to_drive(str(dest))
+
+
 async def _save_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, dest: Path) -> None:
     msg = await update.message.reply_text("Converting and uploading audio…")
     try:
@@ -503,33 +527,65 @@ async def _save_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, dest: 
                 vd.SOUND_NAME,
             )
             await asyncio.to_thread(vd.deploy_audio, files)
-        await msg.edit_text(f"Audio updated ({vd.SOUND_NAME}). New calls will use it.")
+        context.user_data.pop("awaiting_ivr_audio", None)
+        await msg.edit_text(
+            f"✅ IVR audio updated ({vd.SOUND_NAME}).\n"
+            "New answered calls will play this message after the 2s pause."
+        )
     except Exception as e:
         await msg.edit_text(f"Audio upload failed: {e}")
     finally:
         dest.unlink(missing_ok=True)
 
 
+async def _deploy_ivr_from_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, source: Message
+) -> None:
+    if not _message_has_audio(source):
+        await update.message.reply_text(
+            "That message has no audio. Send MP3, WAV, M4A, OGG, or a voice note."
+        )
+        return
+    if source.voice:
+        dest = Path(tempfile.gettempdir()) / f"voice_{source.message_id}.ogg"
+    elif source.audio:
+        dest = Path(tempfile.gettempdir()) / f"audio_{source.message_id}.mp3"
+    else:
+        dest = Path(tempfile.gettempdir()) / source.document.file_name
+    await _download_audio_message(source, dest)
+    await _save_audio(update, context, dest)
+
+
+async def cmd_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update):
+        return
+    replied = update.message.reply_to_message
+    if replied and _message_has_audio(replied):
+        await _deploy_ivr_from_message(update, context, replied)
+        return
+    context.user_data["awaiting_ivr_audio"] = True
+    await update.message.reply_text(
+        "🔊 Change IVR audio\n\n"
+        "Send me an MP3, WAV, M4A, OGG, or voice note now.\n\n"
+        "Or reply to an audio file with /audio.\n\n"
+        "Tip: mono voice prompts sound best on phone lines."
+    )
+
+
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
-    tg_file = await update.message.voice.get_file()
-    dest = Path(tempfile.gettempdir()) / f"voice_{update.message.message_id}.ogg"
-    await tg_file.download_to_drive(str(dest))
-    await _save_audio(update, context, dest)
+    if not context.user_data.get("awaiting_ivr_audio"):
+        return
+    await _deploy_ivr_from_message(update, context, update.message)
 
 
 async def on_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
-    attachment = update.message.audio or update.message.document
-    if not attachment:
+    if not context.user_data.get("awaiting_ivr_audio"):
         return
-    name = getattr(attachment, "file_name", None) or f"audio_{update.message.message_id}"
-    tg_file = await attachment.get_file()
-    dest = Path(tempfile.gettempdir()) / name
-    await tg_file.download_to_drive(str(dest))
-    await _save_audio(update, context, dest)
+    await _deploy_ivr_from_message(update, context, update.message)
 
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -539,8 +595,10 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not doc or not doc.file_name:
         return
     name = doc.file_name.lower()
-    if name.endswith((".mp3", ".wav", ".m4a", ".ogg")):
-        await on_audio(update, context)
+    if name.endswith(_AUDIO_EXTS):
+        if not context.user_data.get("awaiting_ivr_audio"):
+            return
+        await _deploy_ivr_from_message(update, context, update.message)
         return
     if not name.endswith((".csv", ".txt")):
         return
@@ -617,6 +675,7 @@ async def post_init(app: Application) -> None:
     await app.bot.set_my_commands(
         [
             BotCommand("start", "Help"),
+            BotCommand("audio", "Change IVR audio"),
             BotCommand("status", "Hopper & live calls"),
             BotCommand("run", "Start campaign"),
             BotCommand("pause", "Pause campaign"),
@@ -692,7 +751,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("testcall", cmd_testcall))
     app.add_handler(CommandHandler("leads", cmd_leads))
     app.add_handler(CommandHandler("clear", cmd_clear))
-    app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CommandHandler("audio", cmd_audio))
+    app.add_handler(CommandHandler("setaudio", cmd_audio))
     app.add_handler(CallbackQueryHandler(on_threex_choice, pattern=r"^p1_3cx:"))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.AUDIO, on_audio))
