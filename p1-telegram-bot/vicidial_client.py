@@ -148,7 +148,7 @@ exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{LEADNUM}})}})
  same => n,Goto(ivr,1)
 
 exten => ivr,1,Answer()
- same => n,Wait(0.5)
+ same => n,Wait(2)
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{DB(press1/lead)}})}})}})
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{CALLERID(dnid)}})}})}})
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{PJSIP_HEADER(read,To)}})}})}})
