@@ -1,16 +1,29 @@
-"""Campaign dashboard formatting, ETA prediction, and progress animation."""
+"""Campaign dashboard formatting, ETA prediction, and progress animation.
+
+All output is Telegram HTML (blockquote cards). See press1_ui for helpers.
+"""
 
 from __future__ import annotations
 
 import time
 
+import press1_ui as ui
+
 _ANIM_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_PULSE_FRAMES = ("🔴", "🟠", "🟡", "🟢")
 
 
 def progress_bar(pct: int, width: int = 14) -> str:
     pct = max(0, min(100, pct))
     filled = int(width * pct / 100)
     return "█" * filled + "░" * (width - filled)
+
+
+def gauge(pct: int, width: int = 12) -> str:
+    """Segmented control-room gauge, e.g. ▰▰▰▰▰▰▱▱▱▱▱▱."""
+    pct = max(0, min(100, pct))
+    filled = int(round(width * pct / 100))
+    return "▰" * filled + "▱" * (width - filled)
 
 
 def batch_numbers(dialed: int, total: int, batch_size: int) -> tuple[int, int]:
@@ -113,6 +126,17 @@ def predict_eta(
     return eta, forecast
 
 
+def _header(dial_state: str, total: int, finished: bool, frame: int) -> str:
+    if finished or dial_state in ("finished", "stalled"):
+        return f"✅  CAMPAIGN COMPLETE  ·  {total} leads"
+    if dial_state == "finishing":
+        return "🟡  FINISHING  ·  calls in flight"
+    if dial_state == "paused":
+        return "⏸  PAUSED  ·  live calls continue"
+    pulse = _PULSE_FRAMES[frame % len(_PULSE_FRAMES)]
+    return f"{pulse}  LIVE CAMPAIGN  ·  {total} leads"
+
+
 def format_campaign_body(
     st: dict[str, str],
     total_leads: int,
@@ -125,6 +149,7 @@ def format_campaign_body(
     finished: bool = False,
     include_batch: bool = True,
 ) -> str:
+    """Return the campaign status as a single HTML blockquote card."""
     progress = progress or {}
     total = int(st.get("list_size", 0) or 0) or total_leads
     dialed = int(st.get("dialed", 0) or 0)
@@ -136,37 +161,29 @@ def format_campaign_body(
     dial_state = st.get("dial_state", "")
     pct = (dialed * 100 // total) if total > 0 else 0
 
-    lines: list[str] = []
-    if finished or dial_state in ("finished", "stalled"):
-        lines.append("✅ Campaign finished\n")
-    elif dial_state == "finishing":
-        lines.append(f"🟡 Campaign finishing — {total} leads\n")
-    else:
-        lines.append(f"📊 Campaign live — {total} leads\n")
-
-    lines.append(f"{progress_bar(pct)}  {pct}%  ·  {dialed}/{total}")
+    lines: list[str] = [ui.esc(f"{gauge(pct)}  {pct}%  ·  {dialed}/{total}")]
     if include_batch and dial_state in ("running", "paused", "finishing") and total > 0:
-        batch_line = animated_batch_line(dialed, total, batch_size, frame)
-        if batch_line:
-            lines.append(batch_line)
+        current, total_batches = batch_numbers(dialed, total, batch_size)
+        if total_batches > 0:
+            icon = _ANIM_FRAMES[frame % len(_ANIM_FRAMES)]
+            lines.append(ui.esc(f"{icon} batch {current}/{total_batches}"))
 
-    lines.extend(
-        [
-            "",
-            f"📞 Dialed: {dialed}",
-            f"⏳ Left: {hopper}",
-            f"📡 Live now: {live}",
-            f"✅ Answered: {answered}",
-            f"🔥 Press-1: {press1}",
-        ]
-    )
-    if failed > 0:
-        lines.append(f"❌ Failed: {failed}")
+    lines.append("")
+    lines.append(ui.bullet("Dialed", dialed, icon="📞"))
+    lines.append(ui.bullet("Live now", live, icon="📡"))
+    lines.append(ui.bullet("Waiting", hopper, icon="⏳"))
 
+    lines.append("")
     if dialed > 0:
         ans_pct = answered * 100 / dialed
         p1_pct = press1 * 100 / dialed
-        lines.append(f"\n📈 Answer {ans_pct:.1f}%  ·  P1 {p1_pct:.1f}%")
+        lines.append(ui.bullet("Answered", answered, icon="✅", suffix=f"  ({ans_pct:.0f}%)"))
+        lines.append(ui.bullet("Press-1", press1, icon="🔥", suffix=f"  ({p1_pct:.1f}%)"))
+    else:
+        lines.append(ui.bullet("Answered", answered, icon="✅"))
+        lines.append(ui.bullet("Press-1", press1, icon="🔥"))
+    if failed > 0:
+        lines.append(ui.bullet("Failed", failed, icon="❌"))
 
     eta, forecast = predict_eta(
         dialed=dialed,
@@ -181,12 +198,12 @@ def format_campaign_body(
         dial_state=dial_state,
     )
     if eta and not finished:
-        eta_line = f"⏱ ETA {eta}"
+        lines.append("")
+        lines.append(ui.bullet("ETA", eta, icon="⏱"))
         if forecast:
-            eta_line += f"  ·  Expected press-1s: {forecast}"
-        lines.append(eta_line)
+            lines.append(ui.bullet("Forecast press-1s", forecast, icon="🎯"))
 
-    return "\n".join(lines)
+    return ui.card(_header(dial_state, total, finished, frame), lines)
 
 
 def format_dashboard(
@@ -207,27 +224,30 @@ def format_dashboard(
     dial_state = st.get("dial_state", "idle")
     total = int(st.get("list_size", 0) or 0) or total_leads
     dialed = int(st.get("dialed", 0) or 0)
-    state_labels = {
-        "running": "🟢 Dialling",
-        "paused": "⏸ Paused",
-        "finishing": "🟡 Finishing",
-        "finished": "✅ Finished",
-        "stalled": "⚠️ Stopped early",
-        "idle": "⚪ Idle",
-    }
+    spinner = _ANIM_FRAMES[frame % len(_ANIM_FRAMES)]
+    title = f"🎛  CONTROL ROOM  {spinner}"
+
+    config_lines = [
+        ui.bullet("Pacing", f"{call_gap:g}s gap · batch {batch_size}", icon="⚙️"),
+        ui.bullet("Max lines", max_concurrent or "∞", icon="📡"),
+        ui.bullet("Transfer", transfer_label, icon="🎯"),
+    ]
+    if loaded_in_bot > 0:
+        config_lines.append(ui.bullet("Loaded", loaded_in_bot, icon="💾", suffix=" leads"))
+    if scheduled_count > 0:
+        config_lines.append(ui.bullet("Scheduled", scheduled_count, icon="⏰", suffix=" runs"))
+
     if dial_state == "idle" and total == 0 and dialed == 0:
-        lines = [
-            "🎛 LIVE DASHBOARD\n",
-            "⚪ No active campaign",
-            "",
-            f"💾 Loaded in bot: {loaded_in_bot}",
-            f"⚙️ Gap {call_gap:g}s · batch {batch_size} · max {max_concurrent or '∞'}",
-            f"🎯 Transfer: {transfer_label}",
-        ]
-        if scheduled_count > 0:
-            lines.append(f"⏰ Scheduled: {scheduled_count}")
-        lines.append("\nLoad leads and /run · updates every 3s")
-        return "\n".join(lines)
+        standby = ui.card(
+            title,
+            [
+                ui.note("⚪", "Standing by — no active campaign"),
+                "",
+                *config_lines,
+            ],
+        )
+        return f"{standby}\n<i>Load leads then /run · refresh 3s</i>"
+
     body = format_campaign_body(
         st,
         total_leads,
@@ -236,17 +256,8 @@ def format_dashboard(
         batch_size=batch_size,
         batch_pause=batch_pause,
         frame=frame,
-        finished=dial_state in ("finished", "stalled", "idle") and int(st.get("dialed", 0) or 0) == 0,
+        finished=dial_state in ("finished", "stalled", "idle") and dialed == 0,
         include_batch=dial_state in ("running", "paused", "finishing"),
     )
-    lines = ["🎛 LIVE DASHBOARD\n", body, "", state_labels.get(dial_state, "⚪ Unknown")]
-    lines.append(
-        f"⚙️ Gap {call_gap:g}s · batch {batch_size} · max {max_concurrent or '∞'}"
-    )
-    lines.append(f"🎯 Transfer: {transfer_label}")
-    if loaded_in_bot > 0:
-        lines.append(f"💾 Loaded in bot: {loaded_in_bot}")
-    if scheduled_count > 0:
-        lines.append(f"⏰ Scheduled: {scheduled_count}")
-    lines.append("\nUpdates every 3s · /stop to end campaign")
-    return "\n".join(lines)
+    config = ui.card("⚙️  CONFIG", config_lines)
+    return f"{body}\n{config}\n<i>refresh 3s · /stop to end</i>"

@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import press1_ui as ui
 import vicidial_client as vd
 
 TZ = ZoneInfo(os.getenv("PRESS1_SCHEDULE_TZ", "Europe/London"))
@@ -174,16 +175,15 @@ def pop_due_schedules() -> list[dict]:
 def format_schedule_line(s: dict) -> str:
     run_at = datetime.fromtimestamp(float(s.get("run_at", 0)), tz=TZ)
     return (
-        f"• `{s.get('id', '?')}` — {s.get('lead_count', 0)} leads at "
-        f"{run_at.strftime('%a %d %b %H:%M %Z')}"
+        f"{ui.BULLET} {ui.code(s.get('id', '?'))} · {ui.b(s.get('lead_count', 0))} leads\n"
+        f"   🗓 {ui.esc(run_at.strftime('%a %d %b %H:%M %Z'))}"
     )
 
 
 def format_schedule_list(user_id: int | None = None) -> str:
     items = list_schedules(user_id)
     if not items:
-        return "No scheduled campaigns."
-    lines = ["⏰ Scheduled campaigns:\n"]
-    lines.extend(format_schedule_line(s) for s in items)
-    lines.append("\nCancel with /unschedule <id>")
-    return "\n".join(lines)
+        card = ui.card("⏰  SCHEDULE", [ui.note("⚪", "No scheduled campaigns.")])
+        return card
+    card = ui.card("⏰  SCHEDULE", [format_schedule_line(s) for s in items])
+    return f"{card}\n<i>Cancel with /unschedule &lt;id&gt;</i>"

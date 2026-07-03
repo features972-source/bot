@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+import press1_ui as ui
+
 THREECX_PROFILES: dict[str, dict[str, str]] = {
     "swapofica": {
         "id": "swapofica",
@@ -67,15 +69,15 @@ def format_settings_text(
     max_concurrent: int,
 ) -> str:
     p = profile(threex_id)
-    lines = [
-        "⚙️ Press-1 settings\n",
-        f"🔊 IVR audio: {sound_name}",
-        f"⏱ Call gap: {call_gap:g}s | Batch: {batch_size} | Pause: {batch_pause}s",
-        f"📡 Max concurrent: {max_concurrent or 'unlimited'}",
-        "",
-        f"🎯 Press-1 transfer: {p['label']}",
-        f"   • Extension: {p['ext']}",
-        "",
-        "Tap a button below to change the transfer destination.",
-    ]
-    return "\n".join(lines)
+    card = ui.card(
+        "⚙️  SETTINGS",
+        [
+            ui.bullet("IVR audio", sound_name, icon="🔊"),
+            ui.bullet("Call gap", f"{call_gap:g}s", icon="⏱"),
+            ui.bullet("Batch", f"{batch_size} · pause {batch_pause}s", icon="📦"),
+            ui.bullet("Max concurrent", max_concurrent or "unlimited", icon="📡"),
+            "",
+            ui.bullet("Transfer", f"{p['label']} (ext {p['ext']})", icon="🎯"),
+        ],
+    )
+    return f"{card}\n<i>Tap a button below to change the transfer destination.</i>"

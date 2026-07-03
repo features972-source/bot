@@ -8,6 +8,7 @@ import re
 import time
 from datetime import datetime, timezone
 
+import press1_ui as ui
 import vicidial_client as vd
 
 OWNERS: set[int] = {
@@ -217,13 +218,14 @@ def format_grant_line(g: dict) -> str:
     label = g.get("label") or str(uid)
     exp = datetime.fromtimestamp(float(g.get("expires_at", 0)), tz=timezone.utc)
     dur = g.get("duration", "?")
-    return f"• {label} (`{uid}`) — {dur}, until {exp.strftime('%Y-%m-%d %H:%M UTC')}"
+    return (
+        f"{ui.BULLET} {ui.b(label)} ({ui.code(uid)})\n"
+        f"   ⏳ {ui.esc(dur)} · until {ui.esc(exp.strftime('%Y-%m-%d %H:%M UTC'))}"
+    )
 
 
 def format_grant_list() -> str:
     grants = active_grants()
     if not grants:
-        return "No active access keys."
-    lines = ["🔑 Active access keys:\n"]
-    lines.extend(format_grant_line(g) for g in grants)
-    return "\n".join(lines)
+        return ui.card("🔑  ACCESS KEYS", [ui.note("⚪", "No active access keys.")])
+    return ui.card("🔑  ACCESS KEYS", [format_grant_line(g) for g in grants])

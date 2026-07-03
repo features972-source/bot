@@ -11,12 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.constants import ParseMode
 from telegram.error import BadRequest, Conflict
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    Defaults,
     MessageHandler,
     filters,
 )
@@ -25,6 +27,7 @@ import vicidial_client as vd
 import press1_access as access
 import press1_campaign as campaign
 import press1_schedule as schedule
+import press1_ui as ui
 from press1_settings import THREECX_PROFILES, format_settings_text
 from press1_utils import convert_audio_for_asterisk, parse_csv, parse_numbers
 
@@ -35,33 +38,42 @@ ALLOWED = {
     if x.strip().isdigit()
 }
 
-HELP = """Press-1 dialer
-
-Send:
-• Numbers or .csv / .txt — lead list
-
-Commands:
-/start — this help
-/audio — change IVR message (then send MP3/WAV/voice, or reply /audio to a file)
-/status — live calls & progress
-/dashboard — live auto-updating control panel
-/run — dial loaded leads (same path as /testcall)
-/pause — pause placing new calls (live calls continue)
-/unpause — resume a paused campaign
-/stop — stop campaign completely
-/testcall — ring test numbers
-/settings — transfer target & dialer options
-/leads — lead count in session
-/clear — clear loaded numbers
-/schedule 9am — run loaded leads at a set time
-/schedule tomorrow 10:30 — schedule for tomorrow
-/schedules — list scheduled campaigns
-/unschedule <id> — cancel a scheduled run
-/addkey @user 24h — grant temporary access (owner only)
-/listkeys — show active access keys (owner only)
-/revokekey @user — revoke access (owner only)
-
-DTMF: while a call is connected, every key pressed is sent to you here."""
+HELP = (
+    ui.card(
+        "⚡  PRESS-1 DIALER",
+        [
+            ui.note("📥", "Paste numbers or send a .csv / .txt to load leads."),
+            "",
+            "🚀 <b>CAMPAIGN</b>",
+            ui.bullet("/run", "dial the loaded leads", icon="▪️"),
+            ui.bullet("/dashboard", "pinned live control room", icon="▪️"),
+            ui.bullet("/status", "quick snapshot", icon="▪️"),
+            ui.bullet("/pause", "hold new calls", icon="▪️"),
+            ui.bullet("/unpause", "resume a campaign", icon="▪️"),
+            ui.bullet("/stop", "end the campaign", icon="▪️"),
+            ui.bullet("/testcall", "ring the test numbers", icon="▪️"),
+            "",
+            "⏰ <b>SCHEDULE</b>",
+            ui.bullet("/schedule 9am", "run at a set time", icon="▪️"),
+            ui.bullet("/schedule tomorrow 10:30", "run tomorrow", icon="▪️"),
+            ui.bullet("/schedules", "list upcoming runs", icon="▪️"),
+            ui.bullet("/unschedule", "cancel a run", icon="▪️"),
+            "",
+            "🎛 <b>SETUP</b>",
+            ui.bullet("/audio", "change the IVR message", icon="▪️"),
+            ui.bullet("/settings", "transfer target & pacing", icon="▪️"),
+            ui.bullet("/leads", "loaded lead count", icon="▪️"),
+            ui.bullet("/clear", "clear loaded numbers", icon="▪️"),
+            "",
+            "🔐 <b>ACCESS</b> (owner only)",
+            ui.bullet("/addkey @user 24h", "grant temporary access", icon="▪️"),
+            ui.bullet("/listkeys", "active access keys", icon="▪️"),
+            ui.bullet("/revokekey @user", "revoke access", icon="▪️"),
+        ],
+        expandable=True,
+    )
+    + "\n🔔 <i>Every key a caller presses is streamed here live.</i>"
+)
 
 
 @dataclass
@@ -101,9 +113,9 @@ async def guard(update: Update, context: ContextTypes.DEFAULT_TYPE | None = None
         _note_user(context.application, user)
     if not allowed(uid):
         if update.message:
-            await update.message.reply_text("Access denied.")
+            await update.message.reply_text("🔒 Access denied.")
         elif update.callback_query:
-            await update.callback_query.answer("Access denied.", show_alert=True)
+            await update.callback_query.answer("🔒 Access denied.", show_alert=True)
         return False
     return True
 
@@ -130,8 +142,8 @@ async def _safe_edit(msg: Message, text: str) -> None:
 
 _STATE_LABELS = {
     "running": "🟢 Dialling",
-    "paused": "⏸ Paused (no new calls; live calls continue)",
-    "finishing": "🟡 Finishing (list done, calls in flight)",
+    "paused": "⏸ Paused — live calls continue",
+    "finishing": "🟡 Finishing — calls in flight",
     "finished": "✅ Finished",
     "stalled": "⚠️ Stopped early",
     "idle": "⚪ Idle",
@@ -140,7 +152,7 @@ _STATE_LABELS = {
 
 def _state_line(st: dict[str, str]) -> str:
     label = _STATE_LABELS.get(st.get("dial_state", ""), "⚪ Unknown")
-    return f"Status: {label}"
+    return f"<i>{ui.esc(label)}</i>"
 
 
 _PACING_CACHE: dict[str, object] = {"at": 0.0, "data": {}}
@@ -190,31 +202,36 @@ async def _format_live_stats(
     return body
 
 
+def _warn(text: str) -> str:
+    return f"\n\n⚠️ <i>{ui.esc(text)}</i>"
+
+
 async def _format_status(st: dict[str, str], loaded_in_bot: int) -> str:
     total = int(st.get("list_size", 0) or 0)
-    dialed = st.get("dialed", "?")
-    answered = st.get("answered", "?")
-    press1 = st.get("press1", "?")
-    left = st.get("hopper", "?")
-    live = st.get("live", "?")
-    failed = st.get("failed", "0")
-    dialed_n = int(dialed or 0) if str(dialed).isdigit() else 0
-    pct = (dialed_n * 100 // total) if total > 0 else 0
+    dialed = int(st.get("dialed", 0) or 0)
+    answered = int(st.get("answered", 0) or 0)
+    press1 = int(st.get("press1", 0) or 0)
+    left = int(st.get("hopper", 0) or 0)
+    live = int(st.get("live", 0) or 0)
+    failed = int(st.get("failed", 0) or 0)
+    pct = (dialed * 100 // total) if total > 0 else 0
     lines = [
-        "📊 Server status\n",
-        f"📋 List on server: {total}",
-        f"📞 Dialed: {dialed} / {total}" + (f" ({pct}%)" if total > 0 else ""),
-        f"⏳ Left: {left}",
-        f"📡 Live now: {live}",
-        f"✅ Answered: {answered}",
-        f"🔥 Press-1: {press1}",
+        ui.esc(f"{campaign.gauge(pct)}  {pct}%"),
+        "",
+        ui.bullet("List on server", total, icon="📋"),
+        ui.bullet("Dialed", dialed, icon="📞"),
+        ui.bullet("Live now", live, icon="📡"),
+        ui.bullet("Left", left, icon="⏳"),
+        ui.bullet("Answered", answered, icon="✅"),
+        ui.bullet("Press-1", press1, icon="🔥"),
     ]
-    if int(failed or 0) > 0:
-        lines.append(f"❌ Failed: {failed}")
-    lines.append(_state_line(st))
+    if failed > 0:
+        lines.append(ui.bullet("Failed", failed, icon="❌"))
     if loaded_in_bot != total:
-        lines.append(f"💾 In bot session: {loaded_in_bot}")
-    return "\n".join(lines)
+        lines.append(ui.bullet("In bot session", loaded_in_bot, icon="💾"))
+    lines.append("")
+    lines.append(_state_line(st))
+    return ui.card("📊  STATUS SNAPSHOT", lines)
 
 
 async def _live_campaign_updater(
@@ -236,9 +253,9 @@ async def _live_campaign_updater(
             err = progress.get("error")
             text = await _format_live_stats(st, total_leads, progress=progress)
             if progress.get("stalled"):
-                text += "\n\n⚠️ Dialer stopped early on server — upload a new list and /run"
+                text += _warn("Dialer stopped early on server — upload a new list and /run")
             if err:
-                text += f"\n\n⚠️ {err}"
+                text += _warn(err)
             hopper = int(st.get("hopper", 0) or 0)
             live = int(st.get("live", 0) or 0)
             dial_state = st.get("dial_state", "")
@@ -253,7 +270,7 @@ async def _live_campaign_updater(
                     final = await _format_live_stats(st, total_leads, finished=True, progress=progress)
                     err = progress.get("error")
                     if err:
-                        final += f"\n\n⚠️ {err}"
+                        final += _warn(err)
                     try:
                         await _safe_edit(msg, final)
                     except BadRequest:
@@ -272,7 +289,7 @@ async def _live_campaign_updater(
                 idle_rounds += 1
                 if idle_rounds >= 4:
                     final = await _format_live_stats(st, total_leads, finished=True, progress=progress)
-                    final += "\n\n⚠️ Dialer stopped early on server — upload a new list and /run"
+                    final += _warn("Dialer stopped early on server — upload a new list and /run")
                     try:
                         await _safe_edit(msg, final)
                     except BadRequest:
@@ -281,7 +298,7 @@ async def _live_campaign_updater(
             elif not active and dialed == 0 and idle_rounds >= 6:
                 final = await _format_live_stats(st, total_leads, finished=True, progress=progress)
                 err = progress.get("error") or "Dialer never started — try /run again"
-                final += f"\n\n⚠️ {err}"
+                final += _warn(err)
                 try:
                     await _safe_edit(msg, final)
                 except BadRequest:
@@ -291,7 +308,7 @@ async def _live_campaign_updater(
                 idle_rounds = 0 if active or dialed > 0 else idle_rounds + 1
         except Exception as e:
             try:
-                await msg.edit_text(f"Live update error: {e}")
+                await msg.edit_text(ui.error(f"Live update error: {e}"))
             except Exception:
                 pass
             break
@@ -315,6 +332,8 @@ def _stop_dialer(context: ContextTypes.DEFAULT_TYPE) -> None:
     if task and not task.done():
         task.cancel()
     context.application.bot_data.pop("dial_task", None)
+
+
 def _stop_live_updater(context: ContextTypes.DEFAULT_TYPE) -> None:
     _stop_dialer(context)
     task = context.application.bot_data.get("live_updater_task")
@@ -330,28 +349,30 @@ def _stop_live_updater(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
-    msg = await update.message.reply_text("Checking server…")
+    msg = await update.message.reply_text("📡 Reading server…")
     try:
         st = await asyncio.to_thread(vd.get_dial_stats, None, context.application.bot_data.get("dial_progress"))
         s = session(update.effective_user.id, context)
         text = await _format_status(st, len(s.numbers))
         await msg.edit_text(text)
     except Exception as e:
-        await msg.edit_text(f"Status failed: {e}")
+        await msg.edit_text(ui.error(f"Status failed: {e}"))
 
 
 async def cmd_leads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
     s = session(update.effective_user.id, context)
-    await update.message.reply_text(f"{len(s.numbers)} numbers loaded. Send more or /run.")
+    await update.message.reply_text(
+        f"💾 {len(s.numbers)} leads loaded. Send more or /run."
+    )
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
     session(update.effective_user.id, context).numbers.clear()
-    await update.message.reply_text("Cleared loaded numbers.")
+    await update.message.reply_text("🧹 Loaded leads cleared.")
 
 
 def _threex_keyboard(active_id: str) -> InlineKeyboardMarkup:
@@ -380,12 +401,12 @@ def _settings_message() -> tuple[str, InlineKeyboardMarkup]:
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
-    msg = await update.message.reply_text("Loading settings…")
+    msg = await update.message.reply_text("⚙️ Loading settings…")
     try:
         text, keyboard = await asyncio.to_thread(_settings_message)
         await msg.edit_text(text, reply_markup=keyboard)
     except Exception as e:
-        await msg.edit_text(f"Settings failed: {e}")
+        await msg.edit_text(ui.error(f"Settings failed: {e}"))
 
 
 async def on_threex_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -402,10 +423,10 @@ async def on_threex_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         p = await asyncio.to_thread(vd.apply_threex_target, profile_id)
         text, keyboard = await asyncio.to_thread(_settings_message)
-        note = f"\n\n✅ Press-1 calls now transfer to {p['label']}."
+        note = f"\n\n✅ Press-1 calls now transfer to {ui.b(p['label'])}."
         await query.edit_message_text(text + note, reply_markup=keyboard)
     except Exception as e:
-        await query.edit_message_text(f"Transfer update failed: {e}")
+        await query.edit_message_text(ui.error(f"Transfer update failed: {e}"))
 
 
 async def _resolve_addkey_target(
@@ -428,7 +449,7 @@ async def _resolve_addkey_target(
 async def cmd_addkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id if update.effective_user else 0
     if not access.is_owner(uid):
-        await update.message.reply_text("Only the owner can grant access.")
+        await update.message.reply_text("🔒 Only the owner can grant access.")
         return
     target, from_mention = await _resolve_addkey_target(update, context)
     args = context.args or []
@@ -438,9 +459,10 @@ async def cmd_addkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         duration = args[1] if len(args) >= 2 else None
     if not target or not duration:
         await update.message.reply_text(
+            "🔑 <b>Grant temporary access</b>\n\n"
             "Usage: /addkey @username 24h\n"
-            "Or: /addkey <user_id> 24h\n"
-            "Duration examples: 30m, 24h, 7d, 1w"
+            "Or: /addkey &lt;user_id&gt; 24h\n\n"
+            "Durations: 30m · 24h · 7d · 1w"
         )
         return
     extra = context.application.bot_data.get("known_users", {})
@@ -455,33 +477,37 @@ async def cmd_addkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         exp = datetime.fromtimestamp(grant["expires_at"], tz=timezone.utc)
         await update.message.reply_text(
-            f"✅ Access granted to {grant['label']} (`{grant['user_id']}`)\n"
-            f"Expires: {exp.strftime('%Y-%m-%d %H:%M UTC')} ({grant['duration']})"
+            f"✅ Access granted to {ui.b(grant['label'])} ({ui.code(grant['user_id'])})\n"
+            f"⏳ Expires {ui.esc(exp.strftime('%Y-%m-%d %H:%M UTC'))} "
+            f"({ui.esc(grant['duration'])})"
         )
     except Exception as e:
-        await update.message.reply_text(f"Failed: {e}")
+        await update.message.reply_text(ui.error(e))
 
 
 async def cmd_listkeys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id if update.effective_user else 0
     if not access.is_owner(uid):
-        await update.message.reply_text("Only the owner can list access keys.")
+        await update.message.reply_text("🔒 Only the owner can list access keys.")
         return
     try:
         text = await asyncio.to_thread(access.format_grant_list)
         await update.message.reply_text(text)
     except Exception as e:
-        await update.message.reply_text(f"Failed: {e}")
+        await update.message.reply_text(ui.error(e))
 
 
 async def cmd_revokekey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id if update.effective_user else 0
     if not access.is_owner(uid):
-        await update.message.reply_text("Only the owner can revoke access.")
+        await update.message.reply_text("🔒 Only the owner can revoke access.")
         return
     target, _from_mention = await _resolve_addkey_target(update, context)
     if not target:
-        await update.message.reply_text("Usage: /revokekey @username\nOr: /revokekey <user_id>")
+        await update.message.reply_text(
+            "🔑 <b>Revoke access</b>\n\n"
+            "Usage: /revokekey @username\nOr: /revokekey &lt;user_id&gt;"
+        )
         return
     extra = context.application.bot_data.get("known_users", {})
     try:
@@ -491,34 +517,38 @@ async def cmd_revokekey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             revoked_by=uid,
             extra_users=extra,
         )
-        await update.message.reply_text(f"✅ Revoked access for {label}.")
+        await update.message.reply_text(f"✅ Revoked access for {ui.b(label)}.")
     except Exception as e:
-        await update.message.reply_text(f"Failed: {e}")
+        await update.message.reply_text(ui.error(e))
 
 
 async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
-    msg = await update.message.reply_text("Placing test calls…")
+    msg = await update.message.reply_text("📞 Placing test calls…")
     try:
         placed = await asyncio.to_thread(vd.test_calls)
-        await msg.edit_text("Test calls placed:\n" + "\n".join(f"• {n}" for n in placed))
+        card = ui.card(
+            "📞  TEST CALLS PLACED",
+            [ui.bullet(n, "", icon="☎️") for n in placed] or [ui.note("⚪", "none")],
+        )
+        await msg.edit_text(card)
     except Exception as e:
-        await msg.edit_text(f"Test call failed: {e}")
+        await msg.edit_text(ui.error(f"Test call failed: {e}"))
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
     _stop_live_updater(context)
-    msg = await update.message.reply_text("Stopping dialer…")
-    await msg.edit_text("Campaign stopped.")
+    msg = await update.message.reply_text("🛑 Stopping campaign…")
+    await msg.edit_text("🛑 Campaign stopped.")
 
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
-    msg = await update.message.reply_text("Pausing campaign…")
+    msg = await update.message.reply_text("⏸ Pausing campaign…")
     try:
         st = await asyncio.to_thread(vd.pause_dial_campaign)
         progress = context.application.bot_data.get("dial_progress")
@@ -526,19 +556,23 @@ async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             progress["paused"] = True
             progress["running"] = True
         await msg.edit_text(
-            "⏸ Campaign paused.\n\n"
-            f"📞 Dialed: {st['dialed']} / {st['total']}\n"
-            f"⏳ Left: {st['left']}\n\n"
-            "Live calls will finish. Use /unpause to continue."
+            ui.card(
+                "⏸  CAMPAIGN PAUSED",
+                [
+                    ui.bullet("Dialed", f"{st['dialed']} / {st['total']}", icon="📞"),
+                    ui.bullet("Left", st["left"], icon="⏳"),
+                ],
+            )
+            + "\n<i>Live calls will finish · /unpause to continue.</i>"
         )
     except Exception as e:
-        await msg.edit_text(f"Pause failed: {e}")
+        await msg.edit_text(ui.error(f"Pause failed: {e}"))
 
 
 async def cmd_unpause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
-    msg = await update.message.reply_text("Resuming campaign…")
+    msg = await update.message.reply_text("▶️ Resuming campaign…")
     try:
         st = await asyncio.to_thread(vd.unpause_dial_campaign)
         progress = context.application.bot_data.get("dial_progress")
@@ -546,32 +580,51 @@ async def cmd_unpause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             progress["paused"] = False
             progress["running"] = True
         await msg.edit_text(
-            "▶️ Campaign resumed.\n\n"
-            f"📞 Dialed: {st['dialed']} / {st['total']}\n"
-            f"⏳ Left: {st['left']}"
+            ui.card(
+                "▶️  CAMPAIGN RESUMED",
+                [
+                    ui.bullet("Dialed", f"{st['dialed']} / {st['total']}", icon="📞"),
+                    ui.bullet("Left", st["left"], icon="⏳"),
+                ],
+            )
         )
     except Exception as e:
-        await msg.edit_text(f"Unpause failed: {e}")
+        await msg.edit_text(ui.error(f"Unpause failed: {e}"))
 
 
-def _stop_dashboard(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None = None) -> None:
-    boards: dict = context.application.bot_data.get("dashboards", {})
-    keys = [chat_id] if chat_id is not None else list(boards.keys())
-    for cid in keys:
-        entry = boards.pop(cid, None)
-        if not entry:
-            continue
-        stop = entry.get("stop")
-        if stop:
-            stop.set()
-        task = entry.get("task")
-        if task and not task.done():
-            task.cancel()
+async def _safe_edit_id(app: Application, chat_id: int, message_id: int, text: str) -> bool:
+    """Edit a message by id; return False if the message is gone."""
+    try:
+        await app.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+        return True
+    except BadRequest as e:
+        msg = str(e).lower()
+        if "message is not modified" in msg:
+            return True
+        if "message to edit not found" in msg or "message can't be edited" in msg:
+            return False
+        return True
+    except Exception:
+        return True
+
+
+async def _persist_dashboards(app: Application) -> None:
+    boards: dict = app.bot_data.get("dashboards", {})
+    items = [
+        {"chat_id": cid, "message_id": e["msg_id"], "user_id": e["user_id"]}
+        for cid, e in boards.items()
+        if e.get("msg_id")
+    ]
+    try:
+        await asyncio.to_thread(vd.save_dashboards, items)
+    except Exception as e:
+        print(f"[press1] dashboard persist: {e}")
 
 
 async def _dashboard_updater(
-    msg: Message,
-    context: ContextTypes.DEFAULT_TYPE,
+    app: Application,
+    chat_id: int,
+    message_id: int,
     stop_event: asyncio.Event,
     user_id: int,
 ) -> None:
@@ -579,19 +632,20 @@ async def _dashboard_updater(
     last_text = ""
     while not stop_event.is_set():
         try:
-            progress = context.application.bot_data.get("dial_progress") or {}
+            progress = app.bot_data.get("dial_progress") or {}
             progress["_frame"] = frame
             frame += 1
             run_since = progress.get("run_since") or None
             st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
             total = int(st.get("list_size", 0) or 0) or int(progress.get("total", 0) or 0)
-            loaded = len(session(user_id, context).numbers)
+            store: dict = app.bot_data.get("press1_session", {})
+            loaded = len(store[user_id].numbers) if user_id in store else 0
             pacing = _pacing()
             if frame == 1 or frame % 10 == 0:
                 scheduled = await asyncio.to_thread(schedule.list_schedules, user_id)
-                context.application.bot_data["_dash_sched"] = scheduled
+                app.bot_data["_dash_sched"] = scheduled
             else:
-                scheduled = context.application.bot_data.get("_dash_sched", [])
+                scheduled = app.bot_data.get("_dash_sched", [])
             text = campaign.format_dashboard(
                 st,
                 total_leads=total,
@@ -606,14 +660,15 @@ async def _dashboard_updater(
                 scheduled_count=len(scheduled),
             )
             if text != last_text:
-                await _safe_edit(msg, text)
+                alive = await _safe_edit_id(app, chat_id, message_id, text)
+                if not alive:
+                    # Message deleted by the user — retire this dashboard.
+                    app.bot_data.get("dashboards", {}).pop(chat_id, None)
+                    await _persist_dashboards(app)
+                    return
                 last_text = text
         except Exception as e:
-            try:
-                await msg.edit_text(f"Dashboard error: {e}")
-            except Exception:
-                pass
-            break
+            print(f"[press1] dashboard {chat_id}: {e}")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=3.0)
             break
@@ -621,21 +676,83 @@ async def _dashboard_updater(
             pass
 
 
+def _start_dashboard_task(
+    app: Application, chat_id: int, message_id: int, user_id: int
+) -> None:
+    boards = app.bot_data.setdefault("dashboards", {})
+    existing = boards.pop(chat_id, None)
+    if existing:
+        stop = existing.get("stop")
+        if stop:
+            stop.set()
+        task = existing.get("task")
+        if task and not task.done():
+            task.cancel()
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        _dashboard_updater(app, chat_id, message_id, stop_event, user_id)
+    )
+    boards[chat_id] = {
+        "stop": stop_event,
+        "task": task,
+        "msg_id": message_id,
+        "user_id": user_id,
+    }
+
+
 async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    _stop_dashboard(context, chat_id)
-    msg = await update.message.reply_text("Loading dashboard…")
-    stop_event = asyncio.Event()
-    task = asyncio.create_task(_dashboard_updater(msg, context, stop_event, user_id))
-    context.application.bot_data.setdefault("dashboards", {})[chat_id] = {
-        "stop": stop_event,
-        "task": task,
-        "msg_id": msg.message_id,
-        "user_id": user_id,
-    }
+    app = context.application
+
+    # Retire any previous pinned dashboard in this chat.
+    old = context.application.bot_data.get("dashboards", {}).get(chat_id)
+    if old and old.get("msg_id"):
+        try:
+            await context.bot.unpin_chat_message(chat_id, old["msg_id"])
+        except Exception:
+            pass
+
+    msg = await update.message.reply_text("🎛  Booting control room…")
+    try:
+        await context.bot.pin_chat_message(
+            chat_id, msg.message_id, disable_notification=True
+        )
+    except Exception:
+        pass
+    _start_dashboard_task(app, chat_id, msg.message_id, user_id)
+    await _persist_dashboards(app)
+
+
+async def _resume_dashboards(app: Application) -> None:
+    try:
+        saved = await asyncio.to_thread(vd.load_dashboards)
+    except Exception as e:
+        print(f"[press1] dashboard resume load: {e}")
+        return
+    alive: list[dict] = []
+    for d in saved:
+        chat_id = int(d.get("chat_id", 0) or 0)
+        message_id = int(d.get("message_id", 0) or 0)
+        user_id = int(d.get("user_id", 0) or 0)
+        if not chat_id or not message_id:
+            continue
+        ok = await _safe_edit_id(app, chat_id, message_id, "🎛  Reconnecting control room…")
+        if not ok:
+            continue
+        _start_dashboard_task(app, chat_id, message_id, user_id)
+        alive.append(
+            {"chat_id": chat_id, "message_id": message_id, "user_id": user_id}
+        )
+    if alive != saved:
+        try:
+            await asyncio.to_thread(vd.save_dashboards, alive)
+        except Exception:
+            pass
+    if alive:
+        print(f"[press1] resumed {len(alive)} pinned dashboard(s)")
 
 
 async def _launch_campaign(
@@ -649,8 +766,9 @@ async def _launch_campaign(
     count = len(numbers)
     _stop_live_updater(context)
     text_intro = intro or (
-        f"Dialling {count} leads — {vd.BATCH_SIZE}/batch, "
-        f"{vd.CALL_GAP_SEC:g}s between calls, {vd.BATCH_PAUSE_SEC}s between batches…"
+        f"🚀 Launching {count} leads\n"
+        f"{vd.BATCH_SIZE}/batch · {vd.CALL_GAP_SEC:g}s gap · "
+        f"{vd.BATCH_PAUSE_SEC}s between batches…"
     )
     msg = await context.bot.send_message(chat_id, text_intro)
     try:
@@ -680,7 +798,7 @@ async def _launch_campaign(
             st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
             await _safe_edit(
                 msg,
-                await _format_live_stats(st, count, progress=progress) + f"\n\n⚠️ {e}",
+                await _format_live_stats(st, count, progress=progress) + _warn(e),
             )
             return
         fresh = {
@@ -702,9 +820,9 @@ async def _launch_campaign(
         context.application.bot_data["live_updater_task"] = task
     except Exception as e:
         try:
-            await _safe_edit(msg, f"Run failed: {e}")
+            await _safe_edit(msg, ui.error(f"Run failed: {e}"))
         except Exception:
-            await context.bot.send_message(chat_id, f"Run failed: {e}")
+            await context.bot.send_message(chat_id, ui.error(f"Run failed: {e}"))
 
 
 async def _schedule_loop(app: Application) -> None:
@@ -749,7 +867,8 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     s = session(update.effective_user.id, context)
     if not s.numbers:
         await update.message.reply_text(
-            "Load numbers first, then:\n"
+            "⏰ Schedule a campaign\n\n"
+            "Load leads first, then:\n"
             "/schedule 9am\n"
             "/schedule tomorrow 10:30"
         )
@@ -757,7 +876,7 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         run_at = await asyncio.to_thread(schedule.parse_schedule_args, args)
     except ValueError as e:
-        await update.message.reply_text(str(e))
+        await update.message.reply_text(ui.error(e))
         return
     numbers = list(s.numbers)
     s.numbers.clear()
@@ -770,14 +889,19 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             run_at=run_at,
         )
         await update.message.reply_text(
-            f"⏰ Scheduled {len(numbers)} leads for "
-            f"{run_at.strftime('%a %d %b %H:%M %Z')}\n"
-            f"ID: `{entry['id']}`\n"
-            f"/schedules to view · /unschedule {entry['id']} to cancel"
+            ui.card(
+                "⏰  CAMPAIGN SCHEDULED",
+                [
+                    ui.bullet("Leads", len(numbers), icon="📥"),
+                    ui.bullet("When", run_at.strftime("%a %d %b %H:%M %Z"), icon="🗓"),
+                    f"🆔 <b>ID</b>  {ui.code(entry['id'])}",
+                ],
+            )
+            + f"\n<i>/schedules to view · /unschedule {ui.esc(entry['id'])} to cancel</i>"
         )
     except Exception as e:
         s.numbers = numbers
-        await update.message.reply_text(f"Schedule failed: {e}")
+        await update.message.reply_text(ui.error(f"Schedule failed: {e}"))
 
 
 async def cmd_schedules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -789,7 +913,7 @@ async def cmd_schedules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         await update.message.reply_text(text)
     except Exception as e:
-        await update.message.reply_text(f"Failed: {e}")
+        await update.message.reply_text(ui.error(e))
 
 
 async def cmd_unschedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -797,15 +921,15 @@ async def cmd_unschedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     args = context.args or []
     if not args:
-        await update.message.reply_text("Usage: /unschedule <id>")
+        await update.message.reply_text("⏰ Usage: /unschedule &lt;id&gt;")
         return
     try:
         sid = await asyncio.to_thread(
             schedule.remove_schedule, args[0], update.effective_user.id
         )
-        await update.message.reply_text(f"✅ Cancelled schedule `{sid}`.")
+        await update.message.reply_text(f"✅ Cancelled schedule {ui.code(sid)}.")
     except Exception as e:
-        await update.message.reply_text(f"Failed: {e}")
+        await update.message.reply_text(ui.error(e))
 
 
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -813,7 +937,7 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     s = session(update.effective_user.id, context)
     if not s.numbers:
-        await update.message.reply_text("Load numbers first (paste list or send .csv).")
+        await update.message.reply_text("📥 Load leads first — paste a list or send a .csv.")
         return
     numbers = list(s.numbers)
     s.numbers.clear()
@@ -850,7 +974,7 @@ async def _download_audio_message(msg: Message, dest: Path) -> None:
 
 
 async def _save_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, dest: Path) -> None:
-    msg = await update.message.reply_text("Converting and uploading audio…")
+    msg = await update.message.reply_text("🔊 Converting and uploading audio…")
     try:
         with tempfile.TemporaryDirectory() as tmp:
             files = await asyncio.to_thread(
@@ -862,11 +986,11 @@ async def _save_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, dest: 
             await asyncio.to_thread(vd.deploy_audio, files)
         context.user_data.pop("awaiting_ivr_audio", None)
         await msg.edit_text(
-            f"✅ IVR audio updated ({vd.SOUND_NAME}).\n"
-            "New answered calls will play this message after the 2s pause."
+            f"✅ IVR audio updated ({ui.code(vd.SOUND_NAME)}).\n"
+            "<i>New answered calls play this after the 2s pause.</i>"
         )
     except Exception as e:
-        await msg.edit_text(f"Audio upload failed: {e}")
+        await msg.edit_text(ui.error(f"Audio upload failed: {e}"))
     finally:
         dest.unlink(missing_ok=True)
 
@@ -876,7 +1000,7 @@ async def _deploy_ivr_from_message(
 ) -> None:
     if not _message_has_audio(source):
         await update.message.reply_text(
-            "That message has no audio. Send MP3, WAV, M4A, OGG, or a voice note."
+            "⚠️ No audio in that message. Send MP3, WAV, M4A, OGG, or a voice note."
         )
         return
     if source.voice:
@@ -898,10 +1022,14 @@ async def cmd_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     context.user_data["awaiting_ivr_audio"] = True
     await update.message.reply_text(
-        "🔊 Change IVR audio\n\n"
-        "Send me an MP3, WAV, M4A, OGG, or voice note now.\n\n"
-        "Or reply to an audio file with /audio.\n\n"
-        "Tip: mono voice prompts sound best on phone lines."
+        ui.card(
+            "🔊  CHANGE IVR AUDIO",
+            [
+                ui.note("🎧", "Send an MP3, WAV, M4A, OGG, or voice note now,"),
+                ui.note("↩️", "or reply to an audio file with /audio."),
+            ],
+        )
+        + "\n💡 <i>Mono voice prompts sound best on phone lines.</i>"
     )
 
 
@@ -946,7 +1074,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     s.numbers = list(dict.fromkeys(s.numbers + nums))
     dest.unlink(missing_ok=True)
     await update.message.reply_text(
-        f"Loaded {len(nums)} numbers ({len(s.numbers)} total). /run to dial."
+        f"📥 Loaded {len(nums)} leads ({len(s.numbers)} total). /run to dial."
     )
 
 
@@ -962,7 +1090,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     s = session(update.effective_user.id, context)
     s.numbers = list(dict.fromkeys(s.numbers + nums))
     await update.message.reply_text(
-        f"Added {len(nums)} numbers ({len(s.numbers)} total). /run to dial."
+        f"📥 Added {len(nums)} leads ({len(s.numbers)} total). /run to dial."
     )
 
 
@@ -970,12 +1098,23 @@ async def _format_dtmf_message(ev: dict[str, str]) -> str | None:
     kind = ev.get("e", "")
     lead = ev.get("lead", "").strip() or "unknown"
     if kind == "digit":
-        return f"DTMF on {lead}\nPressed: {ev.get('d', '')}\nSequence: {ev.get('seq', '')}"
+        digit = ev.get("d", "")
+        icon = "🔥" if digit == "1" else "☎️"
+        return ui.card(
+            f"{icon}  KEYPRESS · {lead}",
+            [
+                ui.bullet("Pressed", digit, icon="🔢"),
+                ui.bullet("Sequence", ev.get("seq", ""), icon="🧮"),
+            ],
+        )
     if kind == "summary":
         digits = ev.get("digits", "")
         if not digits:
             return None
-        return f"Call ended {lead}\nAll digits: {digits}"
+        return ui.card(
+            f"📴  CALL ENDED · {lead}",
+            [ui.bullet("All digits", digits, icon="🧮")],
+        )
     return None
 
 
@@ -1053,6 +1192,7 @@ async def post_init(app: Application) -> None:
     app.bot_data["dtmf_offset"] = 0
     asyncio.create_task(_dtmf_notify_loop(app))
     asyncio.create_task(_schedule_loop(app))
+    asyncio.create_task(_resume_dashboards(app))
 
 
 _conflict_logged = False
@@ -1080,6 +1220,7 @@ def build_application() -> Application:
         Application.builder()
         .token(TOKEN)
         .post_init(post_init)
+        .defaults(Defaults(parse_mode=ParseMode.HTML))
         .connect_timeout(30)
         .read_timeout(30)
         .write_timeout(30)

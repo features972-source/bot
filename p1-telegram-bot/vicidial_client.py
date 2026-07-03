@@ -1,4 +1,4 @@
-"""SSH control of VICIdial press-1 server (BitCall + 3CX xfer)."""
+"""SSH control layer for the press-1 dial server (dialer, IVR, transfer, stats)."""
 
 from __future__ import annotations
 
@@ -65,7 +65,32 @@ DIAL_LOCK = "/tmp/press1_dial.lock"
 SETTINGS_PATH = "/var/lib/asterisk/press1_bot_settings.json"
 ACCESS_PATH = "/var/lib/asterisk/press1_access.json"
 SCHEDULES_PATH = "/var/lib/asterisk/press1_schedules.json"
+DASHBOARDS_PATH = "/var/lib/asterisk/press1_dashboards.json"
 PJSIP_CONF = "/etc/asterisk/pjsip.conf"
+
+
+def load_dashboards() -> list[dict]:
+    """Persisted pinned dashboards: [{chat_id, message_id, user_id}]."""
+    try:
+        raw = run_remote(f"cat {DASHBOARDS_PATH} 2>/dev/null", timeout=15).strip()
+        if not raw:
+            return []
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            data = data.get("dashboards", [])
+        return [d for d in data if isinstance(d, dict) and d.get("chat_id")]
+    except Exception:
+        return []
+
+
+def save_dashboards(items: list[dict]) -> None:
+    payload = json.dumps({"dashboards": items}, indent=2)
+    run_remote(
+        f"mkdir -p $(dirname {DASHBOARDS_PATH}); "
+        f"cat > {DASHBOARDS_PATH} <<'EOF'\n{payload}\nEOF\n"
+        f"chmod 644 {DASHBOARDS_PATH}",
+        timeout=20,
+    )
 
 
 def _dial_done_path(run_id: str) -> str:
