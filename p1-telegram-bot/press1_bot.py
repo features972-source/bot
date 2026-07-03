@@ -600,6 +600,11 @@ async def post_init(app: Application) -> None:
         print(f"[press1] 3CX target: {p['label']} ({p['fqdn']})")
     except Exception as e:
         print(f"[press1] 3CX settings warning: {e}")
+    try:
+        dialplan = await asyncio.to_thread(vd.ensure_press1_dialplan)
+        print(f"[press1] dialplan: {dialplan.strip()[:120]}")
+    except Exception as e:
+        print(f"[press1] press1-ivr dialplan warning: {e}")
 
 
 _conflict_logged = False

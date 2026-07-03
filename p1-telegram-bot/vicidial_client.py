@@ -35,8 +35,14 @@ BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "0"))
 CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.2"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
 CPS = int(os.getenv("VICIDIAL_CPS", "20"))
-OUTBOUND_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038969244")) or "442038969244"
+# Outbound caller ID — leave empty to let BitCall assign CLI (no forced number).
+AU_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_AU_CALLER_ID", os.getenv("VICIDIAL_CALLER_ID", "")))
 MIN_PHONE_DIGITS = 9
+
+
+def outbound_caller_id(number: str) -> str:
+    """Return CLI for call files; empty = BitCall default."""
+    return AU_CALLER_ID
 
 DIAL_SCRIPT = "/tmp/press1_dial_run.sh"
 DIAL_NUMBERS = "/tmp/press1_dial_numbers.txt"
@@ -130,6 +136,107 @@ def ensure_threex_target() -> dict[str, str]:
     return apply_threex_target(target)
 
 
+def _press1_ivr_dialplan(*, server_ip: str, xfer_ext: str, sound: str) -> str:
+    """Canonical press1-ivr: Background+WaitExten, per-run stats, 3CX xfer."""
+    return f"""[press1-ivr]
+exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
+ same => n,Goto(ivr,1)
+
+exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{LEADNUM}})}})
+ same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{DB(press1/lead)}})}})}})
+ same => n,Goto(ivr,1)
+
+exten => ivr,1,Answer()
+ same => n,Wait(0.5)
+ same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{DB(press1/lead)}})}})}})
+ same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{CALLERID(dnid)}})}})}})
+ same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{PJSIP_HEADER(read,To)}})}})}})
+ same => n,Set(CHANNEL(language)=en)
+ same => n,NoOp(IVR lead=${{LEADNUM}})
+ same => n,Set(P1RUN=${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}})
+ same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
+ same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
+ same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
+ same => n,Background({sound})
+ same => n,WaitExten(25)
+ same => n,Hangup()
+
+exten => 1,1,StopPlaytones()
+ same => n,Goto(xfer,1)
+
+exten => xfer,1,NoOp(Press1 xfer lead ${{LEADNUM}} to 3CX {xfer_ext})
+ same => n,StopPlaytones()
+ same => n,GotoIf($[${{LEN(${{LEADNUM}})}}<10]?xferdial,1)
+ same => n,Set(CIDNUM=+${{LEADNUM}})
+ same => n,Set(CALLERID(num)=${{CIDNUM}})
+ same => n,Set(CALLERID(name)=${{CIDNUM}})
+ same => n,Set(CONNECTEDLINE(num)=${{CIDNUM}})
+ same => n,Set(CONNECTEDLINE(name)=${{CIDNUM}})
+ same => n,Set(PJSIP_HEADER(add,P-Asserted-Identity)=<sip:+${{LEADNUM}}@{server_ip}>)
+ same => n,Goto(xferdial,1)
+
+exten => xferdial,1,UserEvent(Press1Xfer,Lead: ${{LEADNUM}})
+ same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}}))
+ same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
+ same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
+ same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/press1)
+ same => n,Dial(PJSIP/{xfer_ext}@3cx,120,tT)
+ same => n,Hangup()
+
+exten => t,1,Hangup()
+exten => i,1,Hangup()
+"""
+
+
+def ensure_press1_dialplan(xfer_ext: str | None = None) -> str:
+    """Idempotently apply press-1 IVR dialplan + BitCall DTMF on the dial server."""
+    import base64
+
+    if xfer_ext is None:
+        xfer_ext = profile(get_threex_target())["ext"]
+    block = _press1_ivr_dialplan(server_ip=SERVER_IP, xfer_ext=xfer_ext, sound=SOUND_NAME)
+    b64 = base64.b64encode(block.encode()).decode()
+    ext_conf = "/etc/asterisk/extensions.conf"
+    ast_conf = "/etc/asterisk/asterisk.conf"
+    out = run_remote(
+        f"python3 <<'PY'\n"
+        f"import base64, re\n"
+        f"from pathlib import Path\n"
+        f"block = base64.b64decode('{b64}').decode()\n"
+        f"ext = Path('{ext_conf}')\n"
+        f"text = ext.read_text()\n"
+        f"text = re.sub(r'\\[press1-ivr\\][\\s\\S]*?(?=\\n\\[default\\]|\\Z)', block + '\\n', text, count=1)\n"
+        f"if '[press1-ivr]' not in text:\n"
+        f"    text = text.rstrip() + '\\n\\n' + block + '\\n'\n"
+        f"ext.write_text(text)\n"
+        f"p = Path('{PJSIP_CONF}')\n"
+        f"t = p.read_text()\n"
+        f"m = re.search(r'(\\[bitcall\\][\\s\\S]*?)(?=\\n\\[|\\Z)', t)\n"
+        f"if m:\n"
+        f"    b = m.group(1)\n"
+        f"    b = re.sub(r'dtmf_mode=\\w+', 'dtmf_mode=rfc4733', b, count=1) if 'dtmf_mode=' in b else b.rstrip() + '\\ndtmf_mode=rfc4733\\n'\n"
+        f"    if 'telephone-event' not in b:\n"
+        f"        b = re.sub(r'allow=alaw', 'allow=alaw\\nallow=telephone-event', b, count=1)\n"
+        f"    t = t[:m.start(1)] + b + t[m.end(1):]\n"
+        f"    p.write_text(t)\n"
+        f"ac = Path('{ast_conf}')\n"
+        f"at = ac.read_text()\n"
+        f"if 'live_dangerously' not in at:\n"
+        f"    at = re.sub(r'(\\[options\\]\\s*\\n)', r'\\1live_dangerously = yes\\n', at, count=1)\n"
+        f"else:\n"
+        f"    at = re.sub(r';?live_dangerously\\s*=.*', 'live_dangerously = yes', at)\n"
+        f"ac.write_text(at)\n"
+        f"Path('{DIAL_STATS_DIR}').mkdir(parents=True, exist_ok=True)\n"
+        f"print('OK: press1-ivr dialplan + bitcall rfc4733')\n"
+        f"PY\n"
+        f"asterisk -rx 'module reload res_pjsip.so' >/dev/null 2>&1; "
+        f"asterisk -rx 'dialplan reload' >/dev/null; "
+        f"asterisk -rx 'dialplan show ivr@press1-ivr' | grep -E 'Background|WaitExten' | head -2",
+        timeout=60,
+    )
+    return out.strip()
+
+
 def settings_summary() -> dict[str, str]:
     target = get_threex_target()
     p = profile(target)
@@ -149,7 +256,7 @@ def settings_summary() -> dict[str, str]:
 
 
 def test_numbers() -> list[str]:
-    raw = os.getenv("VICIDIAL_TEST_NUMBERS", "447769799593,61421875784")
+    raw = os.getenv("VICIDIAL_TEST_NUMBERS", "447769799593")
     nums: list[str] = []
     seen: set[str] = set()
     for n in raw.split(","):
@@ -238,7 +345,7 @@ BATCH={batch}
 PAUSE={pause}
 GAP={gap}
 CAP={DIALER_CONCURRENT_CAP}
-CALLERID={OUTBOUND_CALLER_ID}
+AU_CALLER_ID={AU_CALLER_ID}
 SPOOLDIR=/var/spool/asterisk/outgoing
 TMPDIR=/var/spool/asterisk/tmp
 wait_if_paused() {{
@@ -287,20 +394,22 @@ while IFS= read -r num || [ -n "$num" ]; do
   asterisk -rx "database put press1 lead ${{num}}" >>"$LOG" 2>&1
   callfile="$TMPDIR/press1_${{RUNID}}_${{digits}}_$$.call"
   mkdir -p "$TMPDIR" "$SPOOLDIR" 2>/dev/null
-  if cat > "$callfile" <<CALLFILE
-Channel: PJSIP/${{num}}@bitcall
-CallerID: "${{CALLERID}}" <${{CALLERID}}>
+  {{
+    echo "Channel: PJSIP/${{num}}@bitcall"
+    if [ -n "$AU_CALLER_ID" ]; then
+      printf 'CallerID: "%s" <%s>\\n' "$AU_CALLER_ID" "$AU_CALLER_ID"
+    fi
+    cat <<'CALLBODY'
 MaxRetries: 0
 RetryTime: 60
 WaitTime: 30
 Context: press1-ivr
-Extension: ${{num}}
+Extension: NUMPLACEHOLDER
 Priority: 1
-Setvar: LEADNUM=${{num}}
-CALLFILE
-    chown asterisk:asterisk "$callfile" 2>/dev/null
-    chmod 0640 "$callfile" 2>/dev/null
-    mv "$callfile" "$SPOOLDIR/" 2>>"$LOG"
+Setvar: LEADNUM=NUMPLACEHOLDER
+CALLBODY
+  }} | sed "s/NUMPLACEHOLDER/${{num}}/g" > "$callfile"
+  if chown asterisk:asterisk "$callfile" 2>/dev/null && chmod 0640 "$callfile" 2>/dev/null && mv "$callfile" "$SPOOLDIR/" 2>>"$LOG"
   then
     echo "$num" >>"$DONE"
     s=$(wc -l < "$DONE" 2>/dev/null || echo 0); echo "$s" > "$STARTED"
@@ -526,7 +635,7 @@ UPDATE vicidial_campaigns SET
   no_hopper_dialing='N',
   dial_prefix='X',
   omit_phone_code='N',
-  campaign_cid='443300592867',
+  campaign_cid='{AU_CALLER_ID or ""}',
   campaign_vdad_exten='8368',
   survey_first_audio_file='{SOUND_NAME}',
   survey_xfer_exten='8000',
@@ -626,6 +735,7 @@ def to_e164(phone: str) -> str:
 
 def originate_press1(phone: str) -> str:
     """Place one outbound call — identical path to /testcall."""
+    ensure_press1_dialplan()
     digits = to_e164(phone)
     if len(digits) < MIN_PHONE_DIGITS + 2:
         raise ValueError(f"invalid number: {phone!r}")
@@ -889,6 +999,7 @@ def _start_dial_script() -> None:
 
 def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     """Upload list + start server-side dialer (handles 1k+ leads; bot only monitors)."""
+    ensure_press1_dialplan()
     seen: set[str] = set()
     numbers: list[str] = []
     for phone in phones:

@@ -43,7 +43,7 @@ services:
       - key: VICIDIAL_CPS
         value: "20"
       - key: VICIDIAL_TEST_NUMBERS
-        value: 447769799593,61421875784
+        value: 447769799593
       - key: BOT_TOKEN
         sync: false
       - key: TELEGRAM_ALLOWED_IDS
