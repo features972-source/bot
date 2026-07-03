@@ -60,6 +60,7 @@ DIAL_RUN_ID = "/tmp/press1_dial_run_id"
 DIAL_RUN_PRESS1 = "/var/lib/asterisk/press1_run_press1"
 DIAL_RUN_ANSWERED = "/var/lib/asterisk/press1_run_answered"
 DIAL_STATS_DIR = "/var/lib/asterisk/stats"
+DTMF_EVENTS_FILE = "/var/lib/asterisk/press1_dtmf_events.jsonl"
 DIAL_LOCK = "/tmp/press1_dial.lock"
 SETTINGS_PATH = "/var/lib/asterisk/press1_bot_settings.json"
 PJSIP_CONF = "/etc/asterisk/pjsip.conf"
@@ -668,6 +669,62 @@ WHERE campaign_id='{CAMPAIGN}';
 UPDATE vicidial_campaigns SET active='N' WHERE campaign_id='{CAMPAIGN}';
 """
     )
+
+
+def fetch_dtmf_events(line_offset: int = 0) -> tuple[list[dict[str, str]], int]:
+    """Return new DTMF capture events from the dial server and the new line offset."""
+    raw = run_remote(
+        f"wc -l < {DTMF_EVENTS_FILE} 2>/dev/null || echo 0; "
+        f"awk 'NR>{line_offset}' {DTMF_EVENTS_FILE} 2>/dev/null",
+        timeout=20,
+    ).strip().split("\n", 1)
+    total_line = (raw[0].strip().split() or ["0"])[-1] if raw else "0"
+    try:
+        total = int(total_line or "0")
+    except ValueError:
+        total = line_offset
+    body = raw[1] if len(raw) > 1 else ""
+    events: list[dict[str, str]] = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+            if isinstance(data, dict):
+                events.append({str(k): str(v) for k, v in data.items()})
+        except json.JSONDecodeError:
+            continue
+    return events, total
+
+
+def ensure_dtmf_listener() -> str:
+    """Deploy AMI listener that captures all DTMF digits on connected calls."""
+    import base64
+
+    listener = Path(__file__).with_name("AST_press1_dtmf.pl")
+    if not listener.is_file():
+        raise RuntimeError("AST_press1_dtmf.pl missing next to vicidial_client.py")
+    b64 = base64.b64encode(listener.read_bytes()).decode()
+    return run_remote(
+        f"python3 <<'PY'\n"
+        f"import base64\nfrom pathlib import Path\n"
+        f"Path('/usr/share/astguiclient').mkdir(parents=True, exist_ok=True)\n"
+        f"Path('/var/log/astguiclient').mkdir(parents=True, exist_ok=True)\n"
+        f"p = Path('/usr/share/astguiclient/AST_press1_dtmf.pl')\n"
+        f"p.write_bytes(base64.b64decode('{b64}'))\n"
+        f"p.chmod(0o755)\n"
+        f"Path('{DTMF_EVENTS_FILE}').parent.mkdir(parents=True, exist_ok=True)\n"
+        f"Path('{DTMF_EVENTS_FILE}').touch()\n"
+        f"print('listener written')\n"
+        f"PY\n"
+        f"systemctl stop press1dtmf-new 2>/dev/null; "
+        f"pkill -f '[A]ST_press1_dtmf.pl' 2>/dev/null; sleep 1; "
+        f"systemd-run --unit=press1dtmf-new --collect /usr/share/astguiclient/AST_press1_dtmf.pl; "
+        f"sleep 2; systemctl is-active press1dtmf-new 2>/dev/null || echo inactive; "
+        f"tail -2 /var/log/astguiclient/press1_dtmf.log 2>/dev/null",
+        timeout=45,
+    ).strip()
 
 
 def server_now() -> str:

