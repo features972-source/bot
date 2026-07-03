@@ -185,7 +185,7 @@ exten => xferdial,1,StopPlaytones()
  same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}}))
  same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/press1 &' )
- same => n,Dial(PJSIP/{xfer_ext}@3cx,120,tT)
+ same => n,Dial(PJSIP/{xfer_ext}@3cx,120,tTr)
  same => n,Hangup()
 
 exten => t,1,Hangup()
