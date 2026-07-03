@@ -1,4 +1,4 @@
-"""Press-1 VICIdial Telegram bot handlers."""
+"""Press-1 Telegram bot handlers."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import os
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
@@ -20,6 +21,7 @@ from telegram.ext import (
 )
 
 import vicidial_client as vd
+import press1_access as access
 from press1_settings import THREECX_PROFILES, format_settings_text
 from press1_utils import convert_audio_for_asterisk, parse_csv, parse_numbers
 
@@ -30,7 +32,7 @@ ALLOWED = {
     if x.strip().isdigit()
 }
 
-HELP = """Press-1 dialer (BitCall + press1-ivr)
+HELP = """Press-1 dialer
 
 Send:
 • Numbers or .csv / .txt — lead list
@@ -44,9 +46,12 @@ Commands:
 /unpause — resume a paused campaign
 /stop — stop campaign completely
 /testcall — ring test numbers
-/settings — 3CX target & dialer options
+/settings — transfer target & dialer options
 /leads — lead count in session
 /clear — clear loaded numbers
+/addkey @user 24h — grant temporary access (owner only)
+/listkeys — show active access keys (owner only)
+/revokekey @user — revoke access (owner only)
 
 DTMF: while a call is connected, every key pressed is sent to you here."""
 
@@ -66,22 +71,43 @@ def session(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> Session:
     return store[user_id]
 
 
+def _note_user(app: Application, user) -> None:
+    if not user:
+        return
+    store = app.bot_data.setdefault("known_users", {})
+    store[str(user.id)] = {
+        "user_id": user.id,
+        "username": (user.username or "").lstrip("@").lower(),
+        "name": user.full_name or "",
+    }
+
+
 def allowed(user_id: int) -> bool:
-    return not ALLOWED or user_id in ALLOWED
+    return access.is_allowed(user_id)
 
 
-async def guard(update: Update) -> bool:
-    uid = update.effective_user.id if update.effective_user else 0
+async def guard(update: Update, context: ContextTypes.DEFAULT_TYPE | None = None) -> bool:
+    user = update.effective_user
+    uid = user.id if user else 0
+    if user and context:
+        _note_user(context.application, user)
     if not allowed(uid):
         if update.message:
             await update.message.reply_text("Access denied.")
+        elif update.callback_query:
+            await update.callback_query.answer("Access denied.", show_alert=True)
         return False
     return True
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
+    user = update.effective_user
+    if user:
+        await asyncio.to_thread(
+            access.remember_user, user.id, user.username, user.full_name
+        )
     await update.message.reply_text(HELP)
 
 
@@ -281,7 +307,7 @@ def _stop_live_updater(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     msg = await update.message.reply_text("Checking server…")
     try:
@@ -294,14 +320,14 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_leads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     s = session(update.effective_user.id, context)
     await update.message.reply_text(f"{len(s.numbers)} numbers loaded. Send more or /run.")
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     session(update.effective_user.id, context).numbers.clear()
     await update.message.reply_text("Cleared loaded numbers.")
@@ -331,7 +357,7 @@ def _settings_message() -> tuple[str, InlineKeyboardMarkup]:
 
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     msg = await update.message.reply_text("Loading settings…")
     try:
@@ -351,18 +377,106 @@ async def on_threex_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not query.data.startswith("p1_3cx:"):
         return
     profile_id = query.data.split(":", 1)[1]
-    await query.answer("Updating 3CX target…")
+    await query.answer("Updating transfer target…")
     try:
         p = await asyncio.to_thread(vd.apply_threex_target, profile_id)
         text, keyboard = await asyncio.to_thread(_settings_message)
-        note = f"\n\n✅ Press-1 calls now transfer to {p['label']} ({p['fqdn']})."
+        note = f"\n\n✅ Press-1 calls now transfer to {p['label']}."
         await query.edit_message_text(text + note, reply_markup=keyboard)
     except Exception as e:
-        await query.edit_message_text(f"3CX update failed: {e}")
+        await query.edit_message_text(f"Transfer update failed: {e}")
+
+
+async def _resolve_addkey_target(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> tuple[str | None, bool]:
+    """Return (target, from_mention)."""
+    for ent in update.message.entities or []:
+        if ent.type == "text_mention" and ent.user:
+            user = ent.user
+            _note_user(context.application, user)
+            await asyncio.to_thread(access.remember_user, user.id, user.username, user.full_name)
+            return str(user.id), True
+    args = context.args or []
+    if args:
+        return args[0], False
+    return None, False
+
+
+async def cmd_addkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id if update.effective_user else 0
+    if not access.is_owner(uid):
+        await update.message.reply_text("Only the owner can grant access.")
+        return
+    target, from_mention = await _resolve_addkey_target(update, context)
+    args = context.args or []
+    if from_mention:
+        duration = args[0] if args else None
+    else:
+        duration = args[1] if len(args) >= 2 else None
+    if not target or not duration:
+        await update.message.reply_text(
+            "Usage: /addkey @username 24h\n"
+            "Or: /addkey <user_id> 24h\n"
+            "Duration examples: 30m, 24h, 7d, 1w"
+        )
+        return
+    extra = context.application.bot_data.get("known_users", {})
+    try:
+        grant = await asyncio.to_thread(
+            access.add_grant,
+            target=target,
+            duration_text=duration,
+            granted_by=uid,
+            granter_name=update.effective_user.username if update.effective_user else None,
+            extra_users=extra,
+        )
+        exp = datetime.fromtimestamp(grant["expires_at"], tz=timezone.utc)
+        await update.message.reply_text(
+            f"✅ Access granted to {grant['label']} (`{grant['user_id']}`)\n"
+            f"Expires: {exp.strftime('%Y-%m-%d %H:%M UTC')} ({grant['duration']})"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Failed: {e}")
+
+
+async def cmd_listkeys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id if update.effective_user else 0
+    if not access.is_owner(uid):
+        await update.message.reply_text("Only the owner can list access keys.")
+        return
+    try:
+        text = await asyncio.to_thread(access.format_grant_list)
+        await update.message.reply_text(text)
+    except Exception as e:
+        await update.message.reply_text(f"Failed: {e}")
+
+
+async def cmd_revokekey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id if update.effective_user else 0
+    if not access.is_owner(uid):
+        await update.message.reply_text("Only the owner can revoke access.")
+        return
+    target, _from_mention = await _resolve_addkey_target(update, context)
+    if not target:
+        await update.message.reply_text("Usage: /revokekey @username\nOr: /revokekey <user_id>")
+        return
+    extra = context.application.bot_data.get("known_users", {})
+    try:
+        label = await asyncio.to_thread(
+            access.revoke_grant,
+            target=target,
+            revoked_by=uid,
+            extra_users=extra,
+        )
+        await update.message.reply_text(f"✅ Revoked access for {label}.")
+    except Exception as e:
+        await update.message.reply_text(f"Failed: {e}")
 
 
 async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     msg = await update.message.reply_text("Placing test calls…")
     try:
@@ -373,7 +487,7 @@ async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     _stop_live_updater(context)
     msg = await update.message.reply_text("Stopping dialer…")
@@ -381,7 +495,7 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     msg = await update.message.reply_text("Pausing campaign…")
     try:
@@ -401,7 +515,7 @@ async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_unpause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     msg = await update.message.reply_text("Resuming campaign…")
     try:
@@ -420,7 +534,7 @@ async def cmd_unpause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     s = session(update.effective_user.id, context)
     if not s.numbers:
@@ -557,7 +671,7 @@ async def _deploy_ivr_from_message(
 
 
 async def cmd_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     replied = update.message.reply_to_message
     if replied and _message_has_audio(replied):
@@ -573,7 +687,7 @@ async def cmd_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     if not context.user_data.get("awaiting_ivr_audio"):
         return
@@ -581,7 +695,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     if not context.user_data.get("awaiting_ivr_audio"):
         return
@@ -589,7 +703,7 @@ async def on_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     doc = update.message.document
     if not doc or not doc.file_name:
@@ -618,7 +732,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, context):
         return
     text = (update.message.text or "").strip()
     if not text or text.startswith("/"):
@@ -647,12 +761,16 @@ async def _format_dtmf_message(ev: dict[str, str]) -> str | None:
 
 
 async def _dtmf_notify_loop(app: Application) -> None:
-    chats = list(ALLOWED)
-    if not chats:
-        return
-    offset = int(app.bot_data.get("dtmf_offset", 0) or 0)
     while True:
         try:
+            if access.OWNERS:
+                chats = list(access.allowed_user_ids())
+            else:
+                chats = list(ALLOWED)
+            if not chats:
+                await asyncio.sleep(5)
+                continue
+            offset = int(app.bot_data.get("dtmf_offset", 0) or 0)
             events, offset = await asyncio.to_thread(vd.fetch_dtmf_events, offset)
             app.bot_data["dtmf_offset"] = offset
             for ev in events:
@@ -682,21 +800,24 @@ async def post_init(app: Application) -> None:
             BotCommand("unpause", "Resume campaign"),
             BotCommand("stop", "Stop campaign"),
             BotCommand("testcall", "Ring test numbers"),
-            BotCommand("settings", "3CX target & options"),
+            BotCommand("settings", "Transfer target & options"),
             BotCommand("leads", "Loaded lead count"),
             BotCommand("clear", "Clear loaded numbers"),
+            BotCommand("addkey", "Grant temporary access"),
+            BotCommand("listkeys", "List access keys"),
+            BotCommand("revokekey", "Revoke access"),
         ]
     )
     try:
         ping = await asyncio.to_thread(vd.ping)
-        print(f"[press1] VICIdial SSH OK: {ping.strip()[:80]}")
+        print(f"[press1] dial server SSH OK: {ping.strip()[:80]}")
     except Exception as e:
-        print(f"[press1] VICIdial SSH warning: {e}")
+        print(f"[press1] dial server SSH warning: {e}")
     try:
         p = await asyncio.to_thread(vd.ensure_threex_target)
-        print(f"[press1] 3CX target: {p['label']} ({p['fqdn']})")
+        print(f"[press1] transfer target: {p['label']}")
     except Exception as e:
-        print(f"[press1] 3CX settings warning: {e}")
+        print(f"[press1] transfer settings warning: {e}")
     try:
         dialplan = await asyncio.to_thread(vd.ensure_press1_dialplan)
         print(f"[press1] dialplan: {dialplan.strip()[:120]}")
@@ -751,6 +872,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("testcall", cmd_testcall))
     app.add_handler(CommandHandler("leads", cmd_leads))
     app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CommandHandler("addkey", cmd_addkey))
+    app.add_handler(CommandHandler("listkeys", cmd_listkeys))
+    app.add_handler(CommandHandler("revokekey", cmd_revokekey))
     app.add_handler(CommandHandler("audio", cmd_audio))
     app.add_handler(CommandHandler("setaudio", cmd_audio))
     app.add_handler(CallbackQueryHandler(on_threex_choice, pattern=r"^p1_3cx:"))
