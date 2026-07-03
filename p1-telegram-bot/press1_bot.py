@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,8 @@ from telegram.ext import (
 
 import vicidial_client as vd
 import press1_access as access
+import press1_campaign as campaign
+import press1_schedule as schedule
 from press1_settings import THREECX_PROFILES, format_settings_text
 from press1_utils import convert_audio_for_asterisk, parse_csv, parse_numbers
 
@@ -41,6 +44,7 @@ Commands:
 /start — this help
 /audio — change IVR message (then send MP3/WAV/voice, or reply /audio to a file)
 /status — live calls & progress
+/dashboard — live auto-updating control panel
 /run — dial loaded leads (same path as /testcall)
 /pause — pause placing new calls (live calls continue)
 /unpause — resume a paused campaign
@@ -49,6 +53,10 @@ Commands:
 /settings — transfer target & dialer options
 /leads — lead count in session
 /clear — clear loaded numbers
+/schedule 9am — run loaded leads at a set time
+/schedule tomorrow 10:30 — schedule for tomorrow
+/schedules — list scheduled campaigns
+/unschedule <id> — cancel a scheduled run
 /addkey @user 24h — grant temporary access (owner only)
 /listkeys — show active access keys (owner only)
 /revokekey @user — revoke access (owner only)
@@ -135,41 +143,51 @@ def _state_line(st: dict[str, str]) -> str:
     return f"Status: {label}"
 
 
+_PACING_CACHE: dict[str, object] = {"at": 0.0, "data": {}}
+
+
+def _pacing() -> dict:
+    now = time.time()
+    cached = _PACING_CACHE.get("data")
+    if cached and now - float(_PACING_CACHE.get("at", 0)) < 60:
+        return cached  # type: ignore[return-value]
+    summary = vd.settings_summary()
+    data = {
+        "call_gap": float(summary["call_gap"]),
+        "batch_size": int(summary["batch_size"]),
+        "batch_pause": int(summary["batch_pause"]),
+        "max_concurrent": int(summary["max_concurrent"]),
+        "transfer_label": summary.get("threex_label", summary["threex_target"]),
+    }
+    _PACING_CACHE["at"] = now
+    _PACING_CACHE["data"] = data
+    return data
+
+
 async def _format_live_stats(
     st: dict[str, str],
     total_leads: int,
     *,
     finished: bool = False,
+    progress: dict | None = None,
 ) -> str:
-    total = int(st.get("list_size", 0) or 0) or total_leads
-    dialed = st.get("dialed", "0")
-    answered = st.get("answered", "0")
-    press1 = st.get("press1", "0")
-    left = st.get("hopper", "0")
-    live = st.get("live", "0")
-    failed = st.get("failed", "0")
+    pacing = _pacing()
+    prog = progress or {}
+    frame = int(prog.get("_frame", 0) or 0)
+    body = campaign.format_campaign_body(
+        st,
+        total_leads,
+        progress=prog,
+        call_gap=pacing["call_gap"],
+        batch_size=pacing["batch_size"],
+        batch_pause=pacing["batch_pause"],
+        frame=frame,
+        finished=finished,
+    )
     dial_state = st.get("dial_state", "")
-    if finished or dial_state in ("finished", "stalled"):
-        header = "✅ Campaign finished"
-    elif dial_state == "finishing":
-        header = f"🟡 Campaign finishing — {total} leads"
-    else:
-        header = f"📊 Campaign live — {total} leads"
-    dialed_n = int(dialed or 0)
-    pct = (dialed_n * 100 // total) if total > 0 else 0
-    lines = [
-        header + "\n",
-        f"📞 Dialed: {dialed} / {total} ({pct}%)",
-        f"⏳ Left: {left}",
-        f"📡 Live now: {live}",
-        f"✅ Answered: {answered}",
-        f"🔥 Press-1: {press1}",
-    ]
-    if int(failed or 0) > 0:
-        lines.append(f"❌ Failed: {failed}")
-    if not finished:
-        lines.append(_state_line(st))
-    return "\n".join(lines)
+    if not finished and dial_state not in ("finished", "stalled"):
+        body += f"\n{_state_line(st)}"
+    return body
 
 
 async def _format_status(st: dict[str, str], loaded_in_bot: int) -> str:
@@ -209,11 +227,14 @@ async def _live_campaign_updater(
     last_text = ""
     idle_rounds = 0
     progress = context.application.bot_data.get("dial_progress", {})
+    frame = 0
     while not stop_event.is_set():
         try:
+            progress["_frame"] = frame
+            frame += 1
             st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
             err = progress.get("error")
-            text = await _format_live_stats(st, total_leads)
+            text = await _format_live_stats(st, total_leads, progress=progress)
             if progress.get("stalled"):
                 text += "\n\n⚠️ Dialer stopped early on server — upload a new list and /run"
             if err:
@@ -229,7 +250,7 @@ async def _live_campaign_updater(
             if dial_state in ("finished", "stalled") and hopper == 0:
                 idle_rounds += 1
                 if idle_rounds >= 2:
-                    final = await _format_live_stats(st, total_leads, finished=True)
+                    final = await _format_live_stats(st, total_leads, finished=True, progress=progress)
                     err = progress.get("error")
                     if err:
                         final += f"\n\n⚠️ {err}"
@@ -241,7 +262,7 @@ async def _live_campaign_updater(
             elif dial_state == "finishing" and hopper == 0 and live == 0:
                 idle_rounds += 1
                 if idle_rounds >= 3:
-                    final = await _format_live_stats(st, total_leads, finished=True)
+                    final = await _format_live_stats(st, total_leads, finished=True, progress=progress)
                     try:
                         await _safe_edit(msg, final)
                     except BadRequest:
@@ -250,7 +271,7 @@ async def _live_campaign_updater(
             elif dial_state == "stalled" and hopper > 0 and dialed > 0:
                 idle_rounds += 1
                 if idle_rounds >= 4:
-                    final = await _format_live_stats(st, total_leads, finished=True)
+                    final = await _format_live_stats(st, total_leads, finished=True, progress=progress)
                     final += "\n\n⚠️ Dialer stopped early on server — upload a new list and /run"
                     try:
                         await _safe_edit(msg, final)
@@ -258,7 +279,7 @@ async def _live_campaign_updater(
                         pass
                     break
             elif not active and dialed == 0 and idle_rounds >= 6:
-                final = await _format_live_stats(st, total_leads, finished=True)
+                final = await _format_live_stats(st, total_leads, finished=True, progress=progress)
                 err = progress.get("error") or "Dialer never started — try /run again"
                 final += f"\n\n⚠️ {err}"
                 try:
@@ -533,24 +554,107 @@ async def cmd_unpause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await msg.edit_text(f"Unpause failed: {e}")
 
 
-async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def _stop_dashboard(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None = None) -> None:
+    boards: dict = context.application.bot_data.get("dashboards", {})
+    keys = [chat_id] if chat_id is not None else list(boards.keys())
+    for cid in keys:
+        entry = boards.pop(cid, None)
+        if not entry:
+            continue
+        stop = entry.get("stop")
+        if stop:
+            stop.set()
+        task = entry.get("task")
+        if task and not task.done():
+            task.cancel()
+
+
+async def _dashboard_updater(
+    msg: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    stop_event: asyncio.Event,
+    user_id: int,
+) -> None:
+    frame = 0
+    last_text = ""
+    while not stop_event.is_set():
+        try:
+            progress = context.application.bot_data.get("dial_progress") or {}
+            progress["_frame"] = frame
+            frame += 1
+            run_since = progress.get("run_since") or None
+            st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
+            total = int(st.get("list_size", 0) or 0) or int(progress.get("total", 0) or 0)
+            loaded = len(session(user_id, context).numbers)
+            pacing = _pacing()
+            if frame == 1 or frame % 10 == 0:
+                scheduled = await asyncio.to_thread(schedule.list_schedules, user_id)
+                context.application.bot_data["_dash_sched"] = scheduled
+            else:
+                scheduled = context.application.bot_data.get("_dash_sched", [])
+            text = campaign.format_dashboard(
+                st,
+                total_leads=total,
+                loaded_in_bot=loaded,
+                progress=progress,
+                call_gap=pacing["call_gap"],
+                batch_size=pacing["batch_size"],
+                batch_pause=pacing["batch_pause"],
+                max_concurrent=pacing["max_concurrent"],
+                transfer_label=pacing["transfer_label"],
+                frame=frame,
+                scheduled_count=len(scheduled),
+            )
+            if text != last_text:
+                await _safe_edit(msg, text)
+                last_text = text
+        except Exception as e:
+            try:
+                await msg.edit_text(f"Dashboard error: {e}")
+            except Exception:
+                pass
+            break
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=3.0)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+
+async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
-    s = session(update.effective_user.id, context)
-    if not s.numbers:
-        await update.message.reply_text("Load numbers first (paste list or send .csv).")
-        return
-    _stop_live_updater(context)
-    numbers = list(s.numbers)
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    _stop_dashboard(context, chat_id)
+    msg = await update.message.reply_text("Loading dashboard…")
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(_dashboard_updater(msg, context, stop_event, user_id))
+    context.application.bot_data.setdefault("dashboards", {})[chat_id] = {
+        "stop": stop_event,
+        "task": task,
+        "msg_id": msg.message_id,
+        "user_id": user_id,
+    }
+
+
+async def _launch_campaign(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+    numbers: list[str],
+    *,
+    intro: str | None = None,
+) -> None:
     count = len(numbers)
-    s.numbers.clear()
-    msg = await update.message.reply_text(
+    _stop_live_updater(context)
+    text_intro = intro or (
         f"Dialling {count} leads — {vd.BATCH_SIZE}/batch, "
         f"{vd.CALL_GAP_SEC:g}s between calls, {vd.BATCH_PAUSE_SEC}s between batches…"
     )
+    msg = await context.bot.send_message(chat_id, text_intro)
     try:
         run_since = await asyncio.to_thread(vd.server_now)
-        # Full reset so a new /run can never display the previous run's numbers.
         progress: dict = {
             "started": 0,
             "dialed": 0,
@@ -563,9 +667,11 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "stop": False,
             "run_since": run_since,
             "run_id": "",
+            "owner_id": user_id,
+            "pace_samples": [],
+            "_frame": 0,
         }
         context.application.bot_data["dial_progress"] = progress
-
         try:
             await asyncio.to_thread(vd.launch_dial_campaign, numbers, progress)
         except Exception as e:
@@ -574,13 +680,9 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
             await _safe_edit(
                 msg,
-                await _format_live_stats(st, count) + f"\n\n⚠️ {e}",
+                await _format_live_stats(st, count, progress=progress) + f"\n\n⚠️ {e}",
             )
             return
-
-        # Render a guaranteed-clean zeroed frame first so the new run never flashes
-        # the previous run's totals while the dialer spins up. The live updater then
-        # takes over with real server counters a few seconds later.
         fresh = {
             "list_size": str(count),
             "dialed": "0",
@@ -591,8 +693,7 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "failed": "0",
             "dial_state": "running",
         }
-        await _safe_edit(msg, await _format_live_stats(fresh, count))
-
+        await _safe_edit(msg, await _format_live_stats(fresh, count, progress=progress))
         stop_event = asyncio.Event()
         context.application.bot_data["live_updater_stop"] = stop_event
         task = asyncio.create_task(
@@ -603,7 +704,125 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             await _safe_edit(msg, f"Run failed: {e}")
         except Exception:
-            await update.message.reply_text(f"Run failed: {e}")
+            await context.bot.send_message(chat_id, f"Run failed: {e}")
+
+
+async def _schedule_loop(app: Application) -> None:
+    while True:
+        try:
+            due = await asyncio.to_thread(schedule.pop_due_schedules)
+            for job in due:
+                uid = int(job.get("user_id", 0) or 0)
+                chat_id = int(job.get("chat_id", uid) or uid)
+                numbers = list(job.get("numbers") or [])
+                if not access.is_allowed(uid) or not numbers:
+                    continue
+                run_at = datetime.fromtimestamp(
+                    float(job.get("run_at", 0)), tz=schedule.TZ
+                )
+                intro = (
+                    f"⏰ Scheduled campaign starting — {len(numbers)} leads "
+                    f"(was due {run_at.strftime('%H:%M %Z')})…"
+                )
+
+                class _AppContext:
+                    def __init__(self, application: Application) -> None:
+                        self.application = application
+                        self.bot = application.bot
+
+                await _launch_campaign(_AppContext(app), chat_id, uid, numbers, intro=intro)
+        except Exception as e:
+            print(f"[press1] schedule loop: {e}")
+        await asyncio.sleep(15)
+
+
+async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update, context):
+        return
+    args = context.args or []
+    if args and args[0].lower() in ("list", "ls"):
+        text = await asyncio.to_thread(
+            schedule.format_schedule_list, update.effective_user.id
+        )
+        await update.message.reply_text(text)
+        return
+    s = session(update.effective_user.id, context)
+    if not s.numbers:
+        await update.message.reply_text(
+            "Load numbers first, then:\n"
+            "/schedule 9am\n"
+            "/schedule tomorrow 10:30"
+        )
+        return
+    try:
+        run_at = await asyncio.to_thread(schedule.parse_schedule_args, args)
+    except ValueError as e:
+        await update.message.reply_text(str(e))
+        return
+    numbers = list(s.numbers)
+    s.numbers.clear()
+    try:
+        entry = await asyncio.to_thread(
+            schedule.add_schedule,
+            user_id=update.effective_user.id,
+            chat_id=update.effective_chat.id,
+            numbers=numbers,
+            run_at=run_at,
+        )
+        await update.message.reply_text(
+            f"⏰ Scheduled {len(numbers)} leads for "
+            f"{run_at.strftime('%a %d %b %H:%M %Z')}\n"
+            f"ID: `{entry['id']}`\n"
+            f"/schedules to view · /unschedule {entry['id']} to cancel"
+        )
+    except Exception as e:
+        s.numbers = numbers
+        await update.message.reply_text(f"Schedule failed: {e}")
+
+
+async def cmd_schedules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update, context):
+        return
+    try:
+        text = await asyncio.to_thread(
+            schedule.format_schedule_list, update.effective_user.id
+        )
+        await update.message.reply_text(text)
+    except Exception as e:
+        await update.message.reply_text(f"Failed: {e}")
+
+
+async def cmd_unschedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update, context):
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("Usage: /unschedule <id>")
+        return
+    try:
+        sid = await asyncio.to_thread(
+            schedule.remove_schedule, args[0], update.effective_user.id
+        )
+        await update.message.reply_text(f"✅ Cancelled schedule `{sid}`.")
+    except Exception as e:
+        await update.message.reply_text(f"Failed: {e}")
+
+
+async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update, context):
+        return
+    s = session(update.effective_user.id, context)
+    if not s.numbers:
+        await update.message.reply_text("Load numbers first (paste list or send .csv).")
+        return
+    numbers = list(s.numbers)
+    s.numbers.clear()
+    await _launch_campaign(
+        context,
+        update.effective_chat.id,
+        update.effective_user.id,
+        numbers,
+    )
 
 
 _AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".opus", ".flac", ".aac")
@@ -795,6 +1014,7 @@ async def post_init(app: Application) -> None:
             BotCommand("start", "Help"),
             BotCommand("audio", "Change IVR audio"),
             BotCommand("status", "Hopper & live calls"),
+            BotCommand("dashboard", "Live control panel"),
             BotCommand("run", "Start campaign"),
             BotCommand("pause", "Pause campaign"),
             BotCommand("unpause", "Resume campaign"),
@@ -803,6 +1023,8 @@ async def post_init(app: Application) -> None:
             BotCommand("settings", "Transfer target & options"),
             BotCommand("leads", "Loaded lead count"),
             BotCommand("clear", "Clear loaded numbers"),
+            BotCommand("schedule", "Schedule a campaign"),
+            BotCommand("schedules", "List scheduled runs"),
             BotCommand("addkey", "Grant temporary access"),
             BotCommand("listkeys", "List access keys"),
             BotCommand("revokekey", "Revoke access"),
@@ -830,6 +1052,7 @@ async def post_init(app: Application) -> None:
         print(f"[press1] dtmf listener warning: {e}")
     app.bot_data["dtmf_offset"] = 0
     asyncio.create_task(_dtmf_notify_loop(app))
+    asyncio.create_task(_schedule_loop(app))
 
 
 _conflict_logged = False
@@ -865,6 +1088,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("dashboard", cmd_dashboard))
     app.add_handler(CommandHandler("run", cmd_run))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("unpause", cmd_unpause))
@@ -872,6 +1096,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("testcall", cmd_testcall))
     app.add_handler(CommandHandler("leads", cmd_leads))
     app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("schedule", cmd_schedule))
+    app.add_handler(CommandHandler("schedules", cmd_schedules))
+    app.add_handler(CommandHandler("unschedule", cmd_unschedule))
     app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler("addkey", cmd_addkey))
     app.add_handler(CommandHandler("listkeys", cmd_listkeys))

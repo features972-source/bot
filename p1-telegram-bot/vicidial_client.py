@@ -64,6 +64,7 @@ DTMF_EVENTS_FILE = "/var/lib/asterisk/press1_dtmf_events.jsonl"
 DIAL_LOCK = "/tmp/press1_dial.lock"
 SETTINGS_PATH = "/var/lib/asterisk/press1_bot_settings.json"
 ACCESS_PATH = "/var/lib/asterisk/press1_access.json"
+SCHEDULES_PATH = "/var/lib/asterisk/press1_schedules.json"
 PJSIP_CONF = "/etc/asterisk/pjsip.conf"
 
 
