@@ -35,13 +35,14 @@ BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "0"))
 CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.2"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
 CPS = int(os.getenv("VICIDIAL_CPS", "20"))
-# Outbound caller ID — leave empty to let BitCall assign CLI (no forced number).
-AU_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_AU_CALLER_ID", os.getenv("VICIDIAL_CALLER_ID", "")))
+# Stable outbound caller ID for BitCall (required — empty CLI causes instant hangup).
+DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038969244")) or "442038969244"
+AU_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_AU_CALLER_ID", DEFAULT_CALLER_ID)) or DEFAULT_CALLER_ID
 MIN_PHONE_DIGITS = 9
 
 
 def outbound_caller_id(number: str) -> str:
-    """Return CLI for call files; empty = BitCall default."""
+    """Return CLI for call files."""
     return AU_CALLER_ID
 
 DIAL_SCRIPT = "/tmp/press1_dial_run.sh"
