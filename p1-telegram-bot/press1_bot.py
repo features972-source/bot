@@ -15,11 +15,13 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, Conflict
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     Defaults,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -156,10 +158,8 @@ async def guard(update: Update, context: ContextTypes.DEFAULT_TYPE | None = None
     if user and context:
         _note_user(context.application, user)
     if not allowed(uid):
-        if update.message:
-            await update.message.reply_text("🔒 Access denied.")
-        elif update.callback_query:
-            await update.callback_query.answer("🔒 Access denied.", show_alert=True)
+        if update.callback_query:
+            await update.callback_query.answer()
         return False
     return True
 
@@ -475,7 +475,7 @@ async def on_threex_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not query or not query.data:
         return
     if not allowed(query.from_user.id if query.from_user else 0):
-        await query.answer("Access denied.", show_alert=True)
+        await query.answer()
         return
     if not query.data.startswith("p1_3cx:"):
         return
@@ -1222,9 +1222,37 @@ async def _dtmf_notify_loop(app: Application) -> None:
         await asyncio.sleep(2)
 
 
+async def _dedup_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ignore the same Telegram update if two bot instances overlap briefly."""
+    uid = update.update_id
+    if uid is None:
+        return
+    seen: dict[int, float] = context.application.bot_data.setdefault("_seen_updates", {})
+    now = time.time()
+    if len(seen) > 500:
+        cutoff = now - 3600
+        for key, ts in list(seen.items()):
+            if ts < cutoff:
+                del seen[key]
+    if uid in seen:
+        raise ApplicationHandlerStop()
+    seen[uid] = now
+
+
 async def post_init(app: Application) -> None:
-    # Only one process may poll this token (Render OR local — not both).
-    await app.bot.delete_webhook(drop_pending_updates=True)
+    webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
+    if webhook_url:
+        secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip() or None
+        await app.bot.set_webhook(
+            url=webhook_url,
+            secret_token=secret,
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"],
+        )
+        print(f"[press1] webhook active: {webhook_url}")
+    else:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        print("[press1] polling mode (local / legacy)")
     await app.bot.set_my_commands(
         [
             BotCommand("start", "Help"),
@@ -1272,9 +1300,11 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _conflict_logged:
             _conflict_logged = True
             print(
-                "[press1] CONFLICT: two bots share this token. "
-                "Keep ONE Render service (p1-bot OR p1-telegram-bot, not both) "
-                "and stop local start-bot.bat."
+                "[press1] CONFLICT: another bot is using this token — "
+                "duplicate replies likely. Stop VPS p1-dialer "
+                "(systemctl stop p1-dialer on 167.99.193.119), "
+                "do not run Q1/p1-dialer/start-bot.bat locally, "
+                "and keep only one Render P1 service."
             )
         return
     print(f"[press1] error: {err}")
@@ -1293,6 +1323,7 @@ def build_application() -> Application:
         .write_timeout(30)
         .build()
     )
+    app.add_handler(TypeHandler(Update, _dedup_update), group=-1)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))

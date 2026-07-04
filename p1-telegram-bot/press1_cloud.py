@@ -1,4 +1,4 @@
-"""Press-1 bot entry point for Render (health check + Telegram polling)."""
+"""Press-1 bot entry point for Render (health check + Telegram webhook)."""
 
 from __future__ import annotations
 
@@ -6,14 +6,14 @@ import asyncio
 import logging
 import os
 import sys
-import threading
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
+from telegram import Update
 
 load_dotenv()
 
-from press1_bot import build_application
+from press1_bot import TOKEN, build_application
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -23,24 +23,90 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+BUILD = "xfer-fix-v1"
+WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "telegram/webhook").lstrip("/")
+PUBLIC_URL = (
+    os.getenv("TELEGRAM_WEBHOOK_URL_BASE")
+    or os.getenv("RENDER_EXTERNAL_URL")
+    or "https://p1-bot.onrender.com"
+).rstrip("/")
+WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 
-def start_health_server() -> None:
-    port = int(os.getenv("PORT", "10000"))
-    app = Flask(__name__)
 
-    @app.get("/health")
+def _use_polling() -> bool:
+    return os.getenv("P1_USE_POLLING", "").strip().lower() in ("1", "true", "yes")
+
+
+def _run_polling() -> None:
+    app = build_application()
+    logger.info("Press-1 bot polling (local/dev only)…")
+    app.run_polling(
+        allowed_updates=["message", "callback_query"],
+        drop_pending_updates=True,
+        poll_interval=1.0,
+        timeout=30,
+        close_loop=False,
+    )
+
+
+def _run_webhook() -> None:
+    os.environ.setdefault("TELEGRAM_WEBHOOK_URL", f"{PUBLIC_URL}/{WEBHOOK_PATH}")
+    if not WEBHOOK_SECRET and TOKEN and ":" in TOKEN:
+        os.environ.setdefault("TELEGRAM_WEBHOOK_SECRET", TOKEN.split(":", 1)[0])
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    tg_app = build_application()
+
+    async def boot() -> None:
+        await tg_app.initialize()
+        await tg_app.start()
+        logger.info("Press-1 bot ready via webhook %s/%s", PUBLIC_URL, WEBHOOK_PATH)
+
+    loop.run_until_complete(boot())
+
+    flask_app = Flask(__name__)
+
+    @flask_app.get("/health")
     def health():
-        return jsonify({"ok": True, "id": "p1", "bot": "P1 Press-1 Dialer"})
+        return jsonify({"ok": True, "id": "p1", "bot": "P1 Press-1 Dialer", "build": BUILD})
 
-    @app.get("/")
+    @flask_app.get("/")
     def root():
-        return jsonify({"ok": True, "service": "p1-telegram-bot", "build": "per-chat-settings-v1"})
+        return jsonify({"ok": True, "service": "p1-telegram-bot", "build": BUILD})
 
+    @flask_app.post(f"/{WEBHOOK_PATH}")
+    def telegram_webhook():
+        secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+        if secret:
+            header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if header != secret:
+                return "", 403
+        data = request.get_json(force=True, silent=True)
+        if not data:
+            return "", 400
+        update = Update.de_json(data, tg_app.bot)
+        if update is None:
+            return "", 400
+        future = asyncio.run_coroutine_threadsafe(tg_app.process_update(update), loop)
+        try:
+            future.result(timeout=30)
+        except Exception:
+            logger.exception("process_update failed")
+            return "", 500
+        return "", 200
+
+    port = int(os.getenv("PORT", "10000"))
     from werkzeug.serving import make_server
 
-    httpd = make_server("0.0.0.0", port, app, threaded=True)
-    logger.info("Health server on port %s", port)
-    httpd.serve_forever()
+    httpd = make_server("0.0.0.0", port, flask_app, threaded=True)
+    logger.info("Health + webhook on port %s", port)
+    try:
+        httpd.serve_forever()
+    finally:
+        loop.run_until_complete(tg_app.stop())
+        loop.run_until_complete(tg_app.shutdown())
+        loop.close()
 
 
 def main() -> None:
@@ -49,17 +115,10 @@ def main() -> None:
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    threading.Thread(target=start_health_server, daemon=True).start()
-
-    app = build_application()
-    logger.info("Press-1 VICIdial bot polling…")
-    app.run_polling(
-        allowed_updates=["message", "callback_query"],
-        drop_pending_updates=True,
-        poll_interval=1.0,
-        timeout=30,
-        close_loop=False,
-    )
+    if _use_polling():
+        _run_polling()
+    else:
+        _run_webhook()
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import time
 from contextlib import contextmanager
 from io import StringIO
@@ -101,6 +102,11 @@ def _dial_done_path(run_id: str) -> str:
 def _safe_run_token(run_id: str) -> str:
     token = re.sub(r"[^0-9_]", "", str(run_id or ""))
     return token or "0"
+
+
+def chat_cfg_run_id(chat_id: int) -> str:
+    """Stable numeric Asterisk cfg key for a Telegram chat (test calls + settings)."""
+    return f"9{abs(int(chat_id))}"
 
 
 def _run_paths(run_id: str) -> dict[str, str]:
@@ -229,13 +235,41 @@ def get_threex_target(chat_id: int | None = None) -> str:
     return load_bot_settings().get("threex_target", DEFAULT_THREECX)
 
 
-def _run_cfg_db_commands(run_id: str, sound: str, xfer_dial: str) -> str:
+def _put_press1_db_entries(entries: dict[str, str]) -> None:
+    """Write Asterisk DB keys (family press1) with verify — avoids shell quoting bugs."""
+    import base64
+
+    clean = {str(k): str(v) for k, v in entries.items() if k and v is not None}
+    if not clean:
+        return
+    payload = base64.b64encode(json.dumps(clean).encode()).decode()
+    run_remote(
+        f"python3 <<'PY'\n"
+        f"import base64, json, shlex, subprocess\n"
+        f"entries = json.loads(base64.b64decode('{payload}').decode())\n"
+        f"for key, val in entries.items():\n"
+        f"    put = f'database put press1 {{shlex.quote(key)}} {{shlex.quote(val)}}'\n"
+        f"    r = subprocess.run(['asterisk', '-rx', put], capture_output=True, text=True)\n"
+        f"    if r.returncode != 0:\n"
+        f"        raise SystemExit((r.stderr or r.stdout or 'db put failed').strip())\n"
+        f"    get = f'database get press1 {{shlex.quote(key)}}'\n"
+        f"    got = subprocess.run(['asterisk', '-rx', get], capture_output=True, text=True)\n"
+        f"    body = (got.stdout or '') + (got.stderr or '')\n"
+        f"    if val not in body:\n"
+        f"        raise SystemExit(f'verify failed {{key}}={{val!r}} got {{body!r}}')\n"
+        f"PY",
+        timeout=30,
+    )
+
+
+def _write_run_xfer_file(run_id: str, xfer: str) -> None:
     rid = _safe_run_token(run_id)
-    sound_q = sound.replace("'", "")
-    xfer_q = xfer_dial.replace("'", "")
-    return (
-        f"asterisk -rx 'database put press1 cfg/{rid}/sound {sound_q}' >/dev/null; "
-        f"asterisk -rx 'database put press1 cfg/{rid}/xfer {xfer_q}' >/dev/null"
+    run_remote(
+        f"python3 <<'PY'\n"
+        f"from pathlib import Path\n"
+        f"Path('/tmp/press1_xfer_{rid}.txt').write_text({xfer!r})\n"
+        f"PY",
+        timeout=15,
     )
 
 
@@ -245,19 +279,40 @@ def apply_run_config(run_id: str, chat_id: int) -> dict[str, str]:
     p = profile(cfg["threex_target"])
     xfer = transfer_dial_target(p)
     sound = cfg["sound_name"]
-    run_remote(_run_cfg_db_commands(run_id, sound, xfer), timeout=20)
-    return {"sound_name": sound, "xfer_dial": xfer, "threex_target": cfg["threex_target"], "label": p["label"]}
+    rid = _safe_run_token(run_id)
+    entries: dict[str, str] = {
+        f"cfg/{rid}/sound": sound,
+        f"cfg/{rid}/xfer": xfer,
+    }
+    chat_rid = chat_cfg_run_id(chat_id)
+    if chat_rid != rid:
+        entries[f"cfg/{chat_rid}/sound"] = sound
+        entries[f"cfg/{chat_rid}/xfer"] = xfer
+    try:
+        _put_press1_db_entries(entries)
+        _write_run_xfer_file(rid, xfer)
+    except Exception as e:
+        raise RuntimeError(f"Failed to apply xfer {xfer} for run {rid}: {e}") from e
+    return {
+        "sound_name": sound,
+        "xfer_dial": xfer,
+        "threex_target": cfg["threex_target"],
+        "label": p["label"],
+        "run_id": rid,
+    }
 
 
 def apply_lead_run_config(lead_digits: str, chat_id: int, *, run_id: str | None = None) -> dict[str, str]:
     """Apply per-chat IVR/xfer for a single test call."""
-    rid = run_id or f"test_{abs(int(chat_id))}"
+    rid = _safe_run_token(run_id or chat_cfg_run_id(chat_id))
     cfg = apply_run_config(rid, chat_id)
     digits = re.sub(r"\D", "", lead_digits)
-    run_remote(
-        f"asterisk -rx 'database put press1 runs/{digits} {rid}' >/dev/null; "
-        f"asterisk -rx 'database put press1 lead {digits}' >/dev/null",
-        timeout=20,
+    _put_press1_db_entries(
+        {
+            f"runs/{digits}": rid,
+            f"lead/{digits}": digits,
+            f"leadxfer/{digits}": cfg["xfer_dial"],
+        }
     )
     return cfg
 
@@ -313,12 +368,13 @@ def ensure_all_threex_endpoints() -> str:
 
 
 def apply_threex_target(profile_id: str, chat_id: int | None = None) -> dict[str, str]:
-    """Save transfer target for a chat (does not disturb other chats)."""
+    """Save transfer target for a chat and push xfer to Asterisk immediately."""
     p = profile(profile_id)
     if chat_id is None:
         save_bot_settings({"threex_target": profile_id})
     else:
         save_chat_settings(chat_id, threex_target=profile_id)
+        apply_run_config(chat_cfg_run_id(chat_id), chat_id)
     ensure_all_threex_endpoints()
     return p
 
@@ -395,8 +451,9 @@ exten => xferdial,1,StopPlaytones()
  same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(PJSIP_HEADER(add,P-Asserted-Identity)=<sip:+${{LEADNUM}}@{server_ip}>))
  same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}}))
  same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
- same => n,Set(P1SOUND=${{DB(press1/cfg/${{P1RUN}}/sound)}})
- same => n,Set(P1XFER=${{DB(press1/cfg/${{P1RUN}}/xfer)}})
+ same => n,Set(P1XFER=${{DB(press1/leadxfer/${{FILTER(0-9,${{LEADNUM}})}})}})
+ same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1SOUND=${{DB(press1/cfg/${{P1RUN}}/sound)}}))
+ same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER=${{DB(press1/cfg/${{P1RUN}}/xfer)}}))
  same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND={default_sound}))
  same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER={default_xfer}))
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/press1 &' )
@@ -489,10 +546,10 @@ def test_numbers() -> list[str]:
     nums: list[str] = []
     seen: set[str] = set()
     for n in raw.split(","):
-        digits = re.sub(r"\D", "", n)
-        if digits and digits not in seen:
-            seen.add(digits)
-            nums.append(digits)
+        e164 = to_e164(n.strip()) or re.sub(r"\D", "", n)
+        if len(e164) >= MIN_PHONE_DIGITS + 2 and e164 not in seen:
+            seen.add(e164)
+            nums.append(e164)
     return nums
 
 
@@ -554,7 +611,8 @@ def run_remote(cmd: str, timeout: int = 120) -> str:
 
 def _server_dial_script(run_id: str) -> str:
     batch, pause, gap = BATCH_SIZE, BATCH_PAUSE_SEC, CALL_GAP_SEC
-    p = _run_paths(run_id)
+    rid = _safe_run_token(run_id)
+    p = _run_paths(rid)
     return f"""#!/bin/bash
 set +e
 STOP={p['stop']}
@@ -564,7 +622,7 @@ FAILED={p['failed']}
 NUMFILE={p['numbers']}
 LOG={DIAL_LOG}
 LOCK={p['lock']}
-RUNID={run_id}
+RUNID={rid}
 DONE={p['done']}
 BATCH={batch}
 PAUSE={pause}
@@ -611,6 +669,9 @@ while IFS= read -r num || [ -n "$num" ]; do
   digits=$(echo "$num" | tr -cd '0-9')
   asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >>"$LOG" 2>&1
   asterisk -rx "database put press1 lead ${{num}}" >>"$LOG" 2>&1
+  if [ -f "/tmp/press1_xfer_$RUNID.txt" ]; then
+    python3 -c "import shlex,subprocess;d='${{digits}}';x=open('/tmp/press1_xfer_$RUNID.txt').read().strip();subprocess.run(['asterisk','-rx',f'database put press1 leadxfer/{{d}} {{shlex.quote(x)}}'],check=False)" >>"$LOG" 2>&1
+  fi
   callfile="$TMPDIR/press1_${{RUNID}}_${{digits}}_$$.call"
   mkdir -p "$TMPDIR" "$SPOOLDIR" 2>/dev/null
   {{
@@ -1020,15 +1081,16 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path]) -> str:
 
 def originate_press1(phone: str, chat_id: int | None = None) -> str:
     """Place one outbound call — identical path to /testcall."""
-    ensure_press1_stack(chat_id)
-    digits = to_e164(phone)
+    digits = to_e164(phone) or re.sub(r"\D", "", phone)
     if len(digits) < MIN_PHONE_DIGITS + 2:
         raise ValueError(f"invalid number: {phone!r}")
     if chat_id is not None:
         apply_lead_run_config(digits, chat_id)
+    ensure_press1_stack(chat_id)
     run_remote(
-        f"asterisk -rx 'database put press1 lead {digits}'; "
-        f"asterisk -rx 'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr'"
+        f"asterisk -rx {shlex.quote(f'database put press1 lead {digits}')}; "
+        f"asterisk -rx {shlex.quote(f'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr')}",
+        timeout=30,
     )
     return digits
 
@@ -1342,7 +1404,8 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     chat_id = int(progress.get("chat_id", 0) or 0)
     run_id = f"{int(time.time())}_{abs(chat_id)}"
     progress["run_id"] = run_id
-    apply_run_config(run_id, chat_id)
+    run_cfg = apply_run_config(run_id, chat_id)
+    progress["transfer_label"] = run_cfg.get("label", "")
     paths = _run_paths(run_id)
 
     run_remote(
@@ -1395,10 +1458,15 @@ def dial_leads(phones: list[str], progress: dict) -> None:
 
 def test_calls(numbers: list[str] | None = None, chat_id: int | None = None) -> list[str]:
     nums = numbers or test_numbers()
+    if not nums:
+        raise RuntimeError("No test numbers configured — set VICIDIAL_TEST_NUMBERS on Render")
     placed: list[str] = []
+    errors: list[str] = []
     for num in nums:
         try:
             placed.append(originate_press1(num, chat_id))
-        except Exception:
-            continue
+        except Exception as e:
+            errors.append(f"{num}: {e}")
+    if not placed and errors:
+        raise RuntimeError(errors[0])
     return placed
