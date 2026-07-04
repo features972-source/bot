@@ -93,6 +93,13 @@ def _pass_keyboard(offer_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def _format_notes_block(notes_text: str) -> str:
+    escaped = html.escape(notes_text.strip())
+    if len(escaped) > 3200:
+        escaped = escaped[:3200] + "..."
+    return escaped
+
+
 def _open_pass_text(offer: PassOffer) -> str:
     starter = _mention_html(
         offer.starter_user_id,
@@ -126,10 +133,12 @@ def _taken_pass_announcement(offer: PassOffer, user) -> str:
         offer.starter_username,
         offer.starter_display_name,
     )
+    notes = _format_notes_block(offer.notes_text)
     return (
         f"🚨🚨🚨 <b>{taker} HAS TOOK THE PASS</b> 🚨🚨🚨\n\n"
         f"{starter} — <b>SEND HIM THE NUMBER IN PMs!</b>\n\n"
-        "<blockquote>▪️ Full notes were sent privately to the finisher's DMs.</blockquote>"
+        f"<blockquote>▪️ <b>Full notes</b> (also sent to finisher's DMs):\n"
+        f"{notes}</blockquote>"
     )
 
 
