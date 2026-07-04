@@ -305,9 +305,14 @@ def format_off_phone_message(
     *,
     duration_seconds: int | None = None,
 ) -> str:
-    agent = _agent_name_only(link)
+    if link.telegram_username:
+        agent = f"@{html.escape(link.telegram_username.lstrip('@'))}"
+    elif link.display_name:
+        agent = html.escape(link.display_name)
+    else:
+        agent = f"ext {html.escape(link.extension)}"
     dur = f" · {format_duration(duration_seconds)}" if duration_seconds is not None else ""
-    return f"<blockquote>📞❌ <b>{agent}</b> call ended{dur}</blockquote>"
+    return f"<blockquote>📞❌ {agent} call ended{dur}</blockquote>"
 
 
 
