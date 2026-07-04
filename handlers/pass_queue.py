@@ -108,11 +108,10 @@ def _open_pass_text(offer: PassOffer) -> str:
         offer.starter_username,
         offer.starter_display_name,
     )
-    notes = _format_notes_block(offer.notes_text)
     return (
         "<blockquote>📞 <b>PASS AVAILABLE</b>\n"
         f"▪️ Starter: {starter}\n"
-        f"▪️ <b>Notes:</b>\n{notes}\n"
+        "▪️ Full notes are private — sent to whoever takes the pass\n"
         "▪️ Tap <b>Take pass</b> below — one person at a time</blockquote>"
     )
 
@@ -124,11 +123,10 @@ def _claimed_pass_text(
     display_name: str | None,
 ) -> str:
     mention = _mention_html(user_id, username, display_name)
-    notes = _format_notes_block(offer.notes_text)
     return (
         f"<blockquote>⏳ <b>PASS LOCKED</b>\n"
         f"▪️ {mention} is taking this pass\n"
-        f"▪️ <b>Notes:</b>\n{notes}</blockquote>"
+        "▪️ Full notes were sent to their DMs</blockquote>"
     )
 
 
@@ -139,12 +137,10 @@ def _taken_pass_announcement(offer: PassOffer, user) -> str:
         offer.starter_username,
         offer.starter_display_name,
     )
-    notes = _format_notes_block(offer.notes_text)
     return (
         f"🚨🚨🚨 <b>{taker} HAS TOOK THE PASS</b> 🚨🚨🚨\n\n"
         f"{starter} — <b>SEND HIM THE NUMBER IN PMs!</b>\n\n"
-        f"<blockquote>▪️ <b>Full notes</b> (also sent to finisher's DMs):\n"
-        f"{notes}</blockquote>"
+        "<blockquote>▪️ Full notes were sent privately to the finisher's DMs.</blockquote>"
     )
 
 
