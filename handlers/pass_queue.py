@@ -15,11 +15,9 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Mes
 from config import Settings
 from database import (
     PassOffer,
-    boot_pass_user,
     clear_circulating_pass_notes,
     create_open_pass_offer,
     get_pass_offer,
-    is_pass_booted,
     list_pending_pass_offers,
     pass_offer_for_notes,
     release_pass_claim,
@@ -36,7 +34,6 @@ PASS_STATUS_PENDING = "pending"
 PASS_STATUS_TAKEN = "taken"
 PASS_STATUS_EXPIRED = "expired"
 PASS_REPOST_SECONDS = 120
-PASS_CLAIM_TIMEOUT_SECONDS = 90
 PASS_EXPIRE_SECONDS = 3600
 PASS_POLL_SECONDS = 30
 
@@ -95,13 +92,6 @@ def _pass_keyboard(offer_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def _format_notes_block(notes_text: str) -> str:
-    escaped = html.escape(notes_text.strip())
-    if len(escaped) > 3200:
-        escaped = escaped[:3200] + "…"
-    return escaped
-
-
 def _open_pass_text(offer: PassOffer) -> str:
     starter = _mention_html(
         offer.starter_user_id,
@@ -125,8 +115,7 @@ def _claimed_pass_text(
     mention = _mention_html(user_id, username, display_name)
     return (
         f"<blockquote>⏳ <b>PASS LOCKED</b>\n"
-        f"▪️ {mention} is taking this pass\n"
-        "▪️ Full notes were sent to their DMs</blockquote>"
+        f"▪️ {mention} is taking this pass</blockquote>"
     )
 
 
@@ -165,18 +154,26 @@ def pass_repost_due(offer: PassOffer, *, now: datetime | None = None) -> bool:
     return elapsed >= PASS_REPOST_SECONDS
 
 
-def pass_claim_expired(offer: PassOffer, *, now: datetime | None = None) -> bool:
-    if offer.status != PASS_STATUS_PENDING or offer.assigned_user_id == 0:
-        return False
-    if not offer.claimed_at:
-        return False
-    now = now or datetime.now(timezone.utc)
-    elapsed = (now - _parse_iso_datetime(offer.claimed_at)).total_seconds()
-    return elapsed >= PASS_CLAIM_TIMEOUT_SECONDS
+async def _release_claim_and_reopen(bot, path: str, offer: PassOffer) -> None:
+    release_pass_claim(path, offer.id)
+    refreshed = get_pass_offer(path, offer.id)
+    if refreshed is None or refreshed.status != PASS_STATUS_PENDING:
+        return
+    if refreshed.offer_message_id:
+        try:
+            await bot.edit_message_text(
+                _open_pass_text(refreshed),
+                chat_id=refreshed.chat_id,
+                message_id=refreshed.offer_message_id,
+                parse_mode="HTML",
+                reply_markup=_pass_keyboard(refreshed.id),
+            )
+        except BadRequest:
+            pass
 
 
 async def pass_repost_loop(bot, settings: Settings, bot_data: dict) -> None:
-    """Repost open passes every 2 minutes; boot users who claim but don't take."""
+    """Repost open passes every 2 minutes until taken."""
     while True:
         try:
             await asyncio.sleep(PASS_POLL_SECONDS)
@@ -185,11 +182,6 @@ async def pass_repost_loop(bot, settings: Settings, bot_data: dict) -> None:
                 if pass_offer_expired(offer, now=now):
                     await _expire_pass_offer(bot, settings, offer.id)
                     continue
-                if pass_claim_expired(offer, now=now):
-                    await _boot_and_release_claim(bot, settings, offer)
-                    offer = get_pass_offer(settings.database_path, offer.id)
-                    if offer is None or offer.status != PASS_STATUS_PENDING:
-                        continue
                 if pass_repost_due(offer, now=now):
                     await _repost_pass_offer(bot, settings, offer.id)
         except asyncio.CancelledError:
@@ -279,49 +271,6 @@ async def _expire_pass_offer(bot, settings: Settings, offer_id: int) -> None:
         pass
 
 
-async def _boot_and_release_claim(bot, settings: Settings, offer: PassOffer) -> None:
-    path = settings.database_path
-    boot_pass_user(
-        path,
-        telegram_user_id=offer.assigned_user_id,
-        telegram_username=offer.assigned_username,
-        display_name=offer.assigned_display_name,
-        reason="Claimed pass but did not take it",
-    )
-    release_pass_claim(path, offer.id)
-    mention = _mention_html(
-        offer.assigned_user_id,
-        offer.assigned_username,
-        offer.assigned_display_name,
-    )
-    try:
-        await bot.send_message(
-            chat_id=offer.chat_id,
-            text=f"🚫 {mention} — <b>booted from passes</b> (did not take)",
-            parse_mode="HTML",
-            reply_to_message_id=offer.notes_message_id,
-        )
-    except BadRequest:
-        pass
-    refreshed = get_pass_offer(path, offer.id)
-    if refreshed and refreshed.offer_message_id:
-        try:
-            await bot.edit_message_text(
-                _open_pass_text(refreshed),
-                chat_id=refreshed.chat_id,
-                message_id=refreshed.offer_message_id,
-                parse_mode="HTML",
-                reply_markup=_pass_keyboard(refreshed.id),
-            )
-        except BadRequest:
-            pass
-    logger.info(
-        "Booted user %s from pass offer %s",
-        offer.assigned_user_id,
-        offer.id,
-    )
-
-
 async def clearnotes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     if not await require_admin(update, settings, deny_message="❌ Admins only."):
@@ -334,8 +283,7 @@ async def clearnotes_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     counts = clear_circulating_pass_notes(settings.database_path)
     offers = counts["pending_offers"]
     notes = counts["pending_notes"]
-    booted = counts.get("booted_users", 0)
-    if offers == 0 and notes == 0 and booted == 0:
+    if offers == 0 and notes == 0:
         await message.reply_text("No active pass notes to clear.")
         return
 
@@ -344,8 +292,6 @@ async def clearnotes_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parts.append(f"{offers} active pass offer{'s' if offers != 1 else ''}")
     if notes:
         parts.append(f"{notes} waiting note{'s' if notes != 1 else ''}")
-    if booted:
-        parts.append(f"{booted} booted user{'s' if booted != 1 else ''}")
     await message.reply_text(
         f"🧹 Cleared {' and '.join(parts)}.",
         parse_mode="HTML",
@@ -513,9 +459,6 @@ async def pass_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if user.id == offer.starter_user_id:
         await query.answer("You can't take your own pass.", show_alert=True)
         return
-    if is_pass_booted(settings.database_path, user.id):
-        await query.answer("You are booted from taking passes.", show_alert=True)
-        return
 
     path = settings.database_path
     if offer.assigned_user_id != 0 and offer.assigned_user_id != user.id:
@@ -582,15 +525,15 @@ async def _complete_take_pass(
             parse_mode="HTML",
         )
     except Forbidden:
-        await _boot_and_release_claim(context.bot, settings, offer)
+        await _release_claim_and_reopen(context.bot, path, offer)
         await query.answer(
-            "Start a private chat with the bot first — you've been booted from passes.",
+            "Start a private chat with the bot first, then tap Take pass again.",
             show_alert=True,
         )
         return
     except Exception:
         logger.exception("Failed to DM pass notes to user %s", user.id)
-        release_pass_claim(path, offer.id)
+        await _release_claim_and_reopen(context.bot, path, offer)
         await query.answer("Could not DM you — try /start in private chat.", show_alert=True)
         return
 
