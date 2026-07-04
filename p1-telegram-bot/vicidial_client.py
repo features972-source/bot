@@ -384,14 +384,58 @@ def ensure_threex_target(chat_id: int | None = None) -> dict[str, str]:
     return profile(target)
 
 
+def sync_all_chat_xfer_configs() -> int:
+    """Push saved per-chat transfer targets into Asterisk DB (survives restarts)."""
+    store = _load_chat_settings_store()
+    synced = 0
+    for key, _cfg in store.get("chats", {}).items():
+        try:
+            chat_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        try:
+            apply_run_config(chat_cfg_run_id(chat_id), chat_id)
+            synced += 1
+        except Exception:
+            pass
+    return synced
+
+
 def ensure_press1_stack(chat_id: int | None = None) -> dict[str, str]:
     """Refresh dialplan, 3CX endpoints, and AMI DTMF listener."""
     ensure_all_threex_endpoints()
     ensure_press1_dialplan()
     ensure_dtmf_listener()
+    try:
+        sync_all_chat_xfer_configs()
+    except Exception:
+        pass
     if chat_id is not None:
         return profile(get_threex_target(chat_id))
     return profile(get_threex_target())
+
+
+def _dialplan_resolve_leadnum() -> str:
+    """Dialplan lines that recover LEADNUM when AMI redirect drops channel vars."""
+    return """ same => n,Set(LEADNUM=${FILTER(0-9,${LEADNUM})})
+ same => n,Set(LEADNUM=${IF($[${LEN(${LEADNUM})}>=10]?${LEADNUM}:${FILTER(0-9,${DB(press1/lead)})})})
+ same => n,Set(LEADNUM=${IF($[${LEN(${LEADNUM})}>=10]?${LEADNUM}:${FILTER(0-9,${CALLERID(dnid)})})})
+ same => n,Set(LEADNUM=${IF($[${LEN(${LEADNUM})}>=10]?${LEADNUM}:${FILTER(0-9,${PJSIP_HEADER(read,To)})})})"""
+
+
+def _dialplan_resolve_xfer(*, default_sound: str, default_xfer: str, allow_default: bool) -> str:
+    """Resolve P1RUN/P1XFER from leadxfer then per-run cfg; optional Swapofica fallback."""
+    fallback = (
+        f' same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER={default_xfer}))'
+        if allow_default
+        else ""
+    )
+    return f""" same => n,Set(P1RUN=${{IF($[${{LEN(${{P1RUN}})}}>0]?${{P1RUN}}:${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}})}})
+ same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
+ same => n,Set(P1XFER=${{DB(press1/leadxfer/${{FILTER(0-9,${{LEADNUM}})}})}})
+ same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER=${{DB(press1/cfg/${{P1RUN}}/xfer)}}))
+ same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND=${{DB(press1/cfg/${{P1RUN}}/sound)}}))
+ same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND={default_sound})){fallback}"""
 
 
 def _press1_ivr_dialplan(*, server_ip: str, default_sound: str, default_xfer: str) -> str:
@@ -411,12 +455,7 @@ exten => ivr,1,Answer()
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{PJSIP_HEADER(read,To)}})}})}})
  same => n,Set(CHANNEL(language)=en)
  same => n,NoOp(IVR lead=${{LEADNUM}})
- same => n,Set(P1RUN=${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}})
- same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
- same => n,Set(P1SOUND=${{DB(press1/cfg/${{P1RUN}}/sound)}})
- same => n,Set(P1XFER=${{DB(press1/cfg/${{P1RUN}}/xfer)}})
- same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND={default_sound}))
- same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER={default_xfer}))
+{_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=False)}
  same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
  same => n,Read(P1DIG,${{P1SOUND}},1,,1,25)
@@ -425,11 +464,8 @@ exten => ivr,1,Answer()
  same => n,Hangup()
 
 exten => 1,1,StopPlaytones()
- same => n,Set(P1RUN=${{IF($[${{LEN(${{P1RUN}})}}>0]?${{P1RUN}}:${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}})}})
- same => n,Set(P1SOUND=${{DB(press1/cfg/${{P1RUN}}/sound)}})
- same => n,Set(P1XFER=${{DB(press1/cfg/${{P1RUN}}/xfer)}})
- same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND={default_sound}))
- same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER={default_xfer}))
+{_dialplan_resolve_leadnum()}
+{_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=False)}
  same => n,Goto(xfer,1)
 
 exten => xfer,1,NoOp(Press1 xfer lead ${{LEADNUM}} to ${{P1XFER}})
@@ -444,18 +480,14 @@ exten => xfer,1,NoOp(Press1 xfer lead ${{LEADNUM}} to ${{P1XFER}})
  same => n,Goto(xferdial,1)
 
 exten => xferdial,1,StopPlaytones()
+{_dialplan_resolve_leadnum()}
  same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(CALLERID(num)=+${{LEADNUM}}))
  same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(CALLERID(name)=+${{LEADNUM}}))
  same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(CONNECTEDLINE(num)=+${{LEADNUM}}))
  same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(CONNECTEDLINE(name)=+${{LEADNUM}}))
  same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(PJSIP_HEADER(add,P-Asserted-Identity)=<sip:+${{LEADNUM}}@{server_ip}>))
- same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}}))
- same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
- same => n,Set(P1XFER=${{DB(press1/leadxfer/${{FILTER(0-9,${{LEADNUM}})}})}})
- same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1SOUND=${{DB(press1/cfg/${{P1RUN}}/sound)}}))
- same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER=${{DB(press1/cfg/${{P1RUN}}/xfer)}}))
- same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND={default_sound}))
- same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER={default_xfer}))
+{_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
+ same => n,NoOp(XFER lead=${{LEADNUM}} run=${{P1RUN}} dest=${{P1XFER}})
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/press1 &' )
  same => n,Dial(${{P1XFER}},120,tTr)
  same => n,Hangup()
@@ -668,9 +700,10 @@ while IFS= read -r num || [ -n "$num" ]; do
   done
   digits=$(echo "$num" | tr -cd '0-9')
   asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >>"$LOG" 2>&1
-  asterisk -rx "database put press1 lead ${{num}}" >>"$LOG" 2>&1
+  asterisk -rx "database put press1 lead ${{digits}}" >>"$LOG" 2>&1
+  asterisk -rx "database put press1 lead/${{digits}} ${{num}}" >>"$LOG" 2>&1
   if [ -f "/tmp/press1_xfer_$RUNID.txt" ]; then
-    python3 -c "import shlex,subprocess;d='${{digits}}';x=open('/tmp/press1_xfer_$RUNID.txt').read().strip();subprocess.run(['asterisk','-rx',f'database put press1 leadxfer/{{d}} {{shlex.quote(x)}}'],check=False)" >>"$LOG" 2>&1
+    python3 -c "import shlex,subprocess;d='${{digits}}';x=open('/tmp/press1_xfer_$RUNID.txt').read().strip();r=subprocess.run(['asterisk','-rx',f'database put press1 leadxfer/{{d}} {{shlex.quote(x)}}'],capture_output=True,text=True); exit(0 if r.returncode==0 and x in (r.stdout+r.stderr) else 1)" >>"$LOG" 2>&1 || echo "$(date '+%Y-%m-%d %H:%M:%S') leadxfer FAIL $num" >>"$LOG"
   fi
   callfile="$TMPDIR/press1_${{RUNID}}_${{digits}}_$$.call"
   mkdir -p "$TMPDIR" "$SPOOLDIR" 2>/dev/null
@@ -1089,6 +1122,7 @@ def originate_press1(phone: str, chat_id: int | None = None) -> str:
     ensure_press1_stack(chat_id)
     run_remote(
         f"asterisk -rx {shlex.quote(f'database put press1 lead {digits}')}; "
+        f"asterisk -rx {shlex.quote(f'database put press1 lead/{digits} {digits}')}; "
         f"asterisk -rx {shlex.quote(f'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr')}",
         timeout=30,
     )
