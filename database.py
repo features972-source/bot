@@ -213,6 +213,7 @@ class PassOffer:
     created_at: str
     last_reminder_at: str | None = None
     manual_override: bool = False
+    claimed_at: str | None = None
 
 
 @dataclass
@@ -635,6 +636,17 @@ def init_db(path: str) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pass_booted_users (
+                telegram_user_id INTEGER PRIMARY KEY,
+                telegram_username TEXT,
+                display_name TEXT,
+                booted_at TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         _ensure_pass_offer_columns(conn)
         conn.execute(
             """
@@ -983,6 +995,8 @@ def _ensure_pass_offer_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE pass_offers ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0"
         )
+    if "claimed_at" not in columns:
+        conn.execute("ALTER TABLE pass_offers ADD COLUMN claimed_at TEXT")
 
 
 def link_extension(
@@ -2427,7 +2441,8 @@ _PASS_OFFER_SELECT = """
         status,
         created_at,
         last_reminder_at,
-        manual_override
+        manual_override,
+        claimed_at
     FROM pass_offers
 """
 
@@ -2449,6 +2464,7 @@ def _pass_offer_from_row(row) -> PassOffer:
         created_at=row[12],
         last_reminder_at=row[13],
         manual_override=bool(row[14]),
+        claimed_at=row[15] if len(row) > 15 else None,
     )
 
 
@@ -2721,10 +2737,12 @@ def clear_circulating_pass_notes(path: str) -> dict[str, int]:
             )
         offers_cursor = conn.execute("DELETE FROM pass_offers WHERE status = 'pending'")
         notes_cursor = conn.execute("DELETE FROM pass_notes_pending")
+        booted_cursor = conn.execute("DELETE FROM pass_booted_users")
         conn.commit()
         return {
             "pending_offers": int(offers_cursor.rowcount),
             "pending_notes": int(notes_cursor.rowcount),
+            "booted_users": int(booted_cursor.rowcount),
         }
 
 
@@ -2811,7 +2829,99 @@ def get_pass_offer_brushed_user_ids(path: str, offer_id: int) -> set[int]:
     return {int(row[0]) for row in rows}
 
 
-def create_pass_offer(
+def is_pass_booted(path: str, telegram_user_id: int) -> bool:
+    with _connect(path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM pass_booted_users WHERE telegram_user_id = ?",
+            (telegram_user_id,),
+        ).fetchone()
+    return row is not None
+
+
+def boot_pass_user(
+    path: str,
+    *,
+    telegram_user_id: int,
+    telegram_username: str | None,
+    display_name: str | None,
+    reason: str = "",
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO pass_booted_users (
+                telegram_user_id, telegram_username, display_name, booted_at, reason
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(telegram_user_id) DO UPDATE SET
+                telegram_username = excluded.telegram_username,
+                display_name = excluded.display_name,
+                booted_at = excluded.booted_at,
+                reason = excluded.reason
+            """,
+            (telegram_user_id, telegram_username, display_name, now, reason),
+        )
+        conn.commit()
+
+
+def clear_pass_booted_users(path: str) -> int:
+    with _connect(path) as conn:
+        cursor = conn.execute("DELETE FROM pass_booted_users")
+        conn.commit()
+        return cursor.rowcount
+
+
+def try_claim_pass_offer(
+    path: str,
+    offer_id: int,
+    *,
+    telegram_user_id: int,
+    telegram_username: str | None,
+    display_name: str | None,
+) -> bool:
+    """Atomically claim a pass for one user. Returns False if already claimed."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect(path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE pass_offers
+            SET assigned_user_id = ?,
+                assigned_username = ?,
+                assigned_display_name = ?,
+                claimed_at = ?
+            WHERE id = ?
+              AND status = 'pending'
+              AND assigned_user_id = 0
+            """,
+            (
+                telegram_user_id,
+                telegram_username,
+                display_name,
+                now,
+                offer_id,
+            ),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+
+
+def release_pass_claim(path: str, offer_id: int) -> None:
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            UPDATE pass_offers
+            SET assigned_user_id = 0,
+                assigned_username = NULL,
+                assigned_display_name = NULL,
+                claimed_at = NULL
+            WHERE id = ? AND status = 'pending'
+            """,
+            (offer_id,),
+        )
+        conn.commit()
+
+
+def create_open_pass_offer(
     path: str,
     *,
     chat_id: int,
@@ -2819,9 +2929,9 @@ def create_pass_offer(
     starter_user_id: int,
     starter_username: str | None,
     starter_display_name: str | None,
-    assigned_user_id: int,
-    assigned_username: str | None,
-    assigned_display_name: str | None,
+    assigned_user_id: int = 0,
+    assigned_username: str | None = None,
+    assigned_display_name: str | None = None,
     notes_text: str,
 ) -> int:
     now = datetime.now(timezone.utc).isoformat()
@@ -2859,6 +2969,9 @@ def create_pass_offer(
         )
         conn.commit()
         return int(cursor.lastrowid)
+
+
+create_pass_offer = create_open_pass_offer
 
 
 def get_pass_offer(path: str, offer_id: int) -> PassOffer | None:
@@ -2940,10 +3053,21 @@ def update_pass_offer(
     status: str | None = None,
     last_reminder_at: str | None = None,
     manual_override: bool | None = None,
+    claimed_at: str | None = None,
     reset_reminder: bool = False,
+    clear_claim: bool = False,
 ) -> None:
     fields: list[str] = []
     params: list[object] = []
+    if clear_claim:
+        fields.extend(
+            [
+                "assigned_user_id = 0",
+                "assigned_username = NULL",
+                "assigned_display_name = NULL",
+                "claimed_at = NULL",
+            ]
+        )
     if offer_message_id is not None:
         fields.append("offer_message_id = ?")
         params.append(offer_message_id)
@@ -2968,6 +3092,9 @@ def update_pass_offer(
     elif last_reminder_at is not None:
         fields.append("last_reminder_at = ?")
         params.append(last_reminder_at)
+    if claimed_at is not None:
+        fields.append("claimed_at = ?")
+        params.append(claimed_at)
     if not fields:
         return
     params.append(offer_id)
