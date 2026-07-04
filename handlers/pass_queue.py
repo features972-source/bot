@@ -1,4 +1,4 @@
-"""Pass handoff — notes auto-detected, reposted every 3 minutes until taken."""
+"""Pass handoff — notes auto-detected, reposted every 2 minutes until taken."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ CALLBACK_PREFIX = "pass:"
 PASS_STATUS_PENDING = "pending"
 PASS_STATUS_TAKEN = "taken"
 PASS_STATUS_EXPIRED = "expired"
-PASS_REPOST_SECONDS = 180
+PASS_REPOST_SECONDS = 120
 PASS_CLAIM_TIMEOUT_SECONDS = 90
 PASS_EXPIRE_SECONDS = 3600
 PASS_POLL_SECONDS = 30
@@ -95,22 +95,56 @@ def _pass_keyboard(offer_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def _open_pass_text() -> str:
+def _format_notes_block(notes_text: str) -> str:
+    escaped = html.escape(notes_text.strip())
+    if len(escaped) > 3200:
+        escaped = escaped[:3200] + "…"
+    return escaped
+
+
+def _open_pass_text(offer: PassOffer) -> str:
+    starter = _mention_html(
+        offer.starter_user_id,
+        offer.starter_username,
+        offer.starter_display_name,
+    )
+    notes = _format_notes_block(offer.notes_text)
     return (
         "<blockquote>📞 <b>PASS AVAILABLE</b>\n"
+        f"▪️ Starter: {starter}\n"
+        f"▪️ <b>Notes:</b>\n{notes}\n"
         "▪️ Tap <b>Take pass</b> below — one person at a time</blockquote>"
     )
 
 
 def _claimed_pass_text(
+    offer: PassOffer,
     user_id: int,
     username: str | None,
     display_name: str | None,
 ) -> str:
     mention = _mention_html(user_id, username, display_name)
+    notes = _format_notes_block(offer.notes_text)
     return (
         f"<blockquote>⏳ <b>PASS LOCKED</b>\n"
-        f"▪️ {mention} is taking this pass</blockquote>"
+        f"▪️ {mention} is taking this pass\n"
+        f"▪️ <b>Notes:</b>\n{notes}</blockquote>"
+    )
+
+
+def _taken_pass_announcement(offer: PassOffer, user) -> str:
+    taker = _mention_html(user.id, user.username, _display_name(user))
+    starter = _mention_html(
+        offer.starter_user_id,
+        offer.starter_username,
+        offer.starter_display_name,
+    )
+    notes = _format_notes_block(offer.notes_text)
+    return (
+        f"🚨🚨🚨 <b>{taker} HAS TOOK THE PASS</b> 🚨🚨🚨\n\n"
+        f"{starter} — <b>SEND HIM THE NUMBER IN PMs!</b>\n\n"
+        f"<blockquote>▪️ <b>Full notes</b> (also sent to finisher's DMs):\n"
+        f"{notes}</blockquote>"
     )
 
 
@@ -146,7 +180,7 @@ def pass_claim_expired(offer: PassOffer, *, now: datetime | None = None) -> bool
 
 
 async def pass_repost_loop(bot, settings: Settings, bot_data: dict) -> None:
-    """Repost open passes every 3 minutes; boot users who claim but don't take."""
+    """Repost open passes every 2 minutes; boot users who claim but don't take."""
     while True:
         try:
             await asyncio.sleep(PASS_POLL_SECONDS)
@@ -178,7 +212,7 @@ async def _send_pass_offer_message(
 ):
     return await bot.send_message(
         chat_id=offer.chat_id,
-        text=text or _open_pass_text(),
+        text=text or _open_pass_text(offer),
         parse_mode="HTML",
         reply_markup=reply_markup if reply_markup is not None else _pass_keyboard(offer.id),
         reply_to_message_id=reply_to_message_id,
@@ -277,7 +311,7 @@ async def _boot_and_release_claim(bot, settings: Settings, offer: PassOffer) -> 
     if refreshed and refreshed.offer_message_id:
         try:
             await bot.edit_message_text(
-                _open_pass_text(),
+                _open_pass_text(refreshed),
                 chat_id=refreshed.chat_id,
                 message_id=refreshed.offer_message_id,
                 parse_mode="HTML",
@@ -509,7 +543,7 @@ async def pass_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
         offer = get_pass_offer(path, offer.id)
         assert offer is not None
-        locked_text = _claimed_pass_text(user.id, user.username, _display_name(user))
+        locked_text = _claimed_pass_text(offer, user.id, user.username, _display_name(user))
         if offer.offer_message_id:
             try:
                 await context.bot.edit_message_text(
@@ -571,6 +605,24 @@ async def _complete_take_pass(
         await query.edit_message_text(taken_text, parse_mode="HTML")
     except BadRequest:
         pass
+
+    try:
+        await context.bot.send_message(
+            chat_id=offer.chat_id,
+            text=_taken_pass_announcement(offer, user),
+            parse_mode="HTML",
+            reply_to_message_id=offer.notes_message_id,
+        )
+    except BadRequest:
+        try:
+            await context.bot.send_message(
+                chat_id=offer.chat_id,
+                text=_taken_pass_announcement(offer, user),
+                parse_mode="HTML",
+            )
+        except BadRequest:
+            pass
+
     await query.answer("Notes sent to your DMs.")
     logger.info(
         "pass taken chat=%s offer=%s user=%s",
