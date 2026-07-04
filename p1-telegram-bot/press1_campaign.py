@@ -10,20 +10,24 @@ import time
 import press1_ui as ui
 
 _ANIM_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-_PULSE_FRAMES = ("🔴", "🟠", "🟡", "🟢")
+_PROGRESS_WIDTH = 12
 
 
-def progress_bar(pct: int, width: int = 14) -> str:
-    pct = max(0, min(100, pct))
-    filled = int(width * pct / 100)
-    return "█" * filled + "░" * (width - filled)
-
-
-def gauge(pct: int, width: int = 12) -> str:
-    """Segmented control-room gauge, e.g. ▰▰▰▰▰▰▱▱▱▱▱▱."""
+def progress_bar(pct: int, width: int = _PROGRESS_WIDTH) -> str:
+    """Square progress bar, e.g. ■□□□□□□□□□□□."""
     pct = max(0, min(100, pct))
     filled = int(round(width * pct / 100))
-    return "▰" * filled + "▱" * (width - filled)
+    return "■" * filled + "□" * (width - filled)
+
+
+def gauge(pct: int, width: int = _PROGRESS_WIDTH) -> str:
+    """Alias for progress_bar — kept for callers."""
+    return progress_bar(pct, width)
+
+
+def progress_line(pct: int, dialed: int, total: int) -> str:
+    """Progress bar + stats, e.g. `■□□□…  8% · 89/1000`."""
+    return f"{progress_bar(pct)}  {pct}% {ui.SEP} {dialed}/{total}"
 
 
 def batch_numbers(dialed: int, total: int, batch_size: int) -> tuple[int, int]:
@@ -126,15 +130,15 @@ def predict_eta(
     return eta, forecast
 
 
-def _header(dial_state: str, total: int, finished: bool, frame: int) -> str:
+def _header(dial_state: str, total: int, finished: bool) -> str:
+    sep = f" {ui.SEP} "
     if finished or dial_state in ("finished", "stalled"):
-        return f"✅  CAMPAIGN COMPLETE  ·  {total} leads"
+        return f"✅ CAMPAIGN COMPLETE{sep}{total} leads"
     if dial_state == "finishing":
-        return "🟡  FINISHING  ·  calls in flight"
+        return f"🟡 FINISHING{sep}calls in flight"
     if dial_state == "paused":
-        return "⏸  PAUSED  ·  live calls continue"
-    pulse = _PULSE_FRAMES[frame % len(_PULSE_FRAMES)]
-    return f"{pulse}  LIVE CAMPAIGN  ·  {total} leads"
+        return f"⏸ PAUSED{sep}live calls continue"
+    return f"🟢 LIVE CAMPAIGN{sep}{total} leads"
 
 
 def format_campaign_body(
@@ -160,26 +164,26 @@ def format_campaign_body(
     dial_state = st.get("dial_state", "")
     pct = (dialed * 100 // total) if total > 0 else 0
 
-    lines: list[str] = [ui.esc(f"{gauge(pct)}  {pct}%  ·  {dialed}/{total}")]
+    lines: list[str] = [ui.esc(progress_line(pct, dialed, total))]
 
     lines.append("")
-    lines.append(ui.bullet("Dialed", dialed, icon="📞"))
-    lines.append(ui.bullet("Live now", live, icon="📡"))
-    lines.append(ui.bullet("Waiting", hopper, icon="⏳"))
+    lines.append(ui.stat("Dialed", dialed, icon="📞"))
+    lines.append(ui.stat("Live now", live, icon="📡"))
+    lines.append(ui.stat("Waiting", hopper, icon="⏳"))
 
     lines.append("")
     if dialed > 0:
         ans_pct = answered * 100 / dialed
         p1_pct = press1 * 100 / dialed
-        lines.append(ui.bullet("Answered", answered, icon="✅", suffix=f"  ({ans_pct:.0f}%)"))
-        lines.append(ui.bullet("Press-1", press1, icon="🔥", suffix=f"  ({p1_pct:.1f}%)"))
+        lines.append(ui.stat("Answered", answered, icon="✅", suffix=f" ({ans_pct:.0f}%)"))
+        lines.append(ui.stat("Press-1", press1, icon="🔥", suffix=f" ({p1_pct:.1f}%)"))
     else:
-        lines.append(ui.bullet("Answered", answered, icon="✅"))
-        lines.append(ui.bullet("Press-1", press1, icon="🔥"))
+        lines.append(ui.stat("Answered", answered, icon="✅"))
+        lines.append(ui.stat("Press-1", press1, icon="🔥"))
     if failed > 0:
-        lines.append(ui.bullet("Failed", failed, icon="❌"))
+        lines.append(ui.stat("Failed", failed, icon="❌"))
 
-    eta, forecast = predict_eta(
+    eta, _ = predict_eta(
         dialed=dialed,
         total=total,
         hopper=hopper,
@@ -193,11 +197,9 @@ def format_campaign_body(
     )
     if eta and not finished:
         lines.append("")
-        lines.append(ui.bullet("ETA", eta, icon="⏱"))
-        if forecast:
-            lines.append(ui.bullet("Forecast press-1s", forecast, icon="🎯"))
+        lines.append(ui.stat("ETA", eta, icon="⏱️"))
 
-    return ui.card(_header(dial_state, total, finished, frame), lines)
+    return ui.card(_header(dial_state, total, finished), lines)
 
 
 def format_dashboard(
@@ -218,18 +220,17 @@ def format_dashboard(
     dial_state = st.get("dial_state", "idle")
     total = int(st.get("list_size", 0) or 0) or total_leads
     dialed = int(st.get("dialed", 0) or 0)
-    spinner = _ANIM_FRAMES[frame % len(_ANIM_FRAMES)]
-    title = f"🎛  CONTROL ROOM  {spinner}"
+    title = "🎛 CONTROL ROOM"
 
     config_lines = [
-        ui.bullet("Pacing", f"{call_gap:g}s gap · batch {batch_size}", icon="⚙️"),
-        ui.bullet("Max lines", max_concurrent or "∞", icon="📡"),
-        ui.bullet("Transfer", transfer_label, icon="🎯"),
+        ui.stat("Pacing", f"{call_gap:g}s gap {ui.SEP} batch {batch_size}", icon="⚙️"),
+        ui.stat("Max lines", max_concurrent or "∞", icon="📡"),
+        ui.stat("Transfer", transfer_label, icon="🎯"),
     ]
     if loaded_in_bot > 0:
-        config_lines.append(ui.bullet("Loaded", loaded_in_bot, icon="💾", suffix=" leads"))
+        config_lines.append(ui.stat("Loaded", f"{loaded_in_bot} leads", icon="💾"))
     if scheduled_count > 0:
-        config_lines.append(ui.bullet("Scheduled", scheduled_count, icon="⏰", suffix=" runs"))
+        config_lines.append(ui.stat("Scheduled", f"{scheduled_count} runs", icon="⏰"))
 
     if dial_state == "idle" and total == 0 and dialed == 0:
         standby = ui.card(
@@ -252,5 +253,5 @@ def format_dashboard(
         frame=frame,
         finished=dial_state in ("finished", "stalled", "idle") and dialed == 0,
     )
-    config = ui.card("⚙️  CONFIG", config_lines)
+    config = ui.card("⚙️ CONFIG", config_lines)
     return f"{body}\n{config}\n<i>refresh 3s · /stop to end</i>"
