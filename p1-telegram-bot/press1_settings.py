@@ -55,6 +55,13 @@ THREECX_PROFILES: dict[str, dict[str, str]] = {
         "sip_contact": "46.101.24.34",
         "ext": "8000",
     },
+    "forward020": {
+        "id": "forward020",
+        "label": "020 3488 3405",
+        "mode": "number",
+        "number": "442034883405",
+        "display": "02034883405",
+    },
 }
 
 DEFAULT_THREECX = os.getenv("PRESS1_THREECX_DEFAULT", "swapofica")
@@ -65,6 +72,22 @@ def profile(profile_id: str) -> dict[str, str]:
     if key not in THREECX_PROFILES:
         raise ValueError(f"Unknown transfer profile: {profile_id!r}")
     return THREECX_PROFILES[key]
+
+
+def is_number_transfer(p: dict[str, str]) -> bool:
+    return p.get("mode") == "number"
+
+
+def transfer_dial_target(p: dict[str, str]) -> str:
+    if is_number_transfer(p):
+        return f"PJSIP/{p['number']}@bitcall"
+    return f"PJSIP/{p['ext']}@3cx"
+
+
+def transfer_display(p: dict[str, str]) -> str:
+    if is_number_transfer(p):
+        return f"{p['label']} ({p.get('display', p['number'])})"
+    return f"{p['label']} (ext {p['ext']})"
 
 
 def format_settings_text(
@@ -85,7 +108,7 @@ def format_settings_text(
             ui.bullet("Batch", f"{batch_size} · pause {batch_pause}s", icon="📦"),
             ui.bullet("Max concurrent", max_concurrent or "unlimited", icon="📡"),
             "",
-            ui.bullet("Transfer", f"{p['label']} (ext {p['ext']})", icon="🎯"),
+            ui.bullet("Transfer", transfer_display(p), icon="🎯"),
         ],
     )
     return f"{card}\n<i>Tap a button below to change the transfer destination.</i>"

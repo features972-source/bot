@@ -12,7 +12,7 @@ from pathlib import Path
 
 import paramiko
 
-from press1_settings import DEFAULT_THREECX, THREECX_PROFILES, profile
+from press1_settings import DEFAULT_THREECX, THREECX_PROFILES, profile, transfer_dial_target
 from press1_utils import normalize_uk
 
 HOST = os.getenv("VICIDIAL_SSH_HOST", "206.189.118.204")
@@ -141,8 +141,12 @@ def get_threex_target() -> str:
 
 
 def apply_threex_target(profile_id: str) -> dict[str, str]:
-    """Point the Asterisk 3cx trunk at the selected 3CX and persist the choice."""
+    """Apply selected transfer target (3CX trunk or direct number) and persist."""
     p = profile(profile_id)
+    if p.get("mode") == "number":
+        save_bot_settings({"threex_target": profile_id})
+        ensure_press1_dialplan()
+        return p
     contact = p["sip_contact"]
     host = p["host"]
     ext = p["ext"]
@@ -156,6 +160,7 @@ def apply_threex_target(profile_id: str) -> dict[str, str]:
         timeout=30,
     )
     save_bot_settings({"threex_target": profile_id})
+    ensure_press1_dialplan()
     return p
 
 
@@ -166,15 +171,14 @@ def ensure_threex_target() -> dict[str, str]:
 
 
 def ensure_press1_stack() -> dict[str, str]:
-    """Refresh 3CX target, IVR dialplan, and AMI DTMF listener before dialing."""
+    """Refresh transfer target, IVR dialplan, and AMI DTMF listener before dialing."""
     profile_info = ensure_threex_target()
-    ensure_press1_dialplan(profile_info["ext"])
     ensure_dtmf_listener()
     return profile_info
 
 
-def _press1_ivr_dialplan(*, server_ip: str, xfer_ext: str, sound: str) -> str:
-    """Canonical press1-ivr: Background+WaitExten, per-run stats, 3CX xfer."""
+def _press1_ivr_dialplan(*, server_ip: str, xfer_dial: str, sound: str) -> str:
+    """Canonical press1-ivr: Read+press1, per-run stats, transfer on 1."""
     return f"""[press1-ivr]
 exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
  same => n,Goto(ivr,1)
@@ -202,7 +206,7 @@ exten => ivr,1,Answer()
 exten => 1,1,StopPlaytones()
  same => n,Goto(xfer,1)
 
-exten => xfer,1,NoOp(Press1 xfer lead ${{LEADNUM}} to 3CX {xfer_ext})
+exten => xfer,1,NoOp(Press1 xfer lead ${{LEADNUM}} to {xfer_dial})
  same => n,StopPlaytones()
  same => n,GotoIf($[${{LEN(${{LEADNUM}})}}<10]?xferdial,1)
  same => n,Set(CIDNUM=+${{LEADNUM}})
@@ -222,7 +226,7 @@ exten => xferdial,1,StopPlaytones()
  same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}}))
  same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/press1 &' )
- same => n,Dial(PJSIP/{xfer_ext}@3cx,120,tTr)
+ same => n,Dial({xfer_dial},120,tTr)
  same => n,Hangup()
 
 exten => t,1,Hangup()
@@ -230,13 +234,13 @@ exten => i,1,Hangup()
 """
 
 
-def ensure_press1_dialplan(xfer_ext: str | None = None) -> str:
+def ensure_press1_dialplan(xfer_dial: str | None = None) -> str:
     """Idempotently apply press-1 IVR dialplan + BitCall DTMF on the dial server."""
     import base64
 
-    if xfer_ext is None:
-        xfer_ext = profile(get_threex_target())["ext"]
-    block = _press1_ivr_dialplan(server_ip=SERVER_IP, xfer_ext=xfer_ext, sound=SOUND_NAME)
+    if xfer_dial is None:
+        xfer_dial = transfer_dial_target(profile(get_threex_target()))
+    block = _press1_ivr_dialplan(server_ip=SERVER_IP, xfer_dial=xfer_dial, sound=SOUND_NAME)
     b64 = base64.b64encode(block.encode()).decode()
     ext_conf = "/etc/asterisk/extensions.conf"
     ast_conf = "/etc/asterisk/asterisk.conf"
@@ -285,9 +289,9 @@ def settings_summary() -> dict[str, str]:
     return {
         "threex_target": target,
         "threex_label": p["label"],
-        "threex_fqdn": p["fqdn"],
-        "threex_host": p["host"],
-        "threex_ext": p["ext"],
+        "threex_fqdn": p.get("fqdn", p.get("display", "")),
+        "threex_host": p.get("host", ""),
+        "threex_ext": p.get("ext", p.get("display", p.get("number", ""))),
         "sound_name": SOUND_NAME,
         "call_gap": str(CALL_GAP_SEC),
         "batch_size": str(BATCH_SIZE),
