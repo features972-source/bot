@@ -1,7 +1,7 @@
-# Ensure every push to main deploys Q1 and Q2 on Render.
-# Render auto-deploys all services on the repo; this workflow triggers both explicitly
-# and fails CI if either service is missing or not on the pushed commit.
-name: Deploy Q1 and Q2 to Render
+# Ensure every push to main deploys Q1, Q2, and P1 on Render.
+# Render auto-deploys all services on the repo; this workflow triggers them explicitly
+# and fails CI if a service is missing or not on the pushed commit.
+name: Deploy Q1, Q2, and P1 to Render
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Trigger Q1 and Q2 deploys
+      - name: Trigger Q1, Q2, and P1 deploys
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           GITHUB_REPO: https://github.com/${{ github.repository }}
@@ -55,16 +55,33 @@ jobs:
               if slug == 'q2-telegram-bot' or ('q2' in slug and not slug.startswith('botq')):
                   print(s['id']); break
           " "$GITHUB_REPO")"
+          p1_id="$(echo "$services_json" | python3 -c "
+          import json, sys
+          repo = sys.argv[1]
+          data = json.load(sys.stdin)
+          for row in data:
+              s = row.get('service') or row
+              if s.get('repo') != repo or s.get('branch') != 'main': continue
+              if s.get('suspended') != 'not_suspended': continue
+              slug = s.get('slug', '')
+              if slug in ('p1-bot', 'p1-telegram-bot') or slug.startswith('p1-'):
+                  print(s['id']); break
+          " "$GITHUB_REPO")"
 
           if [ -z "$q1_id" ] || [ -z "$q2_id" ]; then
             echo "Could not find active Q1 and Q2 services for $GITHUB_REPO"
             exit 1
           fi
+          if [ -z "$p1_id" ]; then
+            echo "Could not find active P1 service for $GITHUB_REPO"
+            exit 1
+          fi
 
           echo "Q1 service: $q1_id"
           echo "Q2 service: $q2_id"
+          echo "P1 service: $p1_id"
 
-          for id in "$q1_id" "$q2_id"; do
+          for id in "$q1_id" "$q2_id" "$p1_id"; do
             curl -fsS -X POST "https://api.render.com/v1/services/$id/deploys" \
               -H "Authorization: Bearer $RENDER_API_KEY" \
               -H "Content-Type: application/json" \
@@ -91,8 +108,9 @@ jobs:
 
           wait_live "https://q1-call-manager-eu.onrender.com" "q1"
           wait_live "https://q2-telegram-bot.onrender.com" "q2"
+          wait_live "https://p1-bot.onrender.com" "p1"
 
-          for id in "$q1_id" "$q2_id"; do
+          for id in "$q1_id" "$q2_id" "$p1_id"; do
             deploy_json="$(api "https://api.render.com/v1/services/$id/deploys?limit=1")"
             commit="$(echo "$deploy_json" | python3 -c "
           import json, sys
@@ -111,4 +129,4 @@ jobs:
             echo "Service $id live on $commit"
           done
 
-          echo "Q1 and Q2 deployed for commit ${EXPECTED_COMMIT:0:7}"
+          echo "Q1, Q2, and P1 deployed for commit ${EXPECTED_COMMIT:0:7}"
