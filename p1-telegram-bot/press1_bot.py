@@ -259,8 +259,8 @@ async def _format_live_stats(
     finished: bool = False,
     progress: dict | None = None,
 ) -> str:
-    pacing = _pacing(int(prog.get("chat_id", 0) or 0) or None)
     prog = progress or {}
+    pacing = _pacing(int(prog.get("chat_id", 0) or 0) or None)
     frame = int(prog.get("_frame", 0) or 0)
     body = campaign.format_campaign_body(
         st,
