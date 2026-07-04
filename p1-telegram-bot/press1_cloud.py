@@ -23,7 +23,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-BUILD = "xfer-fix-v3"
+BUILD = "xfer-fix-v4"
 WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "telegram/webhook").lstrip("/")
 PUBLIC_URL = (
     os.getenv("TELEGRAM_WEBHOOK_URL_BASE")
@@ -31,6 +31,23 @@ PUBLIC_URL = (
     or "https://p1-bot.onrender.com"
 ).rstrip("/")
 WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+
+
+def resolve_webhook_url() -> str:
+    """Public webhook URL for Telegram (never empty on Render)."""
+    url = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
+    if url:
+        return url
+    return f"{PUBLIC_URL}/{WEBHOOK_PATH}"
+
+
+def resolve_webhook_secret() -> str:
+    secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    if secret:
+        return secret
+    if TOKEN and ":" in TOKEN:
+        return TOKEN.split(":", 1)[0]
+    return ""
 
 
 def _use_polling() -> bool:
@@ -50,9 +67,10 @@ def _run_polling() -> None:
 
 
 def _run_webhook() -> None:
-    os.environ.setdefault("TELEGRAM_WEBHOOK_URL", f"{PUBLIC_URL}/{WEBHOOK_PATH}")
-    if not WEBHOOK_SECRET and TOKEN and ":" in TOKEN:
-        os.environ.setdefault("TELEGRAM_WEBHOOK_SECRET", TOKEN.split(":", 1)[0])
+    os.environ["TELEGRAM_WEBHOOK_URL"] = resolve_webhook_url()
+    secret = resolve_webhook_secret()
+    if secret:
+        os.environ["TELEGRAM_WEBHOOK_SECRET"] = secret
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -77,10 +95,11 @@ def _run_webhook() -> None:
 
     @flask_app.post(f"/{WEBHOOK_PATH}")
     def telegram_webhook():
-        secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+        secret = resolve_webhook_secret()
         if secret:
             header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
             if header != secret:
+                logger.warning("webhook rejected: bad secret token")
                 return "", 403
         data = request.get_json(force=True, silent=True)
         if not data:

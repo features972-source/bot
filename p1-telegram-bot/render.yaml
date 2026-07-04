@@ -18,6 +18,8 @@ services:
     envVars:
       - key: CLOUD_DEPLOYED
         value: "true"
+      - key: TELEGRAM_WEBHOOK_URL
+        value: https://p1-bot.onrender.com/telegram/webhook
       - key: WEBHOOK_HOST
         value: 0.0.0.0
       - key: VICIDIAL_SSH_HOST

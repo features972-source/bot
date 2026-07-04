@@ -34,6 +34,38 @@ from press1_settings import THREECX_PROFILES, format_settings_text
 from press1_utils import convert_audio_for_asterisk, parse_csv, parse_numbers
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+
+def _webhook_public_url() -> str:
+    url = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
+    if url:
+        return url
+    base = (
+        os.getenv("TELEGRAM_WEBHOOK_URL_BASE")
+        or os.getenv("RENDER_EXTERNAL_URL")
+        or "https://p1-bot.onrender.com"
+    ).rstrip("/")
+    path = os.getenv("TELEGRAM_WEBHOOK_PATH", "telegram/webhook").lstrip("/")
+    return f"{base}/{path}"
+
+
+def _webhook_secret() -> str | None:
+    secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    if secret:
+        return secret
+    if TOKEN and ":" in TOKEN:
+        return TOKEN.split(":", 1)[0]
+    return None
+
+
+def _cloud_deployed() -> bool:
+    return os.getenv("CLOUD_DEPLOYED", "").strip().lower() in ("1", "true", "yes")
+
+
+def _use_polling_mode() -> bool:
+    return os.getenv("P1_USE_POLLING", "").strip().lower() in ("1", "true", "yes")
+
+
 ALLOWED = access.OWNERS | {
     int(x.strip())
     for x in os.getenv("TELEGRAM_ALLOWED_IDS", os.getenv("ADMIN_CHAT_ID", "")).split(",")
@@ -1247,20 +1279,44 @@ async def _bootstrap_press1_stack() -> None:
         print(f"[press1] press1 stack warning: {e}")
 
 
+async def _webhook_watchdog(app: Application) -> None:
+    """Re-register webhook if another instance cleared it (polling conflict)."""
+    if _use_polling_mode() and not _cloud_deployed():
+        return
+    url = _webhook_public_url()
+    secret = _webhook_secret()
+    while True:
+        await asyncio.sleep(60)
+        try:
+            info = await app.bot.get_webhook_info()
+            current = (info.url or "").strip()
+            if current == url:
+                continue
+            await app.bot.set_webhook(
+                url=url,
+                secret_token=secret,
+                drop_pending_updates=False,
+                allowed_updates=["message", "callback_query"],
+            )
+            print(f"[press1] webhook re-registered: {url} (was {current!r})")
+        except Exception as e:
+            print(f"[press1] webhook watchdog: {e}")
+
+
 async def post_init(app: Application) -> None:
-    webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
-    if webhook_url:
-        secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip() or None
+    if _use_polling_mode() and not _cloud_deployed():
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        print("[press1] polling mode (local / legacy)")
+    else:
+        webhook_url = _webhook_public_url()
+        secret = _webhook_secret()
         await app.bot.set_webhook(
             url=webhook_url,
             secret_token=secret,
-            drop_pending_updates=True,
+            drop_pending_updates=False,
             allowed_updates=["message", "callback_query"],
         )
         print(f"[press1] webhook active: {webhook_url}")
-    else:
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        print("[press1] polling mode (local / legacy)")
     await app.bot.set_my_commands(
         [
             BotCommand("start", "Help"),
@@ -1288,6 +1344,7 @@ async def post_init(app: Application) -> None:
     except Exception as e:
         print(f"[press1] dial server SSH warning: {e}")
     asyncio.create_task(_bootstrap_press1_stack())
+    asyncio.create_task(_webhook_watchdog(app))
     app.bot_data["dtmf_offset"] = 0
     asyncio.create_task(_dtmf_notify_loop(app))
     asyncio.create_task(_schedule_loop(app))
