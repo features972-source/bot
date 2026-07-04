@@ -10,9 +10,8 @@ from __future__ import annotations
 import html
 
 # Visual language ---------------------------------------------------------
-BULLET = "⬢"
-FIRE = "🔥"
-RULE = "━━━━━━━━━━━━━━━━"
+BULLET = "▪️"
+SEP = "·"
 
 
 def esc(value: object) -> str:
@@ -35,15 +34,23 @@ def strike(text: object) -> str:
 def card(title: str, body_lines: list[str], *, expandable: bool = False) -> str:
     """Build a blockquote card. `title` is escaped; body_lines are raw HTML."""
     tag = "<blockquote expandable>" if expandable else "<blockquote>"
-    inner = "\n".join([f"<b>{esc(title)}</b>", *body_lines])
+    inner = "\n".join([esc(title), *body_lines])
     return f"{tag}{inner}</blockquote>"
 
 
+def stat(label: str, value: object = "", *, icon: str, suffix: str = "") -> str:
+    """Live dashboard row: emoji + label + value, e.g. `📞 Dialed 89`."""
+    line = f"{icon} {esc(label)}"
+    if value != "" or suffix:
+        line += f" {esc(value)}{suffix}"
+    return line
+
+
 def bullet(label: str, value: object = "", *, icon: str = BULLET, suffix: str = "") -> str:
-    """A card row: hexagon + bold label + value, e.g. `⬢ Dialed  340`."""
+    """Help / config row: icon + bold command + description."""
     line = f"{icon} <b>{esc(label)}</b>"
     if value != "" or suffix:
-        line += f"  {esc(value)}{suffix}"
+        line += f" {esc(value)}{suffix}"
     return line
 
 
