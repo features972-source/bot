@@ -1118,6 +1118,41 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path]) -> str:
     return sound_name
 
 
+def _place_call_file(digits: str, cid: str) -> None:
+    """Drop a .call file into Asterisk outgoing spool (same path as campaigns)."""
+    run_remote(
+        f"python3 <<'PY'\n"
+        f"import os\nfrom pathlib import Path\n"
+        f"digits = {digits!r}\n"
+        f"cid = {cid!r}\n"
+        f"body = (\n"
+        f"    f'Channel: PJSIP/{{digits}}@bitcall\\n'\n"
+        f"    f'CallerID: \"{{cid}}\" <{{cid}}>\\n'\n"
+        f"    'MaxRetries: 0\\nWaitTime: 45\\n'\n"
+        f"    f'Context: press1-ivr\\nExtension: {{digits}}\\nPriority: 1\\n'\n"
+        f"    f'Setvar: LEADNUM={{digits}}\\n'\n"
+        f")\n"
+        f"name = f'press1_test_{{digits}}.call'\n"
+        f"tmp = Path('/var/spool/asterisk/tmp') / name\n"
+        f"out = Path('/var/spool/asterisk/outgoing') / name\n"
+        f"tmp.parent.mkdir(parents=True, exist_ok=True)\n"
+        f"out.parent.mkdir(parents=True, exist_ok=True)\n"
+        f"tmp.write_text(body)\n"
+        f"os.chmod(tmp, 0o640)\n"
+        f"try:\n"
+        f"    import pwd, grp\n"
+        f"    os.chown(tmp, pwd.getpwnam('asterisk').pw_uid, grp.getgrnam('asterisk').gr_gid)\n"
+        f"except Exception:\n"
+        f"    pass\n"
+        f"if out.exists():\n"
+        f"    out.unlink()\n"
+        f"tmp.rename(out)\n"
+        f"print('callfile', digits)\n"
+        f"PY",
+        timeout=30,
+    )
+
+
 def originate_press1(phone: str, chat_id: int | None = None) -> str:
     """Place one outbound call — same call-file path as campaigns (with CLI)."""
     digits = to_e164(phone) or re.sub(r"\D", "", phone)
@@ -1125,29 +1160,14 @@ def originate_press1(phone: str, chat_id: int | None = None) -> str:
         raise ValueError(f"invalid number: {phone!r}")
     if chat_id is not None:
         apply_lead_run_config(digits, chat_id)
-        ensure_all_threex_endpoints()
     cid = outbound_caller_id(digits)
-    run_remote(
-        f"asterisk -rx {shlex.quote(f'database put press1 lead {digits}')}; "
-        f"asterisk -rx {shlex.quote(f'database put press1 lead/{digits} {digits}')}; "
-        f"mkdir -p /var/spool/asterisk/tmp /var/spool/asterisk/outgoing; "
-        f"callfile=/var/spool/asterisk/tmp/press1_test_{digits}_$$.call; "
-        f"cat > \"$callfile\" <<'CALL'\n"
-        f"Channel: PJSIP/{digits}@bitcall\n"
-        f"CallerID: \"{cid}\" <{cid}>\n"
-        f"MaxRetries: 0\n"
-        f"WaitTime: 45\n"
-        f"Context: press1-ivr\n"
-        f"Extension: {digits}\n"
-        f"Priority: 1\n"
-        f"Setvar: LEADNUM={digits}\n"
-        f"CALL\n"
-        f"chown asterisk:asterisk \"$callfile\" 2>/dev/null || true; "
-        f"chmod 0640 \"$callfile\"; "
-        f"mv \"$callfile\" /var/spool/asterisk/outgoing/; "
-        f"echo ok {digits}",
-        timeout=30,
+    _put_press1_db_entries(
+        {
+            "lead": digits,
+            f"lead/{digits}": digits,
+        }
     )
+    _place_call_file(digits, cid)
     return digits
 
 

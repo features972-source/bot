@@ -619,22 +619,35 @@ async def cmd_revokekey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
-    msg = await update.message.reply_text("📞 Placing test calls…")
-    try:
-        nums: list[str] | None = None
-        if context.args:
-            from press1_utils import to_e164
-            import re
+    nums: list[str] | None = None
+    if context.args:
+        from press1_utils import to_e164
+        import re
 
-            parsed: list[str] = []
-            for arg in context.args:
-                digits = to_e164(arg) or re.sub(r"\D", "", arg)
-                if len(digits) >= vd.MIN_PHONE_DIGITS + 2:
-                    parsed.append(digits)
-            if not parsed:
-                await msg.edit_text(ui.error("Invalid number(s). Example: /testcall 447934567847"))
-                return
-            nums = parsed
+        parsed: list[str] = []
+        for arg in context.args:
+            digits = to_e164(arg) or re.sub(r"\D", "", arg)
+            if len(digits) >= vd.MIN_PHONE_DIGITS + 2:
+                parsed.append(digits)
+        if not parsed:
+            await update.message.reply_text(
+                ui.error("Invalid number(s). Example: /testcall 447934567847")
+            )
+            return
+        nums = parsed
+    else:
+        nums = await asyncio.to_thread(vd.test_numbers)
+        if not nums:
+            await update.message.reply_text(
+                ui.error(
+                    "No test numbers configured on the server. "
+                    "Use /testcall 447934567847 to dial your number."
+                )
+            )
+            return
+    preview = ", ".join(f"+{n}" for n in nums)
+    msg = await update.message.reply_text(f"📞 Placing test calls to {preview}…")
+    try:
         placed = await asyncio.to_thread(vd.test_calls, nums, update.effective_chat.id)
         card = ui.card(
             "📞  TEST CALLS PLACED",
