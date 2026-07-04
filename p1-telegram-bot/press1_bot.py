@@ -48,9 +48,9 @@ HELP = (
             ui.bullet("/run", "dial the loaded leads", icon="▪️"),
             ui.bullet("/dashboard", "pinned live control room", icon="▪️"),
             ui.bullet("/status", "quick snapshot", icon="▪️"),
-            ui.bullet("/pause", "hold new calls", icon="▪️"),
-            ui.bullet("/unpause", "resume a campaign", icon="▪️"),
-            ui.bullet("/stop", "end the campaign", icon="▪️"),
+            ui.bullet("/pause", "hold new calls (this chat only)", icon="▪️"),
+            ui.bullet("/unpause", "resume this chat's campaign", icon="▪️"),
+            ui.bullet("/stop", "end this chat's campaign", icon="▪️"),
             ui.bullet("/testcall", "ring the test numbers", icon="▪️"),
             "",
             "⏰ <b>SCHEDULE</b>",
@@ -72,6 +72,7 @@ HELP = (
         ],
         expandable=True,
     )
+    + "\n🔔 <i>Each group chat runs its own campaign. /pause and /unpause only affect that chat.</i>"
     + "\n🔔 <i>Every key a caller presses is streamed here live.</i>"
 )
 
@@ -81,14 +82,57 @@ class Session:
     numbers: list[str] = field(default_factory=list)
 
 
+def _is_group_chat(update: Update) -> bool:
+    chat = update.effective_chat
+    return bool(chat and chat.type in ("group", "supergroup"))
+
+
+def session_key_for(chat_id: int, user_id: int, *, group: bool) -> str:
+    return f"chat:{chat_id}" if group else f"user:{user_id}"
+
+
+def session_key(update: Update) -> str:
+    chat = update.effective_chat
+    user_id = update.effective_user.id if update.effective_user else 0
+    if chat and chat.type in ("group", "supergroup"):
+        return f"chat:{chat.id}"
+    return f"user:{user_id}"
+
+
+def session_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Session:
+    key = session_key(update)
+    store: dict[str, Session] = context.application.bot_data.setdefault("press1_session", {})
+    if key not in store:
+        store[key] = Session()
+    return store[key]
+
+
+def chat_progress(app: Application, chat_id: int) -> dict | None:
+    entry = app.bot_data.get("chat_campaigns", {}).get(chat_id)
+    if not entry:
+        return None
+    progress = entry.get("progress")
+    return progress if isinstance(progress, dict) else None
+
+
+def set_chat_progress(app: Application, chat_id: int, progress: dict) -> None:
+    app.bot_data.setdefault("chat_campaigns", {}).setdefault(chat_id, {})["progress"] = progress
+
+
+async def control_guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Pause/unpause/stop: any member in group chats; DMs still require access."""
+    if _is_group_chat(update):
+        return True
+    return await guard(update, context)
+
+
 def session(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> Session:
-    key = "press1_session"
-    if key not in context.application.bot_data:
-        context.application.bot_data[key] = {}
-    store: dict[int, Session] = context.application.bot_data[key]
-    if user_id not in store:
-        store[user_id] = Session()
-    return store[user_id]
+    """Legacy per-user session (prefer session_for in handlers)."""
+    key = f"user:{user_id}"
+    store: dict[str, Session] = context.application.bot_data.setdefault("press1_session", {})
+    if key not in store:
+        store[key] = Session()
+    return store[key]
 
 
 def _note_user(app: Application, user) -> None:
@@ -247,13 +291,14 @@ async def _live_campaign_updater(
     run_since: str,
     stop_event: asyncio.Event,
     context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
 ) -> None:
     last_text = ""
     idle_rounds = 0
-    progress = context.application.bot_data.get("dial_progress", {})
     frame = 0
     while not stop_event.is_set():
         try:
+            progress = chat_progress(context.application, chat_id) or {}
             progress["_frame"] = frame
             frame += 1
             st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
@@ -324,33 +369,37 @@ async def _live_campaign_updater(
             break
         except asyncio.TimeoutError:
             pass
-    progress["running"] = False
+    progress = chat_progress(context.application, chat_id)
+    if progress:
+        progress["running"] = False
 
 
-def _stop_dialer(context: ContextTypes.DEFAULT_TYPE) -> None:
-    progress = context.application.bot_data.get("dial_progress")
+def _stop_dialer(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    progress = chat_progress(context.application, chat_id)
     if progress:
         progress["stop"] = True
-    try:
-        vd._stop_remote_dialer()
-    except Exception:
-        pass
-    task = context.application.bot_data.get("dial_task")
+    run_id = str((progress or {}).get("run_id", "") or "")
+    if run_id:
+        try:
+            vd._stop_remote_dialer(run_id)
+        except Exception:
+            pass
+    task = context.application.bot_data.get("dial_tasks", {}).get(chat_id)
     if task and not task.done():
         task.cancel()
-    context.application.bot_data.pop("dial_task", None)
+    context.application.bot_data.setdefault("dial_tasks", {}).pop(chat_id, None)
 
 
-def _stop_live_updater(context: ContextTypes.DEFAULT_TYPE) -> None:
-    _stop_dialer(context)
-    task = context.application.bot_data.get("live_updater_task")
-    stop = context.application.bot_data.get("live_updater_stop")
+def _stop_live_updater(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    _stop_dialer(context, chat_id)
+    tasks = context.application.bot_data.setdefault("live_updater_tasks", {})
+    stops = context.application.bot_data.setdefault("live_updater_stops", {})
+    stop = stops.pop(chat_id, None)
     if stop:
         stop.set()
+    task = tasks.pop(chat_id, None)
     if task and not task.done():
         task.cancel()
-    context.application.bot_data.pop("live_updater_task", None)
-    context.application.bot_data.pop("live_updater_stop", None)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -358,8 +407,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     msg = await update.message.reply_text("📡 Reading server…")
     try:
-        st = await asyncio.to_thread(vd.get_dial_stats, None, context.application.bot_data.get("dial_progress"))
-        s = session(update.effective_user.id, context)
+        st = await asyncio.to_thread(
+            vd.get_dial_stats,
+            None,
+            chat_progress(context.application, update.effective_chat.id),
+        )
+        s = session_for(update, context)
         text = await _format_status(st, len(s.numbers))
         await msg.edit_text(text)
     except Exception as e:
@@ -369,7 +422,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cmd_leads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
-    s = session(update.effective_user.id, context)
+    s = session_for(update, context)
     await update.message.reply_text(
         f"💾 {len(s.numbers)} leads loaded. Send more or /run."
     )
@@ -378,7 +431,7 @@ async def cmd_leads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
-    session(update.effective_user.id, context).numbers.clear()
+    session_for(update, context).numbers.clear()
     await update.message.reply_text("🧹 Loaded leads cleared.")
 
 
@@ -545,20 +598,26 @@ async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update, context):
+    if not await control_guard(update, context):
         return
-    _stop_live_updater(context)
+    chat_id = update.effective_chat.id
+    _stop_live_updater(context, chat_id)
     msg = await update.message.reply_text("🛑 Stopping campaign…")
-    await msg.edit_text("🛑 Campaign stopped.")
+    await msg.edit_text("🛑 Campaign stopped in this chat.")
 
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update, context):
+    if not await control_guard(update, context):
+        return
+    chat_id = update.effective_chat.id
+    progress = chat_progress(context.application, chat_id)
+    run_id = str((progress or {}).get("run_id", "") or "")
+    if not run_id:
+        await update.message.reply_text(ui.error("No active campaign in this chat."))
         return
     msg = await update.message.reply_text("⏸ Pausing campaign…")
     try:
-        st = await asyncio.to_thread(vd.pause_dial_campaign)
-        progress = context.application.bot_data.get("dial_progress")
+        st = await asyncio.to_thread(vd.pause_dial_campaign, run_id)
         if progress:
             progress["paused"] = True
             progress["running"] = True
@@ -577,12 +636,17 @@ async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_unpause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update, context):
+    if not await control_guard(update, context):
+        return
+    chat_id = update.effective_chat.id
+    progress = chat_progress(context.application, chat_id)
+    run_id = str((progress or {}).get("run_id", "") or "")
+    if not run_id:
+        await update.message.reply_text(ui.error("No active campaign in this chat."))
         return
     msg = await update.message.reply_text("▶️ Resuming campaign…")
     try:
-        st = await asyncio.to_thread(vd.unpause_dial_campaign)
-        progress = context.application.bot_data.get("dial_progress")
+        st = await asyncio.to_thread(vd.unpause_dial_campaign, run_id)
         if progress:
             progress["paused"] = False
             progress["running"] = True
@@ -639,14 +703,14 @@ async def _dashboard_updater(
     last_text = ""
     while not stop_event.is_set():
         try:
-            progress = app.bot_data.get("dial_progress") or {}
+            progress = chat_progress(app, chat_id) or {}
             progress["_frame"] = frame
             frame += 1
             run_since = progress.get("run_since") or None
             st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
             total = int(st.get("list_size", 0) or 0) or int(progress.get("total", 0) or 0)
             store: dict = app.bot_data.get("press1_session", {})
-            loaded = len(store[user_id].numbers) if user_id in store else 0
+            loaded = len(store.get(f"chat:{chat_id}", Session()).numbers)
             pacing = _pacing()
             if frame == 1 or frame % 10 == 0:
                 scheduled = await asyncio.to_thread(schedule.list_schedules, user_id)
@@ -771,7 +835,7 @@ async def _launch_campaign(
     intro: str | None = None,
 ) -> None:
     count = len(numbers)
-    _stop_live_updater(context)
+    _stop_live_updater(context, chat_id)
     text_intro = intro or (
         f"🚀 Launching {count} leads\n"
         f"{vd.BATCH_SIZE}/batch · {vd.CALL_GAP_SEC:g}s gap · "
@@ -792,11 +856,12 @@ async def _launch_campaign(
             "stop": False,
             "run_since": run_since,
             "run_id": "",
+            "chat_id": chat_id,
             "owner_id": user_id,
             "pace_samples": [],
             "_frame": 0,
         }
-        context.application.bot_data["dial_progress"] = progress
+        set_chat_progress(context.application, chat_id, progress)
         try:
             await asyncio.to_thread(vd.launch_dial_campaign, numbers, progress)
         except Exception as e:
@@ -820,11 +885,11 @@ async def _launch_campaign(
         }
         await _safe_edit(msg, await _format_live_stats(fresh, count, progress=progress))
         stop_event = asyncio.Event()
-        context.application.bot_data["live_updater_stop"] = stop_event
+        context.application.bot_data.setdefault("live_updater_stops", {})[chat_id] = stop_event
         task = asyncio.create_task(
-            _live_campaign_updater(msg, count, run_since, stop_event, context)
+            _live_campaign_updater(msg, count, run_since, stop_event, context, chat_id)
         )
-        context.application.bot_data["live_updater_task"] = task
+        context.application.bot_data.setdefault("live_updater_tasks", {})[chat_id] = task
     except Exception as e:
         try:
             await _safe_edit(msg, ui.error(f"Run failed: {e}"))
@@ -871,7 +936,7 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         await update.message.reply_text(text)
         return
-    s = session(update.effective_user.id, context)
+    s = session_for(update, context)
     if not s.numbers:
         await update.message.reply_text(
             "⏰ Schedule a campaign\n\n"
@@ -942,7 +1007,7 @@ async def cmd_unschedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
-    s = session(update.effective_user.id, context)
+    s = session_for(update, context)
     if not s.numbers:
         await update.message.reply_text("📥 Load leads first — paste a list or send a .csv.")
         return
@@ -1077,7 +1142,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     nums = parse_csv(content) if name.endswith(".csv") else parse_numbers(
         content.decode("utf-8-sig", errors="replace")
     )
-    s = session(update.effective_user.id, context)
+    s = session_for(update, context)
     s.numbers = list(dict.fromkeys(s.numbers + nums))
     dest.unlink(missing_ok=True)
     await update.message.reply_text(
@@ -1094,7 +1159,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     nums = parse_numbers(text)
     if not nums:
         return
-    s = session(update.effective_user.id, context)
+    s = session_for(update, context)
     s.numbers = list(dict.fromkeys(s.numbers + nums))
     await update.message.reply_text(
         f"📥 Added {len(nums)} leads ({len(s.numbers)} total). /run to dial."
