@@ -68,6 +68,8 @@ ANNOUNCE_DEDUPE_SECONDS = 120
 
 ACTIVE_CALLS_DIGEST_SECONDS = 300
 
+LIVE_COUNT_REFRESH_LIMIT = 7
+
 TELEGRAM_SEND_QUEUE_KEY = "telegram_send_queue"
 TELEGRAM_SEND_WORKER_KEY = "telegram_send_worker"
 TELEGRAM_SEND_SEQ_KEY = "telegram_send_seq"
@@ -283,7 +285,7 @@ def _live_calls_footer(count: int) -> str:
     if count <= 0:
         return ""
     word = "call" if count == 1 else "calls"
-    return f"\n▪️ {count} live {word}"
+    return f"\n▪️ {count} active {word}"
 
 
 def format_on_phone_message(
@@ -749,21 +751,73 @@ def _live_call_text(live_call: LiveCall, live_count: int) -> str:
     )
 
 
+def _on_call_refs_for_count_refresh(
+    live_calls: dict[str, LiveCall],
+    *,
+    limit: int = LIVE_COUNT_REFRESH_LIMIT,
+) -> list[tuple[LiveCall, int, int]]:
+    """Pick up to `limit` ON CALL messages to refresh with the active call total.
+
+    Single group: the newest N on-call posts in that chat.
+    Multiple groups: the newest on-call post in each of up to N chats.
+    """
+    active = [
+        live_call
+        for live_call in live_calls.values()
+        if not live_call.silent and live_call.message_ids
+    ]
+    if not active:
+        return []
+
+    chat_ids = {chat_id for live_call in active for chat_id in live_call.message_ids}
+    refs: list[tuple[LiveCall, int, int]] = []
+
+    if len(chat_ids) == 1:
+        active.sort(key=lambda live_call: live_call.started_at, reverse=True)
+        for live_call in active[:limit]:
+            for chat_id, message_id in live_call.message_ids.items():
+                refs.append((live_call, chat_id, message_id))
+        return refs
+
+    best_by_chat: dict[int, tuple[float, int, LiveCall]] = {}
+    for live_call in active:
+        for chat_id, message_id in live_call.message_ids.items():
+            entry = best_by_chat.get(chat_id)
+            if entry is None or live_call.started_at > entry[0]:
+                best_by_chat[chat_id] = (live_call.started_at, message_id, live_call)
+
+    ranked = sorted(
+        best_by_chat.items(),
+        key=lambda item: item[1][0],
+        reverse=True,
+    )[:limit]
+    for chat_id, (_started_at, message_id, live_call) in ranked:
+        refs.append((live_call, chat_id, message_id))
+    return refs
+
+
 async def _refresh_all_live_call_counts(bot, bot_data: dict) -> None:
-    """Re-edit every active ON CALL message with the current live call total."""
+    """Re-edit recent ON CALL messages with the current active call total."""
     live_calls = _live_calls(bot_data)
     if not live_calls:
         return
 
     count = len(live_calls)
+    refs = _on_call_refs_for_count_refresh(live_calls)
+    if not refs:
+        return
 
-    async def _refresh_one(live_call: LiveCall) -> None:
-        if live_call.silent or not live_call.message_ids:
-            return
+    async def _refresh_one(live_call: LiveCall, chat_id: int, message_id: int) -> None:
         text = _live_call_text(live_call, count)
-        await _edit_live_messages(bot, bot_data, live_call.message_ids, text)
+        await _edit_one_live_message(
+            bot,
+            bot_data,
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+        )
 
-    await asyncio.gather(*(_refresh_one(lc) for lc in live_calls.values()))
+    await asyncio.gather(*(_refresh_one(lc, cid, mid) for lc, cid, mid in refs))
 
 
 
