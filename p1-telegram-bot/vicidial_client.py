@@ -13,7 +13,7 @@ from pathlib import Path
 import paramiko
 
 from press1_settings import DEFAULT_THREECX, THREECX_PROFILES, profile, transfer_dial_target
-from press1_utils import normalize_uk
+from press1_utils import normalize_uk, to_e164
 
 HOST = os.getenv("VICIDIAL_SSH_HOST", "206.189.118.204")
 USER = os.getenv("VICIDIAL_SSH_USER", "root")
@@ -822,21 +822,6 @@ def deploy_audio(files: dict[str, Path]) -> None:
     mysql(
         f"UPDATE vicidial_campaigns SET survey_first_audio_file='{SOUND_NAME}' WHERE campaign_id='{CAMPAIGN}';"
     )
-
-
-def to_e164(phone: str) -> str:
-    """Full international digits for BitCall originate (same format as /testcall)."""
-    digits = re.sub(r"\D", "", phone)
-    if not digits:
-        return ""
-    if digits.startswith("44") or digits.startswith("61"):
-        return digits
-    if digits.startswith("0"):
-        # AU mobile 04xxxxxxxx -> 614xxxxxxxx
-        if digits.startswith("04") and len(digits) == 10:
-            return "61" + digits[1:]
-        return "44" + digits[1:]
-    return "44" + digits
 
 
 def originate_press1(phone: str) -> str:

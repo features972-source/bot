@@ -4,11 +4,85 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import re
 import subprocess
 from pathlib import Path
 
 MIN_PHONE_DIGITS = 9
+DEFAULT_PHONE_CODE = (os.getenv("PRESS1_DEFAULT_PHONE_CODE", "44").strip() or "44")
+
+# Irish geographic prefixes (local format with leading 0).
+_IE_GEO_PREFIXES = (
+    "01", "021", "022", "023", "024", "025", "026", "027", "028", "029",
+    "0402", "0404", "041", "042", "043", "044", "045", "046", "047", "049",
+    "0505", "051", "052", "053", "056", "057", "058", "059", "061", "062",
+    "063", "064", "065", "066", "067", "069", "071", "072", "074", "075",
+    "076", "077", "090", "091", "093", "094", "095", "096", "097", "098", "099",
+)
+
+
+def _digits(phone: str) -> str:
+    return re.sub(r"\D", "", phone)
+
+
+def _strip_leading_zero(national: str) -> str:
+    return national[1:] if national.startswith("0") else national
+
+
+def _is_irish_local(digits: str) -> bool:
+    if re.fullmatch(r"08\d{8}", digits):
+        return True
+    if not digits.startswith("0"):
+        return False
+    for prefix in sorted(_IE_GEO_PREFIXES, key=len, reverse=True):
+        if digits.startswith(prefix) and len(digits) >= 9:
+            return True
+    return False
+
+
+def normalize_phone(phone: str) -> tuple[str, str]:
+    """Return (phone_code, national_digits) for VICIdial / dialing."""
+    digits = _digits(phone)
+    if not digits:
+        return "", ""
+
+    for code in ("353", "44", "61"):
+        if digits.startswith(code):
+            national = _strip_leading_zero(digits[len(code) :])
+            return code, national
+
+    if digits.startswith("0"):
+        rest = digits[1:]
+        if digits.startswith("04") and len(digits) == 10:
+            return "61", rest
+        # UK mobile 07xxxxxxxxx before Irish geographic 07x prefixes.
+        if re.fullmatch(r"07\d{9}", digits):
+            return "44", rest
+        if _is_irish_local(digits):
+            return "353", rest
+        return "44", rest
+
+    # Bare national numbers (no leading 0).
+    if re.fullmatch(r"8\d{8}", digits):
+        return "353", digits
+    if re.fullmatch(r"7\d{9}", digits):
+        return "44", digits
+
+    return DEFAULT_PHONE_CODE, digits
+
+
+def to_e164(phone: str) -> str:
+    """Full international digits for BitCall originate."""
+    code, national = normalize_phone(phone)
+    if not code or not national:
+        return ""
+    return f"{code}{national}"
+
+
+def normalize_uk(phone: str) -> tuple[str, str]:
+    """Backward-compatible alias."""
+    return normalize_phone(phone)
 
 
 def parse_numbers(text: str) -> list[str]:
@@ -46,18 +120,6 @@ def parse_csv(content: bytes) -> list[str]:
     return parse_numbers(text)
 
 
-def normalize_uk(phone: str) -> tuple[str, str]:
-    digits = re.sub(r"\D", "", phone)
-    if digits.startswith("44"):
-        national = digits[2:]
-        if national.startswith("0"):
-            national = national[1:]
-        return "44", national
-    if digits.startswith("0"):
-        return "44", digits[1:]
-    return "44", digits
-
-
 def convert_audio_for_asterisk(src: Path, dest_dir: Path, stem: str) -> dict[str, Path]:
     """Convert to 8 kHz telephony formats with clip-safe processing (no loudnorm)."""
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -91,6 +153,7 @@ def convert_audio_for_asterisk(src: Path, dest_dir: Path, stem: str) -> dict[str
             capture_output=True,
             text=True,
         )
-        if proc.returncode == 0:
-            outputs[ext] = dest
+        if proc.returncode != 0:
+            continue
+        outputs[ext] = dest
     return outputs
