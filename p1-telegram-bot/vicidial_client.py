@@ -1362,10 +1362,8 @@ def pause_dial_campaign(run_id: str) -> dict[str, str]:
     p = _run_paths(run_id)
     running = _dialer_process_count(run_id)
     total, started, failed, left = _campaign_counters(run_id)
-    if running < 1 and left <= 0:
+    if total <= 0 or (running < 1 and left <= 0):
         raise RuntimeError("No active campaign to pause")
-    if running < 1 and left > 0:
-        raise RuntimeError("Campaign stalled — use /unpause to resume dialing")
     if _dial_script_supports_pause(run_id):
         run_remote(f"touch {p['pause']}", timeout=15)
     else:
@@ -1376,6 +1374,7 @@ def pause_dial_campaign(run_id: str) -> dict[str, str]:
         "left": str(left),
         "total": str(total),
         "failed": str(failed),
+        "stalled": "Y" if running < 1 and left > 0 else "N",
     }
 
 

@@ -677,7 +677,11 @@ async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     ui.bullet("Left", st["left"], icon="⏳"),
                 ],
             )
-            + "\n<i>Live calls will finish · /unpause to continue.</i>"
+            + (
+                "\n<i>Dialer stopped — /unpause will resume the remaining leads.</i>"
+                if st.get("stalled") == "Y"
+                else "\n<i>Live calls will finish · /unpause to continue.</i>"
+            )
         )
     except Exception as e:
         await msg.edit_text(ui.error(f"Pause failed: {e}"))
