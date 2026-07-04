@@ -22,6 +22,7 @@ from database import (
     pass_offer_for_notes,
     release_pass_claim,
     try_claim_pass_offer,
+    try_mark_pass_taken,
     update_pass_offer,
 )
 from handlers.admin_access import require_admin
@@ -101,8 +102,7 @@ def _open_pass_text(offer: PassOffer) -> str:
     return (
         "<blockquote>📞 <b>PASS AVAILABLE</b>\n"
         f"▪️ Starter: {starter}\n"
-        "▪️ Full notes are private — sent to whoever takes the pass\n"
-        "▪️ Tap <b>Take pass</b> below — one person at a time</blockquote>"
+        "▪️ Full notes are private — sent to whoever takes the pass</blockquote>"
     )
 
 
@@ -154,22 +154,72 @@ def pass_repost_due(offer: PassOffer, *, now: datetime | None = None) -> bool:
     return elapsed >= PASS_REPOST_SECONDS
 
 
+def _offer_lock(bot_data: dict, offer_id: int) -> asyncio.Lock:
+    locks = bot_data.setdefault("pass_offer_locks", {})
+    if offer_id not in locks:
+        locks[offer_id] = asyncio.Lock()
+    return locks[offer_id]
+
+
+async def _edit_pass_message(
+    bot,
+    *,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    try:
+        await bot.edit_message_text(
+            text,
+            chat_id=chat_id,
+            message_id=message_id,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+        return True
+    except BadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            return True
+        return False
+
+
+async def _sync_offer_message(
+    bot,
+    offer: PassOffer,
+    *,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    preferred_message_id: int | None = None,
+) -> None:
+    """Keep the live pass card in one place — no duplicate Take pass buttons."""
+    targets: list[int] = []
+    if preferred_message_id is not None:
+        targets.append(preferred_message_id)
+    if offer.offer_message_id and offer.offer_message_id not in targets:
+        targets.append(offer.offer_message_id)
+
+    for message_id in targets:
+        await _edit_pass_message(
+            bot,
+            chat_id=offer.chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+
+
 async def _release_claim_and_reopen(bot, path: str, offer: PassOffer) -> None:
     release_pass_claim(path, offer.id)
     refreshed = get_pass_offer(path, offer.id)
     if refreshed is None or refreshed.status != PASS_STATUS_PENDING:
         return
-    if refreshed.offer_message_id:
-        try:
-            await bot.edit_message_text(
-                _open_pass_text(refreshed),
-                chat_id=refreshed.chat_id,
-                message_id=refreshed.offer_message_id,
-                parse_mode="HTML",
-                reply_markup=_pass_keyboard(refreshed.id),
-            )
-        except BadRequest:
-            pass
+    await _sync_offer_message(
+        bot,
+        refreshed,
+        text=_open_pass_text(refreshed),
+        reply_markup=_pass_keyboard(refreshed.id),
+    )
 
 
 async def pass_repost_loop(bot, settings: Settings, bot_data: dict) -> None:
@@ -241,18 +291,39 @@ async def _deliver_pass_offer(
 
 
 async def _repost_pass_offer(bot, settings: Settings, offer_id: int) -> None:
-    offer = get_pass_offer(settings.database_path, offer_id)
+    path = settings.database_path
+    offer = get_pass_offer(path, offer_id)
     if offer is None or offer.status != PASS_STATUS_PENDING or offer.assigned_user_id != 0:
         return
-    if not await _deliver_pass_offer(
+
+    repost_text = (
+        _open_pass_text(offer).removesuffix("</blockquote>")
+        + "\n▪️ 🔄 <b>Still available</b> — tap Take pass</blockquote>"
+    )
+    if offer.offer_message_id and await _edit_pass_message(
         bot,
-        settings.database_path,
+        chat_id=offer.chat_id,
+        message_id=offer.offer_message_id,
+        text=repost_text,
+        reply_markup=_pass_keyboard(offer.id),
+    ):
+        update_pass_offer(
+            path,
+            offer.id,
+            last_reminder_at=datetime.now(timezone.utc).isoformat(),
+        )
+        logger.info("Reposted pass offer %s in chat %s (edited)", offer_id, offer.chat_id)
+        return
+
+    if await _deliver_pass_offer(
+        bot,
+        path,
         offer,
         reply_to_message_id=offer.notes_message_id,
     ):
+        logger.info("Reposted pass offer %s in chat %s (new message)", offer_id, offer.chat_id)
+    else:
         logger.warning("Could not repost pass offer %s", offer_id)
-        return
-    logger.info("Reposted pass offer %s in chat %s", offer_id, offer.chat_id)
 
 
 async def _expire_pass_offer(bot, settings: Settings, offer_id: int) -> None:
@@ -428,7 +499,7 @@ async def pass_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     settings: Settings = context.bot_data["settings"]
     query = update.callback_query
     user = update.effective_user
-    if not query or not user or not query.data:
+    if not query or not user or not query.data or not query.message:
         return
 
     parts = query.data.removeprefix(CALLBACK_PREFIX).split(":", 1)
@@ -442,59 +513,62 @@ async def pass_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer("Invalid pass.")
         return
 
-    offer = get_pass_offer(settings.database_path, offer_id)
-    if offer is None:
-        await query.answer("This pass is no longer available.")
-        return
-    if offer.status == PASS_STATUS_EXPIRED:
-        await query.answer("This pass timed out.", show_alert=True)
-        return
-    if offer.status != PASS_STATUS_PENDING:
-        await query.answer("This pass was already taken.")
-        return
-    if pass_offer_expired(offer):
-        await _expire_pass_offer(context.bot, settings, offer.id)
-        await query.answer("This pass timed out.", show_alert=True)
-        return
-    if user.id == offer.starter_user_id:
-        await query.answer("You can't take your own pass.", show_alert=True)
-        return
-
-    path = settings.database_path
-    if offer.assigned_user_id != 0 and offer.assigned_user_id != user.id:
-        holder = _user_label(
-            offer.assigned_user_id,
-            offer.assigned_username,
-            offer.assigned_display_name,
-        )
-        await query.answer(f"{holder} is already taking this pass.", show_alert=True)
-        return
-
-    if offer.assigned_user_id == 0:
-        if not try_claim_pass_offer(
-            path,
-            offer.id,
-            telegram_user_id=user.id,
-            telegram_username=user.username,
-            display_name=_display_name(user),
-        ):
-            await query.answer("Someone else just took this pass.", show_alert=True)
+    async with _offer_lock(context.bot_data, offer_id):
+        offer = get_pass_offer(settings.database_path, offer_id)
+        if offer is None:
+            await query.answer("This pass is no longer available.")
             return
-        offer = get_pass_offer(path, offer.id)
-        assert offer is not None
-        locked_text = _claimed_pass_text(offer, user.id, user.username, _display_name(user))
-        if offer.offer_message_id:
-            try:
-                await context.bot.edit_message_text(
-                    locked_text,
-                    chat_id=offer.chat_id,
-                    message_id=offer.offer_message_id,
-                    parse_mode="HTML",
-                )
-            except BadRequest:
-                pass
+        if offer.status == PASS_STATUS_EXPIRED:
+            await query.answer("This pass timed out.", show_alert=True)
+            return
+        if offer.status != PASS_STATUS_PENDING:
+            await query.answer("This pass was already taken.", show_alert=True)
+            return
+        if pass_offer_expired(offer):
+            await _expire_pass_offer(context.bot, settings, offer.id)
+            await query.answer("This pass timed out.", show_alert=True)
+            return
+        if user.id == offer.starter_user_id:
+            await query.answer("You can't take your own pass.", show_alert=True)
+            return
 
-    await _complete_take_pass(update, context, settings, offer, user)
+        path = settings.database_path
+        clicked_message_id = query.message.message_id
+        if offer.assigned_user_id not in (0, user.id):
+            holder = _user_label(
+                offer.assigned_user_id,
+                offer.assigned_username,
+                offer.assigned_display_name,
+            )
+            await query.answer(f"{holder} is already taking this pass.", show_alert=True)
+            return
+
+        if offer.assigned_user_id == 0:
+            if not try_claim_pass_offer(
+                path,
+                offer.id,
+                telegram_user_id=user.id,
+                telegram_username=user.username,
+                display_name=_display_name(user),
+            ):
+                await query.answer("Someone else just took this pass.", show_alert=True)
+                return
+            offer = get_pass_offer(path, offer.id)
+            assert offer is not None
+            locked_text = _claimed_pass_text(
+                offer, user.id, user.username, _display_name(user)
+            )
+            await _sync_offer_message(
+                context.bot,
+                offer,
+                text=locked_text,
+                reply_markup=None,
+                preferred_message_id=clicked_message_id,
+            )
+
+        await _complete_take_pass(
+            update, context, settings, offer, user, clicked_message_id
+        )
 
 
 async def _complete_take_pass(
@@ -503,6 +577,7 @@ async def _complete_take_pass(
     settings: Settings,
     offer: PassOffer,
     user,
+    clicked_message_id: int,
 ) -> None:
     query = update.callback_query
     if not query:
@@ -537,13 +612,19 @@ async def _complete_take_pass(
         await query.answer("Could not DM you — try /start in private chat.", show_alert=True)
         return
 
-    update_pass_offer(path, offer.id, status=PASS_STATUS_TAKEN)
+    if not try_mark_pass_taken(path, offer.id, user.id):
+        await query.answer("This pass was already taken.", show_alert=True)
+        return
+
     taker = _mention_html(user.id, user.username, _display_name(user))
     taken_text = f"{taker} — <b>took this pass</b> ✅"
-    try:
-        await query.edit_message_text(taken_text, parse_mode="HTML")
-    except BadRequest:
-        pass
+    await _sync_offer_message(
+        context.bot,
+        offer,
+        text=taken_text,
+        reply_markup=None,
+        preferred_message_id=clicked_message_id,
+    )
 
     try:
         await context.bot.send_message(

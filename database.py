@@ -2921,6 +2921,23 @@ def release_pass_claim(path: str, offer_id: int) -> None:
         conn.commit()
 
 
+def try_mark_pass_taken(path: str, offer_id: int, user_id: int) -> bool:
+    """Atomically mark a pass taken by the user who claimed it."""
+    with _connect(path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE pass_offers
+            SET status = 'taken'
+            WHERE id = ?
+              AND status = 'pending'
+              AND assigned_user_id = ?
+            """,
+            (offer_id, user_id),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+
+
 def create_open_pass_offer(
     path: str,
     *,
