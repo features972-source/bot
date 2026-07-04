@@ -1255,7 +1255,7 @@ async def _dtmf_notify_loop(app: Application) -> None:
 
 
 async def _dedup_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Ignore the same Telegram update if two bot instances overlap briefly."""
+    """Drop only rapid duplicate deliveries (not Telegram retries after timeout)."""
     uid = update.update_id
     if uid is None:
         return
@@ -1266,7 +1266,8 @@ async def _dedup_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         for key, ts in list(seen.items()):
             if ts < cutoff:
                 del seen[key]
-    if uid in seen:
+    prev = seen.get(uid)
+    if prev is not None and now - prev < 3:
         raise ApplicationHandlerStop()
     seen[uid] = now
 

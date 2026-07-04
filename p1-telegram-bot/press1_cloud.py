@@ -23,7 +23,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-BUILD = "xfer-fix-v4"
+BUILD = "xfer-fix-v5"
 WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "telegram/webhook").lstrip("/")
 PUBLIC_URL = (
     os.getenv("TELEGRAM_WEBHOOK_URL_BASE")
@@ -93,6 +93,12 @@ def _run_webhook() -> None:
     def root():
         return jsonify({"ok": True, "service": "p1-telegram-bot", "build": BUILD})
 
+    def _log_update_done(future: asyncio.Future) -> None:
+        try:
+            future.result()
+        except Exception:
+            logger.exception("process_update failed")
+
     @flask_app.post(f"/{WEBHOOK_PATH}")
     def telegram_webhook():
         secret = resolve_webhook_secret()
@@ -107,12 +113,9 @@ def _run_webhook() -> None:
         update = Update.de_json(data, tg_app.bot)
         if update is None:
             return "", 400
+        # Ack immediately — Telegram times out (~60s) if we wait for handlers.
         future = asyncio.run_coroutine_threadsafe(tg_app.process_update(update), loop)
-        try:
-            future.result(timeout=120)
-        except Exception:
-            logger.exception("process_update failed")
-            return "", 500
+        future.add_done_callback(_log_update_done)
         return "", 200
 
     port = int(os.getenv("PORT", "10000"))
