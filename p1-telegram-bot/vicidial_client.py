@@ -1119,16 +1119,33 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path]) -> str:
 
 
 def originate_press1(phone: str, chat_id: int | None = None) -> str:
-    """Place one outbound call — identical path to /testcall."""
+    """Place one outbound call — same call-file path as campaigns (with CLI)."""
     digits = to_e164(phone) or re.sub(r"\D", "", phone)
     if len(digits) < MIN_PHONE_DIGITS + 2:
         raise ValueError(f"invalid number: {phone!r}")
     if chat_id is not None:
         apply_lead_run_config(digits, chat_id)
+        ensure_all_threex_endpoints()
+    cid = outbound_caller_id(digits)
     run_remote(
         f"asterisk -rx {shlex.quote(f'database put press1 lead {digits}')}; "
         f"asterisk -rx {shlex.quote(f'database put press1 lead/{digits} {digits}')}; "
-        f"asterisk -rx {shlex.quote(f'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr')}",
+        f"mkdir -p /var/spool/asterisk/tmp /var/spool/asterisk/outgoing; "
+        f"callfile=/var/spool/asterisk/tmp/press1_test_{digits}_$$.call; "
+        f"cat > \"$callfile\" <<'CALL'\n"
+        f"Channel: PJSIP/{digits}@bitcall\n"
+        f"CallerID: \"{cid}\" <{cid}>\n"
+        f"MaxRetries: 0\n"
+        f"WaitTime: 45\n"
+        f"Context: press1-ivr\n"
+        f"Extension: {digits}\n"
+        f"Priority: 1\n"
+        f"Setvar: LEADNUM={digits}\n"
+        f"CALL\n"
+        f"chown asterisk:asterisk \"$callfile\" 2>/dev/null || true; "
+        f"chmod 0640 \"$callfile\"; "
+        f"mv \"$callfile\" /var/spool/asterisk/outgoing/; "
+        f"echo ok {digits}",
         timeout=30,
     )
     return digits
@@ -1507,5 +1524,5 @@ def test_calls(numbers: list[str] | None = None, chat_id: int | None = None) -> 
         except Exception as e:
             errors.append(f"{num}: {e}")
     if not placed and errors:
-        raise RuntimeError(errors[0])
+        raise RuntimeError("; ".join(errors))
     return placed
