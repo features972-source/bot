@@ -1089,6 +1089,41 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 _AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".opus", ".flac", ".aac")
 
 
+def _set_awaiting_ivr(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.chat_data["awaiting_ivr_audio"] = True
+    context.user_data["awaiting_ivr_audio"] = True
+
+
+def _clear_awaiting_ivr(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.chat_data.pop("awaiting_ivr_audio", None)
+    context.user_data.pop("awaiting_ivr_audio", None)
+    context.chat_data.pop("ivr_audio_prompt_msg_id", None)
+
+
+def _is_awaiting_ivr(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    return bool(
+        context.chat_data.get("awaiting_ivr_audio")
+        or context.user_data.get("awaiting_ivr_audio")
+    )
+
+
+def _is_ivr_audio_reply(update: Update) -> bool:
+    """Group privacy mode: bots only see files sent as replies to bot messages."""
+    msg = update.message
+    if not msg or not _message_has_audio(msg):
+        return False
+    replied = msg.reply_to_message
+    if not replied or not replied.from_user:
+        return False
+    return bool(replied.from_user.is_bot)
+
+
+def _should_process_ivr_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if _is_awaiting_ivr(context):
+        return True
+    return _is_ivr_audio_reply(update)
+
+
 def _message_has_audio(msg: Message) -> bool:
     if msg.voice or msg.audio:
         return True
@@ -1123,7 +1158,7 @@ async def _save_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, dest: 
                 sound_name,
             )
             sound_name = await asyncio.to_thread(vd.deploy_chat_audio, chat_id, files)
-        context.user_data.pop("awaiting_ivr_audio", None)
+        _clear_awaiting_ivr(context)
         await msg.edit_text(
             f"✅ IVR audio updated for this chat ({ui.code(sound_name)}).\n"
             "<i>Only campaigns started in this chat use this message.</i>"
@@ -1159,24 +1194,29 @@ async def cmd_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if replied and _message_has_audio(replied):
         await _deploy_ivr_from_message(update, context, replied)
         return
-    context.user_data["awaiting_ivr_audio"] = True
-    await update.message.reply_text(
+    _set_awaiting_ivr(context)
+    sent = await update.message.reply_text(
         ui.card(
             "🔊  CHANGE IVR AUDIO",
             [
-                ui.note("🎧", "Send an MP3, WAV, M4A, OGG, or voice note now,"),
-                ui.note("↩️", "or reply to an audio file with /audio."),
+                ui.note(
+                    "↩️",
+                    "<b>In groups:</b> reply to this message with your audio file.",
+                ),
+                ui.note("🎧", "Or send MP3, WAV, M4A, OGG, or a voice note now."),
+                ui.note("↪️", "Or reply to an audio file with /audio."),
                 ui.note("💬", "Applies to this chat only."),
             ],
         )
         + "\n💡 <i>Mono voice prompts sound best on phone lines.</i>"
     )
+    context.chat_data["ivr_audio_prompt_msg_id"] = sent.message_id
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
-    if not context.user_data.get("awaiting_ivr_audio"):
+    if not _should_process_ivr_audio(update, context):
         return
     await _deploy_ivr_from_message(update, context, update.message)
 
@@ -1184,7 +1224,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
-    if not context.user_data.get("awaiting_ivr_audio"):
+    if not _should_process_ivr_audio(update, context):
         return
     await _deploy_ivr_from_message(update, context, update.message)
 
@@ -1197,7 +1237,11 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     name = doc.file_name.lower()
     if name.endswith(_AUDIO_EXTS):
-        if not context.user_data.get("awaiting_ivr_audio"):
+        if not _should_process_ivr_audio(update, context):
+            await update.message.reply_text(
+                "⚠️ Run /audio, then <b>reply to the bot's message</b> with your file. "
+                "In group chats Telegram does not deliver standalone uploads to bots."
+            )
             return
         await _deploy_ivr_from_message(update, context, update.message)
         return
