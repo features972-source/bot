@@ -47,6 +47,14 @@ THREECX_PROFILES: dict[str, dict[str, str]] = {
         "sip_contact": "137.184.78.236",
         "ext": "8000",
     },
+    "hardware3cx": {
+        "id": "hardware3cx",
+        "label": "Hardware 3CX",
+        "fqdn": "46.101.24.34",
+        "host": "46.101.24.34",
+        "sip_contact": "46.101.24.34",
+        "ext": "8000",
+    },
 }
 
 DEFAULT_THREECX = os.getenv("PRESS1_THREECX_DEFAULT", "swapofica")
