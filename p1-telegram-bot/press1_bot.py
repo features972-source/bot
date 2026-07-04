@@ -32,7 +32,7 @@ from press1_settings import THREECX_PROFILES, format_settings_text
 from press1_utils import convert_audio_for_asterisk, parse_csv, parse_numbers
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")
-ALLOWED = {
+ALLOWED = access.OWNERS | {
     int(x.strip())
     for x in os.getenv("TELEGRAM_ALLOWED_IDS", os.getenv("ADMIN_CHAT_ID", "")).split(",")
     if x.strip().isdigit()

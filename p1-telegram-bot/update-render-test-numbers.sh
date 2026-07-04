@@ -2,7 +2,7 @@
 # Update VICIDIAL_TEST_NUMBERS on Render p1-bot and redeploy.
 set -euo pipefail
 : "${RENDER_API_KEY:?Set RENDER_API_KEY}"
-SVC="${P1_RENDER_SERVICE_ID:-srv-d8pvmemrnols73d31gpg}"
+SVC="${P1_RENDER_SERVICE_ID:-srv-d92bpksm0tmc73dt2fj0}"
 NUMBERS="447769799593,61421875784"
 API="https://api.render.com/v1/services/${SVC}"
 
