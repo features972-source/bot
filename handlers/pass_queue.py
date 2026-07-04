@@ -109,7 +109,8 @@ def _open_pass_text(offer: PassOffer) -> str:
     return (
         "<blockquote>📞 <b>PASS AVAILABLE</b>\n"
         f"▪️ Starter: {starter}\n"
-        "▪️ Full notes are private — sent to whoever takes the pass</blockquote>"
+        "▪️ Full notes are private — sent to whoever takes the pass\n"
+        "<i>⚠️ Not a finisher / not ready to finish? Don't press — you'll be booted.</i></blockquote>"
     )
 
 
