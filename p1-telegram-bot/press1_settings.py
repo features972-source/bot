@@ -81,7 +81,7 @@ def is_number_transfer(p: dict[str, str]) -> bool:
 def transfer_dial_target(p: dict[str, str]) -> str:
     if is_number_transfer(p):
         return f"PJSIP/{p['number']}@bitcall"
-    return f"PJSIP/{p['ext']}@3cx"
+    return f"PJSIP/{p['ext']}@p1-{p['id']}"
 
 
 def transfer_display(p: dict[str, str]) -> str:
@@ -111,4 +111,4 @@ def format_settings_text(
             ui.bullet("Transfer", transfer_display(p), icon="🎯"),
         ],
     )
-    return f"{card}\n<i>Tap a button below to change the transfer destination.</i>"
+    return f"{card}\n<i>Tap a button below — settings apply to <b>this chat only</b>.</i>"

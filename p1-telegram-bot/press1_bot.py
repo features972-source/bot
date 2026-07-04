@@ -60,8 +60,8 @@ HELP = (
             ui.bullet("/unschedule", "cancel a run", icon="▪️"),
             "",
             "🎛 <b>SETUP</b>",
-            ui.bullet("/audio", "change the IVR message", icon="▪️"),
-            ui.bullet("/settings", "transfer target & pacing", icon="▪️"),
+            ui.bullet("/audio", "change this chat's IVR message", icon="▪️"),
+            ui.bullet("/settings", "transfer target for this chat", icon="▪️"),
             ui.bullet("/leads", "loaded lead count", icon="▪️"),
             ui.bullet("/clear", "clear loaded numbers", icon="▪️"),
             "",
@@ -202,12 +202,12 @@ def _state_line(st: dict[str, str]) -> str:
 _PACING_CACHE: dict[str, object] = {"at": 0.0, "data": {}}
 
 
-def _pacing() -> dict:
+def _pacing(chat_id: int | None = None) -> dict:
     now = time.time()
     cached = _PACING_CACHE.get("data")
     if cached and now - float(_PACING_CACHE.get("at", 0)) < 60:
         return cached  # type: ignore[return-value]
-    summary = vd.settings_summary()
+    summary = vd.settings_summary(chat_id)
     data = {
         "call_gap": float(summary["call_gap"]),
         "batch_size": int(summary["batch_size"]),
@@ -227,7 +227,7 @@ async def _format_live_stats(
     finished: bool = False,
     progress: dict | None = None,
 ) -> str:
-    pacing = _pacing()
+    pacing = _pacing(int(prog.get("chat_id", 0) or 0) or None)
     prog = progress or {}
     frame = int(prog.get("_frame", 0) or 0)
     body = campaign.format_campaign_body(
@@ -445,8 +445,8 @@ def _threex_keyboard(active_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _settings_message() -> tuple[str, InlineKeyboardMarkup]:
-    summary = vd.settings_summary()
+def _settings_message(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    summary = vd.settings_summary(chat_id)
     text = format_settings_text(
         threex_id=summary["threex_target"],
         sound_name=summary["sound_name"],
@@ -461,9 +461,10 @@ def _settings_message() -> tuple[str, InlineKeyboardMarkup]:
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
+    chat_id = update.effective_chat.id
     msg = await update.message.reply_text("⚙️ Loading settings…")
     try:
-        text, keyboard = await asyncio.to_thread(_settings_message)
+        text, keyboard = await asyncio.to_thread(_settings_message, chat_id)
         await msg.edit_text(text, reply_markup=keyboard)
     except Exception as e:
         await msg.edit_text(ui.error(f"Settings failed: {e}"))
@@ -479,11 +480,12 @@ async def on_threex_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not query.data.startswith("p1_3cx:"):
         return
     profile_id = query.data.split(":", 1)[1]
+    chat_id = query.message.chat.id if query.message else 0
     await query.answer("Updating transfer target…")
     try:
-        p = await asyncio.to_thread(vd.apply_threex_target, profile_id)
-        text, keyboard = await asyncio.to_thread(_settings_message)
-        note = f"\n\n✅ Press-1 calls now transfer to {ui.b(p['label'])}."
+        p = await asyncio.to_thread(vd.apply_threex_target, profile_id, chat_id)
+        text, keyboard = await asyncio.to_thread(_settings_message, chat_id)
+        note = f"\n\n✅ This chat now transfers to {ui.b(p['label'])}."
         await query.edit_message_text(text + note, reply_markup=keyboard)
     except Exception as e:
         await query.edit_message_text(ui.error(f"Transfer update failed: {e}"))
@@ -587,7 +589,7 @@ async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     msg = await update.message.reply_text("📞 Placing test calls…")
     try:
-        placed = await asyncio.to_thread(vd.test_calls)
+        placed = await asyncio.to_thread(vd.test_calls, None, update.effective_chat.id)
         card = ui.card(
             "📞  TEST CALLS PLACED",
             [ui.bullet(n, "", icon="☎️") for n in placed] or [ui.note("⚪", "none")],
@@ -711,7 +713,7 @@ async def _dashboard_updater(
             total = int(st.get("list_size", 0) or 0) or int(progress.get("total", 0) or 0)
             store: dict = app.bot_data.get("press1_session", {})
             loaded = len(store.get(f"chat:{chat_id}", Session()).numbers)
-            pacing = _pacing()
+            pacing = _pacing(chat_id)
             if frame == 1 or frame % 10 == 0:
                 scheduled = await asyncio.to_thread(schedule.list_schedules, user_id)
                 app.bot_data["_dash_sched"] = scheduled
@@ -1046,20 +1048,22 @@ async def _download_audio_message(msg: Message, dest: Path) -> None:
 
 
 async def _save_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, dest: Path) -> None:
+    chat_id = update.effective_chat.id
     msg = await update.message.reply_text("🔊 Converting and uploading audio…")
     try:
         with tempfile.TemporaryDirectory() as tmp:
+            sound_name = vd.chat_sound_name(chat_id)
             files = await asyncio.to_thread(
                 convert_audio_for_asterisk,
                 dest,
                 Path(tmp),
-                vd.SOUND_NAME,
+                sound_name,
             )
-            await asyncio.to_thread(vd.deploy_audio, files)
+            sound_name = await asyncio.to_thread(vd.deploy_chat_audio, chat_id, files)
         context.user_data.pop("awaiting_ivr_audio", None)
         await msg.edit_text(
-            f"✅ IVR audio updated ({ui.code(vd.SOUND_NAME)}).\n"
-            "<i>New answered calls play this after the 2s pause.</i>"
+            f"✅ IVR audio updated for this chat ({ui.code(sound_name)}).\n"
+            "<i>Only campaigns started in this chat use this message.</i>"
         )
     except Exception as e:
         await msg.edit_text(ui.error(f"Audio upload failed: {e}"))
@@ -1099,6 +1103,7 @@ async def cmd_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             [
                 ui.note("🎧", "Send an MP3, WAV, M4A, OGG, or voice note now,"),
                 ui.note("↩️", "or reply to an audio file with /audio."),
+                ui.note("💬", "Applies to this chat only."),
             ],
         )
         + "\n💡 <i>Mono voice prompts sound best on phone lines.</i>"

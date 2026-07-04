@@ -63,6 +63,7 @@ DIAL_STATS_DIR = "/var/lib/asterisk/stats"
 DTMF_EVENTS_FILE = "/var/lib/asterisk/press1_dtmf_events.jsonl"
 DIAL_LOCK = "/tmp/press1_dial.lock"
 SETTINGS_PATH = "/var/lib/asterisk/press1_bot_settings.json"
+CHAT_SETTINGS_PATH = "/var/lib/asterisk/press1_chat_settings.json"
 ACCESS_PATH = "/var/lib/asterisk/press1_access.json"
 SCHEDULES_PATH = "/var/lib/asterisk/press1_schedules.json"
 DASHBOARDS_PATH = "/var/lib/asterisk/press1_dashboards.json"
@@ -126,80 +127,219 @@ def _stats_press1_path(run_id: str) -> str:
     return f"{DIAL_STATS_DIR}/{run_id}/press1"
 
 
-def _default_settings() -> dict[str, str]:
-    return {"threex_target": DEFAULT_THREECX}
+def _default_chat_settings() -> dict[str, str]:
+    return {"threex_target": DEFAULT_THREECX, "sound_name": SOUND_NAME}
 
 
-def load_bot_settings() -> dict[str, str]:
-    """Read persisted bot settings from the dial server."""
+def chat_sound_name(chat_id: int) -> str:
+    """Unique Asterisk sound stem per Telegram chat."""
+    return f"p1c{abs(int(chat_id))}"
+
+
+def _chat_key(chat_id: int) -> str:
+    return str(int(chat_id))
+
+
+def _load_chat_settings_store() -> dict:
     try:
-        raw = run_remote(f"cat {SETTINGS_PATH} 2>/dev/null", timeout=15).strip()
+        raw = run_remote(f"cat {CHAT_SETTINGS_PATH} 2>/dev/null", timeout=15).strip()
         if not raw:
-            return _default_settings()
+            legacy = _default_chat_settings()
+            try:
+                old = run_remote(f"cat {SETTINGS_PATH} 2>/dev/null", timeout=15).strip()
+                if old:
+                    data = json.loads(old)
+                    if data.get("threex_target"):
+                        legacy["threex_target"] = str(data["threex_target"]).strip().lower()
+            except Exception:
+                pass
+            return {"chats": {}, "default": legacy}
         data = json.loads(raw)
-        target = str(data.get("threex_target", DEFAULT_THREECX)).strip().lower()
-        if target not in THREECX_PROFILES:
-            target = DEFAULT_THREECX
-        return {"threex_target": target}
+        data.setdefault("chats", {})
+        data.setdefault("default", _default_chat_settings())
+        return data
     except Exception:
-        return _default_settings()
+        return {"chats": {}, "default": _default_chat_settings()}
 
 
-def save_bot_settings(data: dict[str, str]) -> None:
-    target = str(data.get("threex_target", DEFAULT_THREECX)).strip().lower()
-    profile(target)  # validate
-    payload = json.dumps({"threex_target": target})
+def _save_chat_settings_store(data: dict) -> None:
+    payload = json.dumps(data, indent=2)
     run_remote(
-        f"mkdir -p $(dirname {SETTINGS_PATH}); "
-        f"cat > {SETTINGS_PATH} <<'EOF'\n{payload}\nEOF\n"
-        f"chmod 644 {SETTINGS_PATH}",
+        f"mkdir -p $(dirname {CHAT_SETTINGS_PATH}); "
+        f"cat > {CHAT_SETTINGS_PATH} <<'EOF'\n{payload}\nEOF\n"
+        f"chmod 644 {CHAT_SETTINGS_PATH}",
         timeout=20,
     )
 
 
-def get_threex_target() -> str:
+def get_chat_settings(chat_id: int) -> dict[str, str]:
+    store = _load_chat_settings_store()
+    key = _chat_key(chat_id)
+    cfg = dict(store.get("default") or _default_chat_settings())
+    cfg.update(store.get("chats", {}).get(key, {}))
+    target = str(cfg.get("threex_target", DEFAULT_THREECX)).strip().lower()
+    if target not in THREECX_PROFILES:
+        target = DEFAULT_THREECX
+    sound = str(cfg.get("sound_name", SOUND_NAME)).strip() or SOUND_NAME
+    return {"threex_target": target, "sound_name": sound}
+
+
+def save_chat_settings(chat_id: int, **fields: str) -> dict[str, str]:
+    store = _load_chat_settings_store()
+    key = _chat_key(chat_id)
+    current = get_chat_settings(chat_id)
+    if "threex_target" in fields:
+        pid = str(fields["threex_target"]).strip().lower()
+        profile(pid)
+        current["threex_target"] = pid
+    if "sound_name" in fields:
+        current["sound_name"] = str(fields["sound_name"]).strip() or SOUND_NAME
+    store.setdefault("chats", {})[key] = current
+    _save_chat_settings_store(store)
+    return current
+
+
+def _default_settings() -> dict[str, str]:
+    return _default_chat_settings()
+
+
+def load_bot_settings() -> dict[str, str]:
+    """Legacy global settings read (defaults only)."""
+    store = _load_chat_settings_store()
+    cfg = dict(store.get("default") or _default_chat_settings())
+    target = str(cfg.get("threex_target", DEFAULT_THREECX)).strip().lower()
+    if target not in THREECX_PROFILES:
+        target = DEFAULT_THREECX
+    return {"threex_target": target}
+
+
+def save_bot_settings(data: dict[str, str]) -> None:
+    store = _load_chat_settings_store()
+    default = dict(store.get("default") or _default_chat_settings())
+    if data.get("threex_target"):
+        default["threex_target"] = str(data["threex_target"]).strip().lower()
+        profile(default["threex_target"])
+    store["default"] = default
+    _save_chat_settings_store(store)
+
+
+def get_threex_target(chat_id: int | None = None) -> str:
+    if chat_id is not None:
+        return get_chat_settings(chat_id)["threex_target"]
     return load_bot_settings().get("threex_target", DEFAULT_THREECX)
 
 
-def apply_threex_target(profile_id: str) -> dict[str, str]:
-    """Apply selected transfer target (3CX trunk or direct number) and persist."""
-    p = profile(profile_id)
-    if p.get("mode") == "number":
-        save_bot_settings({"threex_target": profile_id})
-        ensure_press1_dialplan()
-        return p
-    contact = p["sip_contact"]
-    host = p["host"]
-    ext = p["ext"]
-    run_remote(
-        f"cp -a {PJSIP_CONF} {PJSIP_CONF}.bak.settings-$(date +%s); "
-        f"sed -i '/^\\[3cx-aor\\]/,/^\\[/ s|^contact=.*|contact=sip:{contact}:5060|' {PJSIP_CONF}; "
-        f"sed -i '/^\\[3cx\\]/,/^\\[/ s|^from_domain=.*|from_domain={contact}|' {PJSIP_CONF}; "
-        f"sed -i '/^\\[3cx-identify\\]/,/^\\[/ s|^match=.*|match={host}|' {PJSIP_CONF}; "
-        f"asterisk -rx 'pjsip reload' >/dev/null; "
-        f"mysql asterisk -e \"UPDATE vicidial_campaigns SET survey_xfer_exten='{ext}' WHERE campaign_id='{CAMPAIGN}';\"",
-        timeout=30,
+def _run_cfg_db_commands(run_id: str, sound: str, xfer_dial: str) -> str:
+    rid = _safe_run_token(run_id)
+    sound_q = sound.replace("'", "")
+    xfer_q = xfer_dial.replace("'", "")
+    return (
+        f"asterisk -rx 'database put press1 cfg/{rid}/sound {sound_q}' >/dev/null; "
+        f"asterisk -rx 'database put press1 cfg/{rid}/xfer {xfer_q}' >/dev/null"
     )
-    save_bot_settings({"threex_target": profile_id})
-    ensure_press1_dialplan()
+
+
+def apply_run_config(run_id: str, chat_id: int) -> dict[str, str]:
+    """Bind IVR audio + transfer destination to a campaign run."""
+    cfg = get_chat_settings(chat_id)
+    p = profile(cfg["threex_target"])
+    xfer = transfer_dial_target(p)
+    sound = cfg["sound_name"]
+    run_remote(_run_cfg_db_commands(run_id, sound, xfer), timeout=20)
+    return {"sound_name": sound, "xfer_dial": xfer, "threex_target": cfg["threex_target"], "label": p["label"]}
+
+
+def apply_lead_run_config(lead_digits: str, chat_id: int, *, run_id: str | None = None) -> dict[str, str]:
+    """Apply per-chat IVR/xfer for a single test call."""
+    rid = run_id or f"test_{abs(int(chat_id))}"
+    cfg = apply_run_config(rid, chat_id)
+    digits = re.sub(r"\D", "", lead_digits)
+    run_remote(
+        f"asterisk -rx 'database put press1 runs/{digits} {rid}' >/dev/null; "
+        f"asterisk -rx 'database put press1 lead {digits}' >/dev/null",
+        timeout=20,
+    )
+    return cfg
+
+
+def ensure_all_threex_endpoints() -> str:
+    """Provision one PJSIP endpoint per 3CX profile (parallel group campaigns)."""
+    blocks: list[str] = []
+    for pid, p in THREECX_PROFILES.items():
+        if p.get("mode") == "number":
+            continue
+        ep = f"p1-{pid}"
+        host = p["host"]
+        contact = p["sip_contact"]
+        blocks.append(
+            f"\n[{ep}]\n"
+            f"type=endpoint\n"
+            f"context=from-trunk\n"
+            f"disallow=all\n"
+            f"allow=alaw,ulaw\n"
+            f"direct_media=no\n"
+            f"rtp_symmetric=yes\n"
+            f"force_rport=yes\n"
+            f"rewrite_contact=yes\n"
+            f"aors={ep}-aor\n"
+            f"\n[{ep}-aor]\n"
+            f"type=aor\n"
+            f"contact=sip:{contact}:5060\n"
+            f"\n[{ep}-identify]\n"
+            f"type=identify\n"
+            f"endpoint={ep}\n"
+            f"match={host}\n"
+        )
+    marker = "# P1 per-profile 3CX endpoints"
+    body = marker + "".join(blocks) + f"\n{marker}-end\n"
+    return run_remote(
+        f"python3 <<'PY'\n"
+        f"from pathlib import Path\n"
+        f"import re\n"
+        f"p = Path('{PJSIP_CONF}')\n"
+        f"text = p.read_text()\n"
+        f"block = {body!r}\n"
+        f"text = re.sub(r'\\n# P1 per-profile 3CX endpoints[\\s\\S]*?# P1 per-profile 3CX endpoints-end\\n?', '\\n', text)\n"
+        f"if '{marker}' not in text:\n"
+        f"    text = text.rstrip() + block\n"
+        f"else:\n"
+        f"    text = re.sub(r'# P1 per-profile 3CX endpoints[\\s\\S]*?# P1 per-profile 3CX endpoints-end', block.strip(), text)\n"
+        f"p.write_text(text)\n"
+        f"print('OK: p1 3cx endpoints')\n"
+        f"PY\n"
+        f"asterisk -rx 'module reload res_pjsip.so' >/dev/null 2>&1",
+        timeout=60,
+    ).strip()
+
+
+def apply_threex_target(profile_id: str, chat_id: int | None = None) -> dict[str, str]:
+    """Save transfer target for a chat (does not disturb other chats)."""
+    p = profile(profile_id)
+    if chat_id is None:
+        save_bot_settings({"threex_target": profile_id})
+    else:
+        save_chat_settings(chat_id, threex_target=profile_id)
+    ensure_all_threex_endpoints()
     return p
 
 
-def ensure_threex_target() -> dict[str, str]:
-    """Apply saved 3CX target on startup (idempotent)."""
-    target = get_threex_target()
-    return apply_threex_target(target)
+def ensure_threex_target(chat_id: int | None = None) -> dict[str, str]:
+    target = get_threex_target(chat_id)
+    return profile(target)
 
 
-def ensure_press1_stack() -> dict[str, str]:
-    """Refresh transfer target, IVR dialplan, and AMI DTMF listener before dialing."""
-    profile_info = ensure_threex_target()
+def ensure_press1_stack(chat_id: int | None = None) -> dict[str, str]:
+    """Refresh dialplan, 3CX endpoints, and AMI DTMF listener."""
+    ensure_all_threex_endpoints()
+    ensure_press1_dialplan()
     ensure_dtmf_listener()
-    return profile_info
+    if chat_id is not None:
+        return profile(get_threex_target(chat_id))
+    return profile(get_threex_target())
 
 
-def _press1_ivr_dialplan(*, server_ip: str, xfer_dial: str, sound: str) -> str:
-    """Canonical press1-ivr: Read+press1, per-run stats, transfer on 1."""
+def _press1_ivr_dialplan(*, server_ip: str, default_sound: str, default_xfer: str) -> str:
+    """Canonical press1-ivr: per-run sound/xfer from Asterisk DB."""
     return f"""[press1-ivr]
 exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
  same => n,Goto(ivr,1)
@@ -217,17 +357,26 @@ exten => ivr,1,Answer()
  same => n,NoOp(IVR lead=${{LEADNUM}})
  same => n,Set(P1RUN=${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}})
  same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
+ same => n,Set(P1SOUND=${{DB(press1/cfg/${{P1RUN}}/sound)}})
+ same => n,Set(P1XFER=${{DB(press1/cfg/${{P1RUN}}/xfer)}})
+ same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND={default_sound}))
+ same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER={default_xfer}))
  same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
- same => n,Read(P1DIG,{sound},1,,1,25)
- same => n,NoOp(Press1 digit=${{P1DIG}} lead=${{LEADNUM}})
+ same => n,Read(P1DIG,${{P1SOUND}},1,,1,25)
+ same => n,NoOp(Press1 digit=${{P1DIG}} lead=${{LEADNUM}} sound=${{P1SOUND}} xfer=${{P1XFER}})
  same => n,GotoIf($["${{P1DIG}}" = "1"]?xfer,1)
  same => n,Hangup()
 
 exten => 1,1,StopPlaytones()
+ same => n,Set(P1RUN=${{IF($[${{LEN(${{P1RUN}})}}>0]?${{P1RUN}}:${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}})}})
+ same => n,Set(P1SOUND=${{DB(press1/cfg/${{P1RUN}}/sound)}})
+ same => n,Set(P1XFER=${{DB(press1/cfg/${{P1RUN}}/xfer)}})
+ same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND={default_sound}))
+ same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER={default_xfer}))
  same => n,Goto(xfer,1)
 
-exten => xfer,1,NoOp(Press1 xfer lead ${{LEADNUM}} to {xfer_dial})
+exten => xfer,1,NoOp(Press1 xfer lead ${{LEADNUM}} to ${{P1XFER}})
  same => n,StopPlaytones()
  same => n,GotoIf($[${{LEN(${{LEADNUM}})}}<10]?xferdial,1)
  same => n,Set(CIDNUM=+${{LEADNUM}})
@@ -246,8 +395,12 @@ exten => xferdial,1,StopPlaytones()
  same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(PJSIP_HEADER(add,P-Asserted-Identity)=<sip:+${{LEADNUM}}@{server_ip}>))
  same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}}))
  same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
+ same => n,Set(P1SOUND=${{DB(press1/cfg/${{P1RUN}}/sound)}})
+ same => n,Set(P1XFER=${{DB(press1/cfg/${{P1RUN}}/xfer)}})
+ same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND={default_sound}))
+ same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER={default_xfer}))
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/press1 &' )
- same => n,Dial({xfer_dial},120,tTr)
+ same => n,Dial(${{P1XFER}},120,tTr)
  same => n,Hangup()
 
 exten => t,1,Hangup()
@@ -255,13 +408,16 @@ exten => i,1,Hangup()
 """
 
 
-def ensure_press1_dialplan(xfer_dial: str | None = None) -> str:
+def ensure_press1_dialplan() -> str:
     """Idempotently apply press-1 IVR dialplan + BitCall DTMF on the dial server."""
     import base64
 
-    if xfer_dial is None:
-        xfer_dial = transfer_dial_target(profile(get_threex_target()))
-    block = _press1_ivr_dialplan(server_ip=SERVER_IP, xfer_dial=xfer_dial, sound=SOUND_NAME)
+    default_p = profile(DEFAULT_THREECX)
+    block = _press1_ivr_dialplan(
+        server_ip=SERVER_IP,
+        default_sound=SOUND_NAME,
+        default_xfer=transfer_dial_target(default_p),
+    )
     b64 = base64.b64encode(block.encode()).decode()
     ext_conf = "/etc/asterisk/extensions.conf"
     ast_conf = "/etc/asterisk/asterisk.conf"
@@ -304,8 +460,14 @@ def ensure_press1_dialplan(xfer_dial: str | None = None) -> str:
     return out.strip()
 
 
-def settings_summary() -> dict[str, str]:
-    target = get_threex_target()
+def settings_summary(chat_id: int | None = None) -> dict[str, str]:
+    if chat_id is not None:
+        cfg = get_chat_settings(chat_id)
+        target = cfg["threex_target"]
+        sound = cfg["sound_name"]
+    else:
+        target = get_threex_target()
+        sound = SOUND_NAME
     p = profile(target)
     return {
         "threex_target": target,
@@ -313,7 +475,7 @@ def settings_summary() -> dict[str, str]:
         "threex_fqdn": p.get("fqdn", p.get("display", "")),
         "threex_host": p.get("host", ""),
         "threex_ext": p.get("ext", p.get("display", p.get("number", ""))),
-        "sound_name": SOUND_NAME,
+        "sound_name": sound,
         "call_gap": str(CALL_GAP_SEC),
         "batch_size": str(BATCH_SIZE),
         "batch_pause": str(BATCH_PAUSE_SEC),
@@ -830,32 +992,40 @@ UNION ALL SELECT 'answered', COUNT(*) FROM vicidial_log WHERE campaign_id='{CAMP
     return out
 
 
-def deploy_audio(files: dict[str, Path]) -> None:
+def deploy_audio(files: dict[str, Path], sound_name: str) -> None:
+    stem = sound_name.strip() or SOUND_NAME
     with ssh_connect() as client:
         sftp = client.open_sftp()
         for directory in SOUND_DIRS:
             for ext, local in files.items():
-                remote = f"{directory}/{SOUND_NAME}.{ext}"
+                remote = f"{directory}/{stem}.{ext}"
                 sftp.put(str(local), remote)
         sftp.close()
-    globs = " ".join(f"{d}/{SOUND_NAME}.*" for d in SOUND_DIRS)
+    globs = " ".join(f"{d}/{stem}.*" for d in SOUND_DIRS)
     run_remote(
         f"chown asterisk:asterisk {globs} 2>/dev/null; chmod 644 {globs}; "
         f"for d in {' '.join(SOUND_DIRS)}; do "
-        f"rm -f $d/{SOUND_NAME}.gsm $d/{SOUND_NAME}.g722 2>/dev/null; done; "
+        f"rm -f $d/{stem}.gsm $d/{stem}.g722 2>/dev/null; done; "
         f"asterisk -rx 'core reload' >/dev/null 2>&1 || asterisk -rx 'dialplan reload' >/dev/null"
     )
-    mysql(
-        f"UPDATE vicidial_campaigns SET survey_first_audio_file='{SOUND_NAME}' WHERE campaign_id='{CAMPAIGN}';"
-    )
 
 
-def originate_press1(phone: str) -> str:
+def deploy_chat_audio(chat_id: int, files: dict[str, Path]) -> str:
+    """Upload IVR audio for one chat and persist its sound name."""
+    sound_name = chat_sound_name(chat_id)
+    deploy_audio(files, sound_name)
+    save_chat_settings(chat_id, sound_name=sound_name)
+    return sound_name
+
+
+def originate_press1(phone: str, chat_id: int | None = None) -> str:
     """Place one outbound call — identical path to /testcall."""
-    ensure_press1_stack()
+    ensure_press1_stack(chat_id)
     digits = to_e164(phone)
     if len(digits) < MIN_PHONE_DIGITS + 2:
         raise ValueError(f"invalid number: {phone!r}")
+    if chat_id is not None:
+        apply_lead_run_config(digits, chat_id)
     run_remote(
         f"asterisk -rx 'database put press1 lead {digits}'; "
         f"asterisk -rx 'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr'"
@@ -1143,7 +1313,8 @@ def _start_dial_script(run_id: str) -> None:
 
 def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     """Upload list + start server-side dialer (handles 1k+ leads; bot only monitors)."""
-    ensure_press1_stack()
+    chat_id = int(progress.get("chat_id", 0) or 0)
+    ensure_press1_stack(chat_id or None)
     seen: set[str] = set()
     numbers: list[str] = []
     for phone in phones:
@@ -1171,6 +1342,7 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     chat_id = int(progress.get("chat_id", 0) or 0)
     run_id = f"{int(time.time())}_{abs(chat_id)}"
     progress["run_id"] = run_id
+    apply_run_config(run_id, chat_id)
     paths = _run_paths(run_id)
 
     run_remote(
@@ -1221,12 +1393,12 @@ def dial_leads(phones: list[str], progress: dict) -> None:
     """Alias: upload + start on server (monitoring is via get_dial_stats)."""
     launch_dial_campaign(phones, progress)
 
-def test_calls(numbers: list[str] | None = None) -> list[str]:
+def test_calls(numbers: list[str] | None = None, chat_id: int | None = None) -> list[str]:
     nums = numbers or test_numbers()
     placed: list[str] = []
     for num in nums:
         try:
-            placed.append(originate_press1(num))
+            placed.append(originate_press1(num, chat_id))
         except Exception:
             continue
     return placed
