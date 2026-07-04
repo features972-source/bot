@@ -1239,6 +1239,14 @@ async def _dedup_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     seen[uid] = now
 
 
+async def _bootstrap_press1_stack() -> None:
+    try:
+        stack = await asyncio.to_thread(vd.bootstrap_press1_stack)
+        print(f"[press1] stack ready: {stack['label']} (dialplan + dtmf + xfer sync)")
+    except Exception as e:
+        print(f"[press1] press1 stack warning: {e}")
+
+
 async def post_init(app: Application) -> None:
     webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
     if webhook_url:
@@ -1279,11 +1287,7 @@ async def post_init(app: Application) -> None:
         print(f"[press1] dial server SSH OK: {ping.strip()[:80]}")
     except Exception as e:
         print(f"[press1] dial server SSH warning: {e}")
-    try:
-        stack = await asyncio.to_thread(vd.ensure_press1_stack)
-        print(f"[press1] transfer target: {stack['label']} (dialplan + dtmf listener applied)")
-    except Exception as e:
-        print(f"[press1] press1 stack warning: {e}")
+    asyncio.create_task(_bootstrap_press1_stack())
     app.bot_data["dtmf_offset"] = 0
     asyncio.create_task(_dtmf_notify_loop(app))
     asyncio.create_task(_schedule_loop(app))

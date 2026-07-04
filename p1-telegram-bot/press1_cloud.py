@@ -23,7 +23,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-BUILD = "xfer-fix-v2"
+BUILD = "xfer-fix-v3"
 WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "telegram/webhook").lstrip("/")
 PUBLIC_URL = (
     os.getenv("TELEGRAM_WEBHOOK_URL_BASE")
@@ -90,7 +90,7 @@ def _run_webhook() -> None:
             return "", 400
         future = asyncio.run_coroutine_threadsafe(tg_app.process_update(update), loop)
         try:
-            future.result(timeout=30)
+            future.result(timeout=120)
         except Exception:
             logger.exception("process_update failed")
             return "", 500

@@ -401,18 +401,24 @@ def sync_all_chat_xfer_configs() -> int:
     return synced
 
 
-def ensure_press1_stack(chat_id: int | None = None) -> dict[str, str]:
-    """Refresh dialplan, 3CX endpoints, and AMI DTMF listener."""
-    ensure_all_threex_endpoints()
-    ensure_press1_dialplan()
-    ensure_dtmf_listener()
-    try:
-        sync_all_chat_xfer_configs()
-    except Exception:
-        pass
+def ensure_press1_stack(chat_id: int | None = None, *, full: bool = False) -> dict[str, str]:
+    """Refresh dial server stack. Use full=True only on boot (slow)."""
+    if full:
+        ensure_all_threex_endpoints()
+        ensure_press1_dialplan()
+        ensure_dtmf_listener()
+        try:
+            sync_all_chat_xfer_configs()
+        except Exception:
+            pass
     if chat_id is not None:
         return profile(get_threex_target(chat_id))
     return profile(get_threex_target())
+
+
+def bootstrap_press1_stack() -> dict[str, str]:
+    """Full dialplan + endpoint + xfer sync (run in background on boot)."""
+    return ensure_press1_stack(full=True)
 
 
 def _dialplan_resolve_leadnum() -> str:
@@ -1119,7 +1125,6 @@ def originate_press1(phone: str, chat_id: int | None = None) -> str:
         raise ValueError(f"invalid number: {phone!r}")
     if chat_id is not None:
         apply_lead_run_config(digits, chat_id)
-    ensure_press1_stack(chat_id)
     run_remote(
         f"asterisk -rx {shlex.quote(f'database put press1 lead {digits}')}; "
         f"asterisk -rx {shlex.quote(f'database put press1 lead/{digits} {digits}')}; "
@@ -1410,7 +1415,7 @@ def _start_dial_script(run_id: str) -> None:
 def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     """Upload list + start server-side dialer (handles 1k+ leads; bot only monitors)."""
     chat_id = int(progress.get("chat_id", 0) or 0)
-    ensure_press1_stack(chat_id or None)
+    ensure_all_threex_endpoints()
     seen: set[str] = set()
     numbers: list[str] = []
     for phone in phones:

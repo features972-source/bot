@@ -121,7 +121,14 @@ def is_owner(user_id: int) -> bool:
 def is_allowed(user_id: int) -> bool:
     if not OWNERS:
         return True
-    return user_id in allowed_user_ids()
+    if user_id in OWNERS:
+        return True
+    if _now() - float(_cache.get("at", 0)) > _CACHE_TTL_SEC:
+        try:
+            _refresh_cache()
+        except Exception:
+            pass
+    return user_id in set(_cache.get("grant_ids", set()))
 
 
 def parse_duration(text: str) -> int:
