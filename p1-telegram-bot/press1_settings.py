@@ -55,6 +55,14 @@ THREECX_PROFILES: dict[str, dict[str, str]] = {
         "sip_contact": "46.101.24.34",
         "ext": "8000",
     },
+    "marty3cx": {
+        "id": "marty3cx",
+        "label": "Marty 3CX",
+        "fqdn": "188.166.173.188",
+        "host": "188.166.173.188",
+        "sip_contact": "188.166.173.188",
+        "ext": "8000",
+    },
     "forward020": {
         "id": "forward020",
         "label": "020 3488 3405",
