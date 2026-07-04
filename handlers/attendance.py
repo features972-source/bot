@@ -75,17 +75,24 @@ async def attendance_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         _set_bot_setting(settings.database_path, ATTENDANCE_RESET_KEY, since.isoformat())
 
     since_label = since.strftime("%d %b %Y %H:%M")
-    lines = [f"👥 <b>Attendance (since {since_label} UTC)</b>\n──────────────"]
+    lines = [
+        f"👥 <b>ATTENDANCE</b>",
+        f"🕒 since {since_label} UTC",
+        "",
+    ]
 
     for link in links:
         name = link.display_name or link.telegram_username or str(link.telegram_user_id)
         calls = _count_calls_for_user(settings.database_path, link.telegram_user_id, since)
         lines.append(
-            f"🟢 <b>{html.escape(name)}</b> — ext {html.escape(link.extension)} · {calls} call(s)"
+            f"🟢 <b>{html.escape(name)}</b> · ext {html.escape(link.extension)} · {calls} call(s)"
         )
 
-    lines.append("──────────────")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    body = "\n".join(lines)
+    await update.message.reply_text(
+        f"<blockquote expandable>{body}</blockquote>",
+        parse_mode="HTML",
+    )
 
 
 async def resetattendance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

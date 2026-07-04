@@ -281,7 +281,7 @@ def format_on_phone_message(
         agent = link.display_name
     else:
         agent = f"ext {link.extension}"
-    return f"📞🟢 {agent} is on a call"
+    return f"<blockquote>📞🟢 {agent} is on a call</blockquote>"
 
 
 
@@ -299,7 +299,7 @@ def format_off_phone_message(
     else:
         agent = f"ext {link.extension}"
     dur = f" · {format_duration(duration_seconds)}" if duration_seconds is not None else ""
-    return f"📞❌ {agent} call ended{dur}"
+    return f"<blockquote>📞❌ {agent} call ended{dur}</blockquote>"
 
 
 
@@ -314,7 +314,7 @@ def format_transfer_live_message(
 ) -> str:
     to_label = f"@{to_link.telegram_username}" if to_link.telegram_username else (to_link.display_name or f"ext {to_link.extension}")
     from_label = f"@{from_link.telegram_username}" if from_link and from_link.telegram_username else (getattr(from_link, 'display_name', None) or f"ext {from_extension}")
-    return f"🔀 {from_label} → {to_label} is on a call"
+    return f"<blockquote>🔀 {from_label} → {to_label} is on a call</blockquote>"
 
 
 
@@ -330,7 +330,7 @@ def format_transfer_final_message(
     to_label = f"@{to_link.telegram_username}" if to_link.telegram_username else (to_link.display_name or f"ext {to_link.extension}")
     from_label = f"@{from_link.telegram_username}" if from_link and from_link.telegram_username else (getattr(from_link, 'display_name', None) or f"ext {from_extension}")
     dur = format_duration(duration_seconds)
-    return f"📞❌ {from_label} → {to_label} call ended · {dur}"
+    return f"<blockquote>📞❌ {from_label} → {to_label} call ended · {dur}</blockquote>"
 
 
 
@@ -339,7 +339,7 @@ def format_transfer_final_message(
 def format_transfer_sent_message(*, from_link: ExtensionLink, to_link: ExtensionLink) -> str:
     from_label = f"@{from_link.telegram_username}" if from_link.telegram_username else (from_link.display_name or f"ext {from_link.extension}")
     to_label = f"@{to_link.telegram_username}" if to_link.telegram_username else (to_link.display_name or f"ext {to_link.extension}")
-    return f"🔀 {from_label} transferred to {to_label}"
+    return f"<blockquote>🔀 {from_label} transferred to {to_label}</blockquote>"
 
 
 
@@ -354,7 +354,7 @@ def format_transfer_sender_ended_message(
     from_label = f"@{from_link.telegram_username}" if from_link.telegram_username else (from_link.display_name or f"ext {from_link.extension}")
     to_label = f"@{to_link.telegram_username}" if to_link.telegram_username else (to_link.display_name or f"ext {to_link.extension}")
     dur = format_duration(duration_seconds)
-    return f"📞❌ {from_label} → {to_label} call ended · {dur}"
+    return f"<blockquote>📞❌ {from_label} → {to_label} call ended · {dur}</blockquote>"
 
 
 

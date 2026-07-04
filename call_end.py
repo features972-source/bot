@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -241,6 +242,20 @@ def consume_ws_end_reason(bot_data: dict, extension: str) -> str | None:
     return None
 
 
+_BLOCKQUOTE_RE = re.compile(
+    r"^(?P<open><blockquote[^>]*>)(?P<inner>.*)(?P<close></blockquote>)\s*$",
+    re.DOTALL,
+)
+
+
+def _split_blockquote(text: str) -> tuple[str, str, str]:
+    """Split into (open_tag, inner, close_tag); empty tags if not wrapped."""
+    match = _BLOCKQUOTE_RE.match(text)
+    if match:
+        return match.group("open"), match.group("inner"), match.group("close")
+    return "", text, ""
+
+
 def append_ended_by(text: str, ended_by: str | None) -> str:
     from call_display import format_ended_by_line
 
@@ -249,17 +264,20 @@ def append_ended_by(text: str, ended_by: str | None) -> str:
     line = format_ended_by_line(ended_by)
     if not line:
         return text
-    return f"{text}\n{line}"
+    open_tag, inner, close_tag = _split_blockquote(text)
+    return f"{open_tag}{inner}\n{line}{close_tag}"
 
 
 def set_ended_by(text: str, ended_by: str | None) -> str:
     """Replace or add the ended-by line (used when enriching from call history)."""
     if not ended_by:
         return text
-    stripped = "\n".join(
-        line for line in text.splitlines() if "Ended by" not in line
+    open_tag, inner, close_tag = _split_blockquote(text)
+    inner = "\n".join(
+        line for line in inner.splitlines() if "Ended by" not in line
     ).strip()
-    return append_ended_by(stripped, ended_by)
+    rebuilt = f"{open_tag}{inner}{close_tag}" if open_tag else inner
+    return append_ended_by(rebuilt, ended_by)
 
 
 def _field(record: dict[str, Any], *names: str) -> str:
