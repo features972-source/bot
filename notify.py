@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import html
+
 import logging
 
 import time
@@ -270,18 +272,29 @@ def _call_message_lines(
     return lines
 
 
+def _agent_name_only(link: ExtensionLink) -> str:
+    display = (link.display_name or "").strip()
+    if display:
+        return html.escape(display)
+    return f"ext {html.escape(link.extension)}"
+
+
+def _live_calls_footer(count: int) -> str:
+    if count <= 0:
+        return ""
+    word = "call" if count == 1 else "calls"
+    return f"\n▪️ {count} live {word}"
+
+
 def format_on_phone_message(
     link: ExtensionLink,
     *,
     elapsed_seconds: int | None = None,
+    live_count: int | None = None,
 ) -> str:
-    if link.telegram_username:
-        agent = f"@{link.telegram_username}"
-    elif link.display_name:
-        agent = link.display_name
-    else:
-        agent = f"ext {link.extension}"
-    return f"<blockquote>📞🟢 {agent} is on a call</blockquote>"
+    agent = _agent_name_only(link)
+    footer = _live_calls_footer(live_count) if live_count is not None else ""
+    return f"<blockquote>📞🟢 <b>{agent}</b> is on a call{footer}</blockquote>"
 
 
 
@@ -311,10 +324,18 @@ def format_transfer_live_message(
     from_extension: str,
     to_link: ExtensionLink,
     elapsed_seconds: int | None = None,
+    live_count: int | None = None,
 ) -> str:
-    to_label = f"@{to_link.telegram_username}" if to_link.telegram_username else (to_link.display_name or f"ext {to_link.extension}")
-    from_label = f"@{from_link.telegram_username}" if from_link and from_link.telegram_username else (getattr(from_link, 'display_name', None) or f"ext {from_extension}")
-    return f"<blockquote>🔀 {from_label} → {to_label} is on a call</blockquote>"
+    to_label = _agent_name_only(to_link)
+    from_label = (
+        _agent_name_only(from_link)
+        if from_link is not None
+        else f"ext {html.escape(from_extension)}"
+    )
+    footer = _live_calls_footer(live_count) if live_count is not None else ""
+    return (
+        f"<blockquote>🔀 <b>{from_label}</b> → <b>{to_label}</b> is on a call{footer}</blockquote>"
+    )
 
 
 
@@ -1170,7 +1191,10 @@ async def announce_call_started(
 
             link=link,
 
-            initial_text=format_on_phone_message(link),
+            initial_text=format_on_phone_message(
+                link,
+                live_count=len(_live_calls(bot_data)) + 1,
+            ),
 
             caller_name=caller_name,
 
@@ -1395,6 +1419,9 @@ async def announce_transfer_received(
             from_extension=from_extension,
 
             to_link=to_link,
+
+            live_count=len(_live_calls(bot_data)) + 1,
+
         ),
 
         call_kind="transfer",

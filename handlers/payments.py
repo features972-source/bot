@@ -99,7 +99,7 @@ ON_PHONE_STARTER_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        r"📞🟢\s+(.+?)\s+is on the phone",
+        r"📞🟢\s+(.+?)\s+is on (?:the phone|a call)",
         re.IGNORECASE | re.DOTALL,
     ),
 )
