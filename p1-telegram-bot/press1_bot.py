@@ -199,12 +199,12 @@ async def guard(update: Update, context: ContextTypes.DEFAULT_TYPE | None = None
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
+    await update.message.reply_text(HELP)
     user = update.effective_user
     if user:
-        await asyncio.to_thread(
-            access.remember_user, user.id, user.username, user.full_name
+        asyncio.create_task(
+            asyncio.to_thread(access.remember_user, user.id, user.username, user.full_name)
         )
-    await update.message.reply_text(HELP)
 
 
 async def _safe_edit(msg: Message, text: str) -> None:

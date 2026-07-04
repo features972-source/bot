@@ -23,7 +23,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-BUILD = "xfer-fix-v5"
+BUILD = "xfer-fix-v6"
 WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "telegram/webhook").lstrip("/")
 PUBLIC_URL = (
     os.getenv("TELEGRAM_WEBHOOK_URL_BASE")
@@ -72,8 +72,16 @@ def _run_webhook() -> None:
     if secret:
         os.environ["TELEGRAM_WEBHOOK_SECRET"] = secret
 
+    import threading
+
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+
+    def _loop_runner() -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
+
+    threading.Thread(target=_loop_runner, daemon=True, name="tg-event-loop").start()
+
     tg_app = build_application()
 
     async def boot() -> None:
@@ -81,7 +89,7 @@ def _run_webhook() -> None:
         await tg_app.start()
         logger.info("Press-1 bot ready via webhook %s/%s", PUBLIC_URL, WEBHOOK_PATH)
 
-    loop.run_until_complete(boot())
+    asyncio.run_coroutine_threadsafe(boot(), loop).result()
 
     flask_app = Flask(__name__)
 
@@ -126,9 +134,10 @@ def _run_webhook() -> None:
     try:
         httpd.serve_forever()
     finally:
-        loop.run_until_complete(tg_app.stop())
-        loop.run_until_complete(tg_app.shutdown())
-        loop.close()
+        loop.call_soon_threadsafe(loop.stop)
+        asyncio.run_coroutine_threadsafe(tg_app.stop(), loop).result(timeout=30)
+        asyncio.run_coroutine_threadsafe(tg_app.shutdown(), loop).result(timeout=30)
+        loop.call_soon_threadsafe(loop.stop)
 
 
 def main() -> None:
