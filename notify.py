@@ -305,14 +305,9 @@ def format_off_phone_message(
     *,
     duration_seconds: int | None = None,
 ) -> str:
-    if link.telegram_username:
-        agent = f"@{link.telegram_username}"
-    elif link.display_name:
-        agent = link.display_name
-    else:
-        agent = f"ext {link.extension}"
+    agent = _agent_name_only(link)
     dur = f" · {format_duration(duration_seconds)}" if duration_seconds is not None else ""
-    return f"<blockquote>📞❌ {agent} call ended{dur}</blockquote>"
+    return f"<blockquote>📞❌ <b>{agent}</b> call ended{dur}</blockquote>"
 
 
 
@@ -727,7 +722,7 @@ def was_recent_transfer_out(bot_data: dict, extension: str) -> bool:
 
 
 
-def _live_call_text(live_call: LiveCall, elapsed: int) -> str:
+def _live_call_text(live_call: LiveCall, live_count: int) -> str:
 
     if live_call.call_kind == "transfer":
 
@@ -739,14 +734,31 @@ def _live_call_text(live_call: LiveCall, elapsed: int) -> str:
 
             to_link=live_call.link,
 
-            elapsed_seconds=elapsed,
+            live_count=live_count,
 
         )
 
     return format_on_phone_message(
         live_call.link,
-        elapsed_seconds=elapsed,
+        live_count=live_count,
     )
+
+
+async def _refresh_all_live_call_counts(bot, bot_data: dict) -> None:
+    """Re-edit every active ON CALL message with the current live call total."""
+    live_calls = _live_calls(bot_data)
+    if not live_calls:
+        return
+
+    count = len(live_calls)
+
+    async def _refresh_one(live_call: LiveCall) -> None:
+        if live_call.silent or not live_call.message_ids:
+            return
+        text = _live_call_text(live_call, count)
+        await _edit_live_messages(bot, bot_data, live_call.message_ids, text)
+
+    await asyncio.gather(*(_refresh_one(lc) for lc in live_calls.values()))
 
 
 
@@ -941,6 +953,7 @@ async def _start_live_call(
             await asyncio.gather(*(_send_one(cid) for cid in chat_ids))
 
         await _send_initial()
+        await _refresh_all_live_call_counts(bot, bot_data)
     except Exception:
         live_calls.pop(extension, None)
         raise
@@ -1050,7 +1063,19 @@ async def _stop_live_call(
             )
 
     if live_call.silent:
+        await _refresh_all_live_call_counts(bot, bot_data)
         return live_call
+
+    if live_call.message_ids:
+        if live_call.call_kind == "transfer":
+            ended_on_text = format_transfer_live_message(
+                from_link=live_call.transfer_from_link,
+                from_extension=live_call.transfer_from_extension or "?",
+                to_link=live_call.link,
+            )
+        else:
+            ended_on_text = format_on_phone_message(live_call.link)
+        await _edit_live_messages(bot, bot_data, live_call.message_ids, ended_on_text)
 
     ended_by_html = consume_telegram_hangup_label(bot_data, extension)
     if ended_by_html is None:
@@ -1082,6 +1107,8 @@ async def _stop_live_call(
             bot_data,
             text=final_text,
         )
+
+    await _refresh_all_live_call_counts(bot, bot_data)
 
     return live_call
 
