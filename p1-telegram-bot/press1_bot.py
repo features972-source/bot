@@ -211,27 +211,34 @@ async def _format_status(st: dict[str, str], loaded_in_bot: int) -> str:
     dialed = int(st.get("dialed", 0) or 0)
     answered = int(st.get("answered", 0) or 0)
     press1 = int(st.get("press1", 0) or 0)
-    left = int(st.get("hopper", 0) or 0)
+    waiting = int(st.get("hopper", 0) or 0)
     live = int(st.get("live", 0) or 0)
     failed = int(st.get("failed", 0) or 0)
     pct = (dialed * 100 // total) if total > 0 else 0
     lines = [
-        ui.esc(f"{campaign.gauge(pct)}  {pct}%"),
+        ui.esc(campaign.progress_line(pct, dialed, total)),
         "",
-        ui.bullet("List on server", total, icon="📋"),
-        ui.bullet("Dialed", dialed, icon="📞"),
-        ui.bullet("Live now", live, icon="📡"),
-        ui.bullet("Left", left, icon="⏳"),
-        ui.bullet("Answered", answered, icon="✅"),
-        ui.bullet("Press-1", press1, icon="🔥"),
+        ui.stat("List on server", total, icon="📋"),
+        ui.stat("Dialed", dialed, icon="📞"),
+        ui.stat("Live now", live, icon="📡"),
+        ui.stat("Waiting", waiting, icon="⏳"),
     ]
+    lines.append("")
+    if dialed > 0:
+        ans_pct = answered * 100 / dialed
+        p1_pct = press1 * 100 / dialed
+        lines.append(ui.stat("Answered", answered, icon="✅", suffix=f" ({ans_pct:.0f}%)"))
+        lines.append(ui.stat("Press-1", press1, icon="🔥", suffix=f" ({p1_pct:.1f}%)"))
+    else:
+        lines.append(ui.stat("Answered", answered, icon="✅"))
+        lines.append(ui.stat("Press-1", press1, icon="🔥"))
     if failed > 0:
-        lines.append(ui.bullet("Failed", failed, icon="❌"))
+        lines.append(ui.stat("Failed", failed, icon="❌"))
     if loaded_in_bot != total:
-        lines.append(ui.bullet("In bot session", loaded_in_bot, icon="💾"))
+        lines.append(ui.stat("In bot session", loaded_in_bot, icon="💾"))
     lines.append("")
     lines.append(_state_line(st))
-    return ui.card("📊  STATUS SNAPSHOT", lines)
+    return ui.card("📊 STATUS SNAPSHOT", lines)
 
 
 async def _live_campaign_updater(
@@ -1175,20 +1182,10 @@ async def post_init(app: Application) -> None:
     except Exception as e:
         print(f"[press1] dial server SSH warning: {e}")
     try:
-        p = await asyncio.to_thread(vd.ensure_threex_target)
-        print(f"[press1] transfer target: {p['label']}")
+        stack = await asyncio.to_thread(vd.ensure_press1_stack)
+        print(f"[press1] transfer target: {stack['label']} (dialplan + dtmf listener applied)")
     except Exception as e:
-        print(f"[press1] transfer settings warning: {e}")
-    try:
-        dialplan = await asyncio.to_thread(vd.ensure_press1_dialplan)
-        print(f"[press1] dialplan: {dialplan.strip()[:120]}")
-    except Exception as e:
-        print(f"[press1] press1-ivr dialplan warning: {e}")
-    try:
-        listener = await asyncio.to_thread(vd.ensure_dtmf_listener)
-        print(f"[press1] dtmf listener: {listener.strip()[:120]}")
-    except Exception as e:
-        print(f"[press1] dtmf listener warning: {e}")
+        print(f"[press1] press1 stack warning: {e}")
     app.bot_data["dtmf_offset"] = 0
     asyncio.create_task(_dtmf_notify_loop(app))
     asyncio.create_task(_schedule_loop(app))

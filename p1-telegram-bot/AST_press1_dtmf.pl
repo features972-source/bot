@@ -56,6 +56,16 @@ my %recent_xfer;
 my %digits;
 my %lead_cache;
 
+sub try_xfer_on_one {
+    my ($sock, $chan) = @_;
+    my $now = time();
+    return if $recent_xfer{$chan} && ($now - $recent_xfer{$chan}) < 3;
+    $recent_xfer{$chan} = $now;
+    logmsg("DTMF 1 on $chan -> press1-ivr,1");
+    ami_send($sock, 'Redirect', Channel => $chan, Context => 'press1-ivr', Exten => '1', Priority => '1');
+    logmsg("Redirect sent for $chan");
+}
+
 while (1) {
     my $sock = IO::Socket::INET->new(PeerAddr=>$host, PeerPort=>$port, Proto=>'tcp', Timeout=>10);
     unless ($sock) { logmsg("AMI connect failed: $!"); sleep 5; next; }
@@ -80,17 +90,20 @@ while (1) {
         my $evn = $ev{Event} // '';
         my $chan = $ev{Channel} // '';
 
+        if ($evn eq 'DTMF' && outbound_bitcall($chan)) {
+            my $digit = $ev{Digit} // '';
+            if ($digit eq '1') {
+                try_xfer_on_one($sock, $chan);
+            }
+            next;
+        }
+
         if ($evn =~ /^(DTMFBegin|DTMFEnd)$/ && outbound_bitcall($chan)) {
             my $digit = $ev{Digit} // '';
             next unless length $digit;
 
-            if ($evn eq 'DTMFBegin' && $digit eq '1') {
-                my $now = time();
-                next if $recent_xfer{$chan} && ($now - $recent_xfer{$chan}) < 3;
-                $recent_xfer{$chan} = $now;
-                logmsg("DTMF 1 on $chan -> xferdial");
-                ami_send($sock, 'Redirect', Channel => $chan, Context => 'press1-ivr', Exten => 'xferdial', Priority => '1');
-                logmsg("Redirect sent for $chan");
+            if ($digit eq '1') {
+                try_xfer_on_one($sock, $chan);
             }
 
             next unless $evn eq 'DTMFEnd';

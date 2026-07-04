@@ -165,6 +165,14 @@ def ensure_threex_target() -> dict[str, str]:
     return apply_threex_target(target)
 
 
+def ensure_press1_stack() -> dict[str, str]:
+    """Refresh 3CX target, IVR dialplan, and AMI DTMF listener before dialing."""
+    profile_info = ensure_threex_target()
+    ensure_press1_dialplan(profile_info["ext"])
+    ensure_dtmf_listener()
+    return profile_info
+
+
 def _press1_ivr_dialplan(*, server_ip: str, xfer_ext: str, sound: str) -> str:
     """Canonical press1-ivr: Background+WaitExten, per-run stats, 3CX xfer."""
     return f"""[press1-ivr]
@@ -186,8 +194,9 @@ exten => ivr,1,Answer()
  same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
  same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
- same => n,Background({sound})
- same => n,WaitExten(25)
+ same => n,Read(P1DIG,{sound},1,,1,25)
+ same => n,NoOp(Press1 digit=${{P1DIG}} lead=${{LEADNUM}})
+ same => n,GotoIf($["${{P1DIG}}" = "1"]?xfer,1)
  same => n,Hangup()
 
 exten => 1,1,StopPlaytones()
@@ -264,7 +273,7 @@ def ensure_press1_dialplan(xfer_ext: str | None = None) -> str:
         f"PY\n"
         f"asterisk -rx 'module reload res_pjsip.so' >/dev/null 2>&1; "
         f"asterisk -rx 'dialplan reload' >/dev/null; "
-        f"asterisk -rx 'dialplan show ivr@press1-ivr' | grep -E 'Background|WaitExten' | head -2",
+        f"asterisk -rx 'dialplan show ivr@press1-ivr' | grep -E 'Read|xfer' | head -3",
         timeout=60,
     )
     return out.strip()
@@ -828,7 +837,7 @@ def to_e164(phone: str) -> str:
 
 def originate_press1(phone: str) -> str:
     """Place one outbound call — identical path to /testcall."""
-    ensure_press1_dialplan()
+    ensure_press1_stack()
     digits = to_e164(phone)
     if len(digits) < MIN_PHONE_DIGITS + 2:
         raise ValueError(f"invalid number: {phone!r}")
@@ -1092,7 +1101,7 @@ def _start_dial_script() -> None:
 
 def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     """Upload list + start server-side dialer (handles 1k+ leads; bot only monitors)."""
-    ensure_press1_dialplan()
+    ensure_press1_stack()
     seen: set[str] = set()
     numbers: list[str] = []
     for phone in phones:
