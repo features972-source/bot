@@ -241,7 +241,7 @@ def format_dashboard(
                 *config_lines,
             ],
         )
-        return f"{standby}\n<i>Load leads then /run · refresh 3s</i>"
+        return f"{standby}\n<i>Load leads then /run · refresh 5s</i>"
 
     body = format_campaign_body(
         st,
@@ -254,4 +254,4 @@ def format_dashboard(
         finished=dial_state in ("finished", "stalled", "idle") and dialed == 0,
     )
     config = ui.card("⚙️ CONFIG", config_lines)
-    return f"{body}\n{config}\n<i>refresh 3s · /stop to end</i>"
+    return f"{body}\n{config}\n<i>refresh 5s · /stop to end</i>"

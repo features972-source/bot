@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Conflict
+from telegram.error import BadRequest, Conflict, RetryAfter
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -207,13 +208,53 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
-async def _safe_edit(msg: Message, text: str) -> None:
-    """Edit message; ignore Telegram 'message is not modified' (same text)."""
-    try:
-        await msg.edit_text(text)
-    except BadRequest as e:
-        if "message is not modified" not in str(e).lower():
+_MIN_EDIT_INTERVAL = 4.0
+_last_edit_at: dict[tuple[int, int], float] = {}
+
+
+def _flood_retry_seconds(exc: BaseException) -> float | None:
+    if isinstance(exc, RetryAfter):
+        return float(exc.retry_after) + 0.5
+    msg = str(exc).lower()
+    if "flood control" in msg or "retry after" in msg:
+        match = re.search(r"retry in (\d+)", str(exc), re.I)
+        return (float(match.group(1)) if match else 3.0) + 0.5
+    return None
+
+
+async def _edit_text_resilient(edit_coro, *, chat_id: int, message_id: int) -> None:
+    """Edit with flood-control backoff; ignore unchanged text."""
+    key = (chat_id, message_id)
+    now = time.time()
+    if now - _last_edit_at.get(key, 0.0) < _MIN_EDIT_INTERVAL:
+        return
+    for _ in range(5):
+        try:
+            await edit_coro()
+            _last_edit_at[key] = time.time()
+            return
+        except BadRequest as e:
+            low = str(e).lower()
+            if "message is not modified" in low:
+                _last_edit_at[key] = time.time()
+                return
+            wait = _flood_retry_seconds(e)
+            if wait is not None:
+                await asyncio.sleep(wait)
+                continue
             raise
+        except RetryAfter as e:
+            await asyncio.sleep(float(e.retry_after) + 0.5)
+    return
+
+
+async def _safe_edit(msg: Message, text: str) -> None:
+    """Edit message; throttle and retry on Telegram flood limits."""
+    await _edit_text_resilient(
+        lambda: msg.edit_text(text),
+        chat_id=msg.chat_id,
+        message_id=msg.message_id,
+    )
 
 
 _STATE_LABELS = {
@@ -391,13 +432,17 @@ async def _live_campaign_updater(
             else:
                 idle_rounds = 0 if active or dialed > 0 else idle_rounds + 1
         except Exception as e:
+            wait = _flood_retry_seconds(e)
+            if wait is not None:
+                await asyncio.sleep(wait)
+                continue
             try:
                 await msg.edit_text(ui.error(f"Live update error: {e}"))
             except Exception:
                 pass
             break
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+            await asyncio.wait_for(stop_event.wait(), timeout=6.0)
             break
         except asyncio.TimeoutError:
             pass
@@ -730,18 +775,26 @@ async def cmd_unpause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def _safe_edit_id(app: Application, chat_id: int, message_id: int, text: str) -> bool:
     """Edit a message by id; return False if the message is gone."""
+    gone = False
+
+    async def _do_edit() -> None:
+        nonlocal gone
+        try:
+            await app.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, text=text
+            )
+        except BadRequest as e:
+            low = str(e).lower()
+            if "message to edit not found" in low or "message can't be edited" in low:
+                gone = True
+                return
+            raise
+
     try:
-        await app.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
-        return True
-    except BadRequest as e:
-        msg = str(e).lower()
-        if "message is not modified" in msg:
-            return True
-        if "message to edit not found" in msg or "message can't be edited" in msg:
-            return False
-        return True
+        await _edit_text_resilient(_do_edit, chat_id=chat_id, message_id=message_id)
     except Exception:
-        return True
+        return not gone
+    return not gone
 
 
 async def _persist_dashboards(app: Application) -> None:
@@ -806,7 +859,7 @@ async def _dashboard_updater(
         except Exception as e:
             print(f"[press1] dashboard {chat_id}: {e}")
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=3.0)
+            await asyncio.wait_for(stop_event.wait(), timeout=5.0)
             break
         except asyncio.TimeoutError:
             pass

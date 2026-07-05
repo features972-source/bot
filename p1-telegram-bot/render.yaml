@@ -39,11 +39,11 @@ services:
       - key: VICIDIAL_BATCH_SIZE
         value: "100"
       - key: VICIDIAL_CALL_GAP_SEC
-        value: "0.2"
+        value: "0.08"
       - key: VICIDIAL_BATCH_PAUSE_SEC
         value: "0"
       - key: VICIDIAL_CPS
-        value: "20"
+        value: "30"
       - key: VICIDIAL_TEST_NUMBERS
         value: 447934567847,447300899954,447448336101,447769799593
       - key: BOT_TOKEN
