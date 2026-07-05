@@ -37,7 +37,6 @@ from handlers.blast import blast_content_trigger, blast_domain_trigger
 from handlers.attendance import seed_attendance_reset
 from handlers.pass_queue import (
     build_pass_queue_handlers,
-    build_pass_queue_notes_handler,
     pass_repost_loop,
 )
 from payments_excel_export import schedule_payments_excel_sync
@@ -183,7 +182,6 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
     for handler in build_payment_message_handlers():
         tg_app.add_handler(handler, group=-1)
     if not settings.credo_only_mode:
-        tg_app.add_handler(build_pass_queue_notes_handler(), group=-2)
         for handler in build_pass_queue_handlers():
             tg_app.add_handler(handler)
     for handler in build_mailer_handlers():

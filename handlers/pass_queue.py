@@ -1,4 +1,4 @@
-"""Pass handoff — notes auto-detected, reposted every 2 minutes until taken."""
+"""Pass handoff — /offerpass posts a Take pass button, reposted every 2 minutes until taken."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import re
 from datetime import datetime, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import BadRequest, Forbidden
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.error import BadRequest
+from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 from config import Settings
 from database import (
@@ -20,13 +20,11 @@ from database import (
     get_pass_offer,
     list_pending_pass_offers,
     pass_offer_for_notes,
-    release_pass_claim,
     try_claim_pass_offer,
     try_mark_pass_taken,
     update_pass_offer,
 )
 from handlers.admin_access import require_admin
-from notes_detect import looks_like_notes, notes_balance_only, notes_has_balance
 
 logger = logging.getLogger(__name__)
 
@@ -38,19 +36,14 @@ PASS_REPOST_SECONDS = 120
 PASS_EXPIRE_SECONDS = 3600
 PASS_POLL_SECONDS = 30
 
-PASS_NOTES_FILTER = filters.ChatType.GROUPS & ~filters.COMMAND
-
 
 def build_pass_queue_handlers() -> list:
     return [
-        CommandHandler("clearnotes", clearnotes_command),
+        CommandHandler("offerpass", offerpass_command),
+        CommandHandler("clearpasses", clearpasses_command),
+        CommandHandler("clearnotes", clearpasses_command),
         CallbackQueryHandler(pass_callback, pattern=rf"^{re.escape(CALLBACK_PREFIX)}"),
     ]
-
-
-def build_pass_queue_notes_handler() -> MessageHandler:
-    notes_filter = PASS_NOTES_FILTER | filters.UpdateType.EDITED_MESSAGE
-    return MessageHandler(notes_filter, notes_message_handler, block=False)
 
 
 def _display_name(user) -> str:
@@ -93,13 +86,6 @@ def _pass_keyboard(offer_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def _format_notes_block(notes_text: str) -> str:
-    escaped = html.escape(notes_text.strip())
-    if len(escaped) > 3200:
-        escaped = escaped[:3200] + "..."
-    return escaped
-
-
 def _open_pass_text(offer: PassOffer) -> str:
     starter = _mention_html(
         offer.starter_user_id,
@@ -109,7 +95,6 @@ def _open_pass_text(offer: PassOffer) -> str:
     return (
         "<blockquote>📞 <b>PASS AVAILABLE</b>\n"
         f"▪️ Starter: {starter}\n"
-        "▪️ Full notes are private — sent to whoever takes the pass\n"
         "<i>⚠️ Not a finisher / not ready to finish? Don't press — you'll be booted.</i></blockquote>"
     )
 
@@ -134,17 +119,18 @@ def _taken_pass_announcement(offer: PassOffer, user) -> str:
         offer.starter_username,
         offer.starter_display_name,
     )
-    notes = _format_notes_block(offer.notes_text)
     return (
         f"🚨🚨🚨 <b>{taker} HAS TOOK THE PASS</b> 🚨🚨🚨\n\n"
-        f"{starter} — <b>SEND HIM THE NUMBER IN PMs!</b>\n\n"
-        f"<blockquote>▪️ <b>Full notes</b> (also sent to finisher's DMs):\n"
-        f"{notes}</blockquote>"
+        f"{starter} — <b>SEND HIM THE NUMBER IN PMs!</b>"
     )
 
 
 def _pass_queue_chat_allowed(chat) -> bool:
     return chat is not None and chat.type in ("group", "supergroup")
+
+
+def _anchor_message_id(offer: PassOffer) -> int | None:
+    return offer.offer_message_id or offer.notes_message_id or None
 
 
 def pass_offer_expired(offer: PassOffer, *, now: datetime | None = None) -> bool:
@@ -217,19 +203,6 @@ async def _sync_offer_message(
             text=text,
             reply_markup=reply_markup,
         )
-
-
-async def _release_claim_and_reopen(bot, path: str, offer: PassOffer) -> None:
-    release_pass_claim(path, offer.id)
-    refreshed = get_pass_offer(path, offer.id)
-    if refreshed is None or refreshed.status != PASS_STATUS_PENDING:
-        return
-    await _sync_offer_message(
-        bot,
-        refreshed,
-        text=_open_pass_text(refreshed),
-        reply_markup=_pass_keyboard(refreshed.id),
-    )
 
 
 async def pass_repost_loop(bot, settings: Settings, bot_data: dict) -> None:
@@ -325,11 +298,12 @@ async def _repost_pass_offer(bot, settings: Settings, offer_id: int) -> None:
         logger.info("Reposted pass offer %s in chat %s (edited)", offer_id, offer.chat_id)
         return
 
+    anchor = _anchor_message_id(offer)
     if await _deliver_pass_offer(
         bot,
         path,
         offer,
-        reply_to_message_id=offer.notes_message_id,
+        reply_to_message_id=anchor,
     ):
         logger.info("Reposted pass offer %s in chat %s (new message)", offer_id, offer.chat_id)
     else:
@@ -341,18 +315,19 @@ async def _expire_pass_offer(bot, settings: Settings, offer_id: int) -> None:
     if offer is None or offer.status != PASS_STATUS_PENDING:
         return
     update_pass_offer(settings.database_path, offer.id, status=PASS_STATUS_EXPIRED)
+    anchor = _anchor_message_id(offer)
     try:
         await bot.send_message(
             chat_id=offer.chat_id,
             text="⏱ <b>Pass timed out</b> — no one took it.",
             parse_mode="HTML",
-            reply_to_message_id=offer.notes_message_id,
+            reply_to_message_id=anchor,
         )
     except BadRequest:
         pass
 
 
-async def clearnotes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def clearpasses_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     if not await require_admin(update, settings, deny_message="❌ Admins only."):
         return
@@ -363,118 +338,40 @@ async def clearnotes_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     counts = clear_circulating_pass_notes(settings.database_path)
     offers = counts["pending_offers"]
-    notes = counts["pending_notes"]
-    if offers == 0 and notes == 0:
-        await message.reply_text("No active pass notes to clear.")
+    if offers == 0:
+        await message.reply_text("No active pass offers to clear.")
         return
 
-    parts: list[str] = []
-    if offers:
-        parts.append(f"{offers} active pass offer{'s' if offers != 1 else ''}")
-    if notes:
-        parts.append(f"{notes} waiting note{'s' if notes != 1 else ''}")
     await message.reply_text(
-        f"🧹 Cleared {' and '.join(parts)}.",
+        f"🧹 Cleared {offers} active pass offer{'s' if offers != 1 else ''}.",
         parse_mode="HTML",
     )
 
 
-async def notes_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def offerpass_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     message = update.effective_message
     user = update.effective_user
     chat = update.effective_chat
-    if not message or not user or not chat or user.is_bot:
+    if not message or not user or not chat:
         return
     if not _pass_queue_chat_allowed(chat):
+        await message.reply_text("Use /offerpass in a group chat.")
         return
 
-    text = (message.text or message.caption or "").strip()
-    if not text or text.startswith("/"):
-        return
-
-    parent = message.reply_to_message
-    if parent and parent.from_user and not parent.from_user.is_bot:
-        parent_text = (parent.text or parent.caption or "").strip()
-        if parent_text and looks_like_notes(parent_text, queue_waiting=True):
-            if pass_offer_for_notes(settings.database_path, chat.id, parent.message_id):
-                return
-            await _offer_pass(
-                update,
-                context,
-                notes_text=f"{parent_text}\n{text}".strip(),
-                notes_message=parent,
-                starter=parent.from_user,
-            )
-            return
-
-    if not looks_like_notes(text, queue_waiting=True):
-        return
     if pass_offer_for_notes(settings.database_path, chat.id, message.message_id):
-        return
-
-    await _offer_pass(
-        update,
-        context,
-        notes_text=text,
-        notes_message=message,
-        starter=user,
-    )
-
-
-async def _offer_pass(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    notes_text: str,
-    notes_message,
-    starter,
-) -> None:
-    settings: Settings = context.bot_data["settings"]
-    message = update.effective_message
-    chat = update.effective_chat
-    if not message or not chat or starter is None:
-        return
-
-    if pass_offer_for_notes(settings.database_path, chat.id, notes_message.message_id):
-        return
-
-    if notes_balance_only(notes_text):
-        starter_mention = _mention_html(
-            starter.id,
-            getattr(starter, "username", None),
-            _display_name(starter),
-        )
-        await notes_message.reply_text(
-            f"📝 {starter_mention} — <b>send full notes, not just the balance</b>\n\n"
-            "Include name, DOB, bank, and balance (e.g. current / savings).",
-            parse_mode="HTML",
-        )
-        return
-
-    if not notes_has_balance(notes_text):
-        starter_mention = _mention_html(
-            starter.id,
-            getattr(starter, "username", None),
-            _display_name(starter),
-        )
-        await notes_message.reply_text(
-            f"📝 {starter_mention} — <b>add balance to your notes</b>\n\n"
-            "e.g. <code>current 13004</code>, <code>savings £2834</code>, "
-            "<code>£3737.38 current</code>, <code>£5000</code>, or <code>bala 3222</code>",
-            parse_mode="HTML",
-        )
+        await message.reply_text("You already have an active pass offer here.")
         return
 
     try:
         offer_id = create_open_pass_offer(
             settings.database_path,
             chat_id=chat.id,
-            notes_message_id=notes_message.message_id,
-            starter_user_id=starter.id,
-            starter_username=getattr(starter, "username", None),
-            starter_display_name=_display_name(starter),
-            notes_text=notes_text.strip(),
+            notes_message_id=message.message_id,
+            starter_user_id=user.id,
+            starter_username=user.username,
+            starter_display_name=_display_name(user),
+            notes_text="",
         )
         created = get_pass_offer(settings.database_path, offer_id)
         assert created is not None
@@ -482,27 +379,19 @@ async def _offer_pass(
             context.bot,
             settings.database_path,
             created,
-            reply_to_message_id=notes_message.message_id,
+            reply_to_message_id=message.message_id,
         ):
-            logger.warning(
-                "Pass offer %s created but could not post to chat %s",
-                offer_id,
-                chat.id,
-            )
+            await message.reply_text("Could not post the pass offer. Try again.")
             return
         logger.info(
-            "pass offer chat=%s notes_msg=%s starter=%s offer=%s",
+            "pass offer chat=%s starter=%s offer=%s",
             chat.id,
-            notes_message.message_id,
-            starter.id,
+            user.id,
             offer_id,
         )
     except Exception:
-        logger.exception(
-            "Failed to create pass offer chat=%s notes_msg=%s",
-            chat.id,
-            notes_message.message_id,
-        )
+        logger.exception("Failed to create pass offer chat=%s starter=%s", chat.id, user.id)
+        await message.reply_text("Could not create pass offer. Try again.")
 
 
 async def pass_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -594,34 +483,6 @@ async def _complete_take_pass(
         return
 
     path = settings.database_path
-    starter_label = _user_label(
-        offer.starter_user_id,
-        offer.starter_username,
-        offer.starter_display_name,
-    )
-    dm_text = (
-        f"📝 <b>Pass notes</b> from {html.escape(starter_label)}\n\n"
-        f"{html.escape(offer.notes_text)}"
-    )
-    try:
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=dm_text,
-            parse_mode="HTML",
-        )
-    except Forbidden:
-        await _release_claim_and_reopen(context.bot, path, offer)
-        await query.answer(
-            "Start a private chat with the bot first, then tap Take pass again.",
-            show_alert=True,
-        )
-        return
-    except Exception:
-        logger.exception("Failed to DM pass notes to user %s", user.id)
-        await _release_claim_and_reopen(context.bot, path, offer)
-        await query.answer("Could not DM you — try /start in private chat.", show_alert=True)
-        return
-
     if not try_mark_pass_taken(path, offer.id, user.id):
         await query.answer("This pass was already taken.", show_alert=True)
         return
@@ -636,12 +497,13 @@ async def _complete_take_pass(
         preferred_message_id=clicked_message_id,
     )
 
+    anchor = _anchor_message_id(offer)
     try:
         await context.bot.send_message(
             chat_id=offer.chat_id,
             text=_taken_pass_announcement(offer, user),
             parse_mode="HTML",
-            reply_to_message_id=offer.notes_message_id,
+            reply_to_message_id=anchor,
         )
     except BadRequest:
         try:
@@ -653,7 +515,7 @@ async def _complete_take_pass(
         except BadRequest:
             pass
 
-    await query.answer("Notes sent to your DMs.")
+    await query.answer("Pass taken.")
     logger.info(
         "pass taken chat=%s offer=%s user=%s",
         offer.chat_id,
