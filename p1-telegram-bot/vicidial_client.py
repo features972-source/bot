@@ -274,11 +274,11 @@ def _put_press1_db_entries(entries: dict[str, str]) -> None:
         f"entries = json.loads(base64.b64decode('{payload}').decode())\n"
         f"for key, val in entries.items():\n"
         f"    put = f'database put press1 {{shlex.quote(key)}} {{shlex.quote(val)}}'\n"
-        f"    r = subprocess.run(['asterisk', '-rx', put], capture_output=True, text=True)\n"
+        f"    r = subprocess.run(['/usr/sbin/asterisk', '-rx', put], capture_output=True, text=True)\n"
         f"    if r.returncode != 0:\n"
         f"        raise SystemExit((r.stderr or r.stdout or 'db put failed').strip())\n"
         f"    get = f'database get press1 {{shlex.quote(key)}}'\n"
-        f"    got = subprocess.run(['asterisk', '-rx', get], capture_output=True, text=True)\n"
+        f"    got = subprocess.run(['/usr/sbin/asterisk', '-rx', get], capture_output=True, text=True)\n"
         f"    body = (got.stdout or '') + (got.stderr or '')\n"
         f"    if val not in body:\n"
         f"        raise SystemExit(f'verify failed {{key}}={{val!r}} got {{body!r}}')\n"
@@ -438,9 +438,56 @@ def ensure_press1_stack(chat_id: int | None = None, *, full: bool = False) -> di
     return profile(get_threex_target())
 
 
+def cleanup_stale_dialers(chat_id: int | None = None) -> str:
+    """Stop orphaned per-chat dial scripts (and legacy press1_dial_run.sh)."""
+    parts = [
+        "pkill -9 -f 'press1_dial_run.sh' 2>/dev/null; true",
+    ]
+    if chat_id is not None:
+        cid = abs(int(chat_id))
+        parts.append(
+            f"for f in /tmp/press1_dial_*_{cid}.sh; do "
+            f'[ -f "$f" ] || continue; '
+            f'pkill -9 -f "$f" 2>/dev/null; '
+            f'rid=$(basename "$f" .sh | sed "s/^press1_dial_//"); '
+            f'touch "/tmp/press1_stop_$rid" 2>/dev/null; '
+            f"done"
+        )
+    parts.append("pgrep -af press1_dial 2>/dev/null | head -8 || echo 'no dialers'")
+    return run_remote(" ; ".join(parts), timeout=25)
+
+
+def repair_press1_server(chat_id: int | None = None, *, stop_stale: bool = False) -> dict[str, str]:
+    """Re-deploy dialplan/DTMF; optionally stop stale dialers for one chat."""
+    result: dict[str, str] = {}
+    try:
+        result["endpoints"] = ensure_all_threex_endpoints()
+    except Exception as e:
+        result["endpoints"] = f"error: {e}"
+    try:
+        result["dialplan"] = ensure_press1_dialplan()
+    except Exception as e:
+        result["dialplan"] = f"error: {e}"
+    try:
+        result["dtmf"] = ensure_dtmf_listener()
+    except Exception as e:
+        result["dtmf"] = f"error: {e}"
+    try:
+        result["xfer_sync"] = f"synced {sync_all_chat_xfer_configs()} chats"
+    except Exception as e:
+        result["xfer_sync"] = f"error: {e}"
+    if stop_stale or chat_id is not None:
+        try:
+            result["stale_dialers"] = cleanup_stale_dialers(chat_id)
+        except Exception as e:
+            result["stale_dialers"] = f"error: {e}"
+    return result
+
+
 def bootstrap_press1_stack() -> dict[str, str]:
     """Full dialplan + endpoint + xfer sync (run in background on boot)."""
-    return ensure_press1_stack(full=True)
+    repair_press1_server()
+    return profile(get_threex_target())
 
 
 def _dialplan_resolve_leadnum() -> str:
@@ -730,16 +777,17 @@ while IFS= read -r num || [ -n "$num" ]; do
   while [ "$CAP" -gt 0 ]; do
     wait_if_paused
     [ -f "$STOP" ] && exit 0
-    live=$(asterisk -rx "core show channels concise" 2>/dev/null | grep -ci 'bitcall')
+    live=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -ci 'bitcall')
     [ "$live" -lt "$CAP" ] && break
     sleep 1
   done
   digits=$(echo "$num" | tr -cd '0-9')
-  asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >>"$LOG" 2>&1
-  asterisk -rx "database put press1 lead ${{digits}}" >>"$LOG" 2>&1
-  asterisk -rx "database put press1 lead/${{digits}} ${{num}}" >>"$LOG" 2>&1
+  /usr/sbin/asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >>"$LOG" 2>&1
+  /usr/sbin/asterisk -rx "database put press1 lead ${{digits}}" >>"$LOG" 2>&1
+  /usr/sbin/asterisk -rx "database put press1 lead/${{digits}} ${{num}}" >>"$LOG" 2>&1
   if [ -f "/tmp/press1_xfer_$RUNID.txt" ]; then
-    python3 -c "import shlex,subprocess;d='${{digits}}';x=open('/tmp/press1_xfer_$RUNID.txt').read().strip();r=subprocess.run(['asterisk','-rx',f'database put press1 leadxfer/{{d}} {{shlex.quote(x)}}'],capture_output=True,text=True); exit(0 if r.returncode==0 and x in (r.stdout+r.stderr) else 1)" >>"$LOG" 2>&1 || echo "$(date '+%Y-%m-%d %H:%M:%S') leadxfer FAIL $num" >>"$LOG"
+    XFER=$(tr -d '\\r\\n' < "/tmp/press1_xfer_$RUNID.txt")
+    /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >>"$LOG" 2>&1 || echo "$(date '+%Y-%m-%d %H:%M:%S') leadxfer FAIL $num" >>"$LOG"
   fi
   callfile="$TMPDIR/press1_${{RUNID}}_${{digits}}_$$.call"
   mkdir -p "$TMPDIR" "$SPOOLDIR" 2>/dev/null
@@ -1509,6 +1557,7 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     chat_id = int(progress.get("chat_id", 0) or 0)
     run_id = f"{int(time.time())}_{abs(chat_id)}"
     progress["run_id"] = run_id
+    cleanup_stale_dialers(chat_id)
     run_cfg = apply_run_config(run_id, chat_id)
     progress["transfer_label"] = run_cfg.get("label", "")
     paths = _run_paths(run_id)
