@@ -457,9 +457,56 @@ def cleanup_stale_dialers(chat_id: int | None = None) -> str:
     return run_remote(" ; ".join(parts), timeout=25)
 
 
+def fix_bitcall_endpoint() -> str:
+    """Normalize [bitcall] PJSIP endpoint — fixes duplicate allow= lines that break outbound dials."""
+    trunk = _PJSIP_TRUNK_STABILITY.replace("\n", "\\n")
+    return run_remote(
+        f"python3 <<'PY'\n"
+        f"import re\nfrom pathlib import Path\n"
+        f"p = Path('{PJSIP_CONF}')\n"
+        f"t = p.read_text()\n"
+        f"m = re.search(r'\\[bitcall\\][\\s\\S]*?(?=\\n\\[|\\Z)', t)\n"
+        f"if not m:\n"
+        f"    print('no bitcall section')\n"
+        f"    raise SystemExit(0)\n"
+        f"old = m.group(0)\n"
+        f"def grab(key, default=''):\n"
+        f"    g = re.search(r'^{{key}}=(.*)$', old, re.M)\n"
+        f"    return (g.group(1).strip() if g else default)\n"
+        f"block = (\n"
+        f"    '[bitcall]\\n'\n"
+        f"    'type=endpoint\\n'\n"
+        f"    'transport=transport-udp\\n'\n"
+        f"    'context=from-trunk\\n'\n"
+        f"    'disallow=all\\n'\n"
+        f"    'allow=ulaw,alaw,telephone-event\\n'\n"
+        f"    f'from_user={{grab(\"from_user\", \"f-features896\")}}\\n'\n"
+        f"    f'from_domain={{grab(\"from_domain\", \"gateway.bitcall.io\")}}\\n'\n"
+        f"    f'outbound_auth={{grab(\"outbound_auth\", \"bitcall-auth\")}}\\n'\n"
+        f"    f'aors={{grab(\"aors\", \"bitcall-aor\")}}\\n'\n"
+        f"    '{trunk}'\n"
+        f"    'trust_id_outbound=yes\\n'\n"
+        f"    'send_pai=yes\\n'\n"
+        f"    'dtmf_mode=rfc4733\\n'\n"
+        f")\n"
+        f"t = t[:m.start()] + block + t[m.end():]\n"
+        f"p.write_text(t)\n"
+        f"print('OK: bitcall endpoint normalized')\n"
+        f"PY\n"
+        f"asterisk -rx 'module reload res_pjsip.so' 2>&1 | tail -1; "
+        f"rm -f /var/spool/asterisk/outgoing/press1_test*.call 2>/dev/null; "
+        f"asterisk -rx 'pjsip show endpoint bitcall' 2>&1 | grep -E '^allow|^Endpoint' | head -3",
+        timeout=45,
+    ).strip()
+
+
 def repair_press1_server(chat_id: int | None = None, *, stop_stale: bool = False) -> dict[str, str]:
     """Re-deploy dialplan/DTMF; optionally stop stale dialers for one chat."""
     result: dict[str, str] = {}
+    try:
+        result["bitcall"] = fix_bitcall_endpoint()
+    except Exception as e:
+        result["bitcall"] = f"error: {e}"
     try:
         result["endpoints"] = ensure_all_threex_endpoints()
     except Exception as e:
@@ -588,7 +635,6 @@ def ensure_press1_dialplan() -> str:
     )
     b64 = base64.b64encode(block.encode()).decode()
     ext_conf = "/etc/asterisk/extensions.conf"
-    ast_conf = "/etc/asterisk/asterisk.conf"
     out = run_remote(
         f"python3 <<'PY'\n"
         f"import base64, re\n"
@@ -600,34 +646,11 @@ def ensure_press1_dialplan() -> str:
         f"if '[press1-ivr]' not in text:\n"
         f"    text = text.rstrip() + '\\n\\n' + block + '\\n'\n"
         f"ext.write_text(text)\n"
-        f"p = Path('{PJSIP_CONF}')\n"
-        f"t = p.read_text()\n"
-        f"m = re.search(r'(\\[bitcall\\][\\s\\S]*?)(?=\\n\\[|\\Z)', t)\n"
-        f"if m:\n"
-        f"    b = m.group(1)\n"
-        f"    b = re.sub(r'^allow=.*$', 'allow=ulaw\\nallow=alaw\\nallow=telephone-event', b, count=1, flags=re.M)\n"
-        f"    if 'telephone-event' not in b:\n"
-        f"        b = re.sub(r'^(allow=\\S+)$', r'\\1\\nallow=telephone-event', b, count=1, flags=re.M)\n"
-        f"    b = re.sub(r'dtmf_mode=\\w+', 'dtmf_mode=rfc4733', b, count=1) if 'dtmf_mode=' in b else b.rstrip() + '\\ndtmf_mode=rfc4733\\n'\n"
-        f"    stability = {repr(_PJSIP_STABILITY_KV)}\n"
-        f"    for k, v in stability.items():\n"
-        f"        if re.search(r'^' + re.escape(k) + r'=', b, re.M) is None:\n"
-        f"            b = b.rstrip() + f'\\n{{k}}={{v}}\\n'\n"
-        f"    t = t[:m.start(1)] + b + t[m.end(1):]\n"
-        f"    p.write_text(t)\n"
-        f"ac = Path('{ast_conf}')\n"
-        f"at = ac.read_text()\n"
-        f"if 'live_dangerously' not in at:\n"
-        f"    at = re.sub(r'(\\[options\\]\\s*\\n)', r'\\1live_dangerously = yes\\n', at, count=1)\n"
-        f"else:\n"
-        f"    at = re.sub(r';?live_dangerously\\s*=.*', 'live_dangerously = yes', at)\n"
-        f"ac.write_text(at)\n"
         f"Path('{DIAL_STATS_DIR}').mkdir(parents=True, exist_ok=True)\n"
-        f"print('OK: press1-ivr dialplan + bitcall rfc4733')\n"
+        f"print('OK: press1-ivr dialplan')\n"
         f"PY\n"
-        f"asterisk -rx 'module reload res_pjsip.so' >/dev/null 2>&1; "
         f"asterisk -rx 'dialplan reload' >/dev/null; "
-        f"asterisk -rx 'dialplan show 1@press1-ivr' | grep -E 'Background|WaitExten|xfer' | head -5",
+        f"asterisk -rx 'dialplan show ivr@press1-ivr' | grep -E 'Background|WaitExten' | head -3",
         timeout=60,
     )
     return out.strip()
