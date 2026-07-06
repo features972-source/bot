@@ -92,19 +92,14 @@ while (1) {
 
         if ($evn eq 'DTMF' && outbound_bitcall($chan)) {
             my $digit = $ev{Digit} // '';
-            if ($digit eq '1') {
-                try_xfer_on_one($sock, $chan);
-            }
+            # Digit 1 xfer is handled by dialplan Read()/exten 1 — AMI Redirect here
+            # races with the IVR and causes random mid-call hangups.
             next;
         }
 
         if ($evn =~ /^(DTMFBegin|DTMFEnd)$/ && outbound_bitcall($chan)) {
             my $digit = $ev{Digit} // '';
             next unless length $digit;
-
-            if ($digit eq '1') {
-                try_xfer_on_one($sock, $chan);
-            }
 
             next unless $evn eq 'DTMFEnd';
 

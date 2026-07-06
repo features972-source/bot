@@ -464,10 +464,14 @@ exten => ivr,1,Answer()
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=False)}
  same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
- same => n,Read(P1DIG,${{P1SOUND}},1,,1,25)
+ same => n,Read(P1DIG,${{P1SOUND}},1,,1,45)
  same => n,NoOp(Press1 digit=${{P1DIG}} lead=${{LEADNUM}} sound=${{P1SOUND}} xfer=${{P1XFER}})
  same => n,GotoIf($["${{P1DIG}}" = "1"]?xfer,1)
- same => n,Hangup()
+ same => n,GotoIf($["${{IVRTRY}}" = "1"]?hang,1)
+ same => n,Set(IVRTRY=1)
+ same => n,Goto(ivr,1)
+
+exten => hang,1,Hangup()
 
 exten => 1,1,StopPlaytones()
 {_dialplan_resolve_leadnum()}
@@ -495,7 +499,7 @@ exten => xferdial,1,StopPlaytones()
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
  same => n,NoOp(XFER lead=${{LEADNUM}} run=${{P1RUN}} dest=${{P1XFER}})
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/press1 &' )
- same => n,Dial(${{P1XFER}},120,tTr)
+ same => n,Dial(${{P1XFER}},180,tTr)
  same => n,Hangup()
 
 exten => t,1,Hangup()
@@ -721,7 +725,7 @@ while IFS= read -r num || [ -n "$num" ]; do
     cat <<'CALLBODY'
 MaxRetries: 0
 RetryTime: 60
-WaitTime: 30
+WaitTime: 45
 Context: press1-ivr
 Extension: NUMPLACEHOLDER
 Priority: 1
