@@ -501,7 +501,7 @@ def _dialplan_resolve_leadnum() -> str:
 def _dialplan_resolve_xfer(*, default_sound: str, default_xfer: str, allow_default: bool) -> str:
     """Resolve P1RUN/P1XFER from leadxfer then per-run cfg; optional Swapofica fallback."""
     xfer_fallback = (
-        f' same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER={default_xfer}))'
+        f'\n same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER={default_xfer}))'
         if allow_default
         else ""
     )

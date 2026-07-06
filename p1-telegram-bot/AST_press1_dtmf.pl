@@ -61,14 +61,11 @@ sub try_xfer_on_one {
     my $now = time();
     return if $recent_xfer{$chan} && ($now - $recent_xfer{$chan}) < 3;
 
-    # Only redirect during IVR — never during Dial() to 3CX (causes agent call drops).
-    my $context = ami_getvar($sock, $chan, 'CHANNEL(context)');
-    my $app     = ami_getvar($sock, $chan, 'CHANNEL(application)');
-    return unless defined $context && $context eq 'press1-ivr';
-    return if defined $app && $app =~ /Dial/i;
+    # BitCall sends RFC4733 out-of-band DTMF — WaitExten never sees it, so AMI redirect.
+    # Do not call ami_getvar here: nested socket reads break the event loop and block redirect.
     $recent_xfer{$chan} = $now;
-    logmsg("DTMF 1 on $chan (ivr) -> press1-ivr,xfer,1");
-    ami_send($sock, 'Redirect', Channel => $chan, Context => 'press1-ivr', Exten => 'xfer', Priority => '1');
+    logmsg("DTMF 1 on $chan -> press1-ivr,1,1");
+    ami_send($sock, 'Redirect', Channel => $chan, Context => 'press1-ivr', Exten => '1', Priority => '1');
     logmsg("Redirect sent for $chan");
 }
 
