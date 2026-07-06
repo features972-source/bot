@@ -23,7 +23,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-BUILD = "press1-redirect-v20"
+BUILD = "background-press1-v21"
 WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "telegram/webhook").lstrip("/")
 PUBLIC_URL = (
     os.getenv("TELEGRAM_WEBHOOK_URL_BASE")

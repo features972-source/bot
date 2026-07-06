@@ -534,7 +534,9 @@ exten => ivr,1,Answer()
  same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
- same => n,Playback(${{P1SOUND}})
+ same => n,Set(TIMEOUT(digit)=5)
+ same => n,Set(TIMEOUT(response)=45)
+ same => n,Background(${{P1SOUND}})
  same => n,WaitExten(45)
  same => n,Goto(hang,1)
 
@@ -603,9 +605,10 @@ def ensure_press1_dialplan() -> str:
         f"m = re.search(r'(\\[bitcall\\][\\s\\S]*?)(?=\\n\\[|\\Z)', t)\n"
         f"if m:\n"
         f"    b = m.group(1)\n"
-        f"    b = re.sub(r'dtmf_mode=\\w+', 'dtmf_mode=rfc4733', b, count=1) if 'dtmf_mode=' in b else b.rstrip() + '\\ndtmf_mode=rfc4733\\n'\n"
+        f"    b = re.sub(r'^allow=.*$', 'allow=ulaw\\nallow=alaw\\nallow=telephone-event', b, count=1, flags=re.M)\n"
         f"    if 'telephone-event' not in b:\n"
-        f"        b = re.sub(r'allow=alaw', 'allow=alaw\\nallow=telephone-event', b, count=1)\n"
+        f"        b = re.sub(r'^(allow=\\S+)$', r'\\1\\nallow=telephone-event', b, count=1, flags=re.M)\n"
+        f"    b = re.sub(r'dtmf_mode=\\w+', 'dtmf_mode=rfc4733', b, count=1) if 'dtmf_mode=' in b else b.rstrip() + '\\ndtmf_mode=rfc4733\\n'\n"
         f"    stability = {repr(_PJSIP_STABILITY_KV)}\n"
         f"    for k, v in stability.items():\n"
         f"        if re.search(r'^' + re.escape(k) + r'=', b, re.M) is None:\n"
@@ -624,7 +627,7 @@ def ensure_press1_dialplan() -> str:
         f"PY\n"
         f"asterisk -rx 'module reload res_pjsip.so' >/dev/null 2>&1; "
         f"asterisk -rx 'dialplan reload' >/dev/null; "
-        f"asterisk -rx 'dialplan show 1@press1-ivr' | grep -E 'Playback|WaitExten|xfer' | head -5",
+        f"asterisk -rx 'dialplan show 1@press1-ivr' | grep -E 'Background|WaitExten|xfer' | head -5",
         timeout=60,
     )
     return out.strip()

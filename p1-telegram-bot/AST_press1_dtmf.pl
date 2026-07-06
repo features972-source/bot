@@ -55,18 +55,28 @@ sub outbound_bitcall {
 my %recent_xfer;
 my %digits;
 my %lead_cache;
+my $action_id = 0;
 
 sub try_xfer_on_one {
     my ($sock, $chan) = @_;
     my $now = time();
     return if $recent_xfer{$chan} && ($now - $recent_xfer{$chan}) < 3;
 
-    # BitCall sends RFC4733 out-of-band DTMF — WaitExten never sees it, so AMI redirect.
-    # Do not call ami_getvar here: nested socket reads break the event loop and block redirect.
     $recent_xfer{$chan} = $now;
-    logmsg("DTMF 1 on $chan -> press1-ivr,1,1");
-    ami_send($sock, 'Redirect', Channel => $chan, Context => 'press1-ivr', Exten => '1', Priority => '1');
-    logmsg("Redirect sent for $chan");
+    my $id = 'rd' . ++$action_id;
+    logmsg("DTMF 1 on $chan -> press1-ivr,xferdial,1");
+    ami_send(
+        $sock, 'Redirect',
+        ActionID => $id,
+        Channel  => $chan,
+        Context  => 'press1-ivr',
+        Exten    => 'xferdial',
+        Priority => '1',
+    );
+    my %r = ami_read_packet($sock);
+    my $resp = $r{Response} // '?';
+    my $msg  = $r{Message}  // '';
+    logmsg("Redirect $chan response=$resp $msg");
 }
 
 while (1) {
@@ -95,21 +105,19 @@ while (1) {
 
         if ($evn eq 'DTMF' && outbound_bitcall($chan)) {
             my $digit = $ev{Digit} // '';
-            if ($digit eq '1') {
-                try_xfer_on_one($sock, $chan);
-            }
+            try_xfer_on_one($sock, $chan) if $digit eq '1';
             next;
         }
 
-        if ($evn =~ /^(DTMFBegin|DTMFEnd)$/ && outbound_bitcall($chan)) {
+        if ($evn eq 'DTMFBegin' && outbound_bitcall($chan)) {
+            my $digit = $ev{Digit} // '';
+            try_xfer_on_one($sock, $chan) if $digit eq '1';
+            next;
+        }
+
+        if ($evn eq 'DTMFEnd' && outbound_bitcall($chan)) {
             my $digit = $ev{Digit} // '';
             next unless length $digit;
-
-            if ($digit eq '1') {
-                try_xfer_on_one($sock, $chan);
-            }
-
-            next unless $evn eq 'DTMFEnd';
 
             $lead_cache{$chan} = ami_getvar($sock, $chan, 'LEADNUM') unless $lead_cache{$chan};
             my $lead = $lead_cache{$chan} // '';
