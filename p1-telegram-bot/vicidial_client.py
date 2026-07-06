@@ -272,19 +272,38 @@ def _put_press1_db_entries(entries: dict[str, str]) -> None:
         f"python3 <<'PY'\n"
         f"import base64, json, shlex, subprocess\n"
         f"entries = json.loads(base64.b64decode('{payload}').decode())\n"
+        f"def db_ok(r):\n"
+        f"    body = ((r.stdout or '') + (r.stderr or '')).strip()\n"
+        f"    return r.returncode == 0 or 'Updated database successfully' in body or 'New entry added' in body\n"
         f"for key, val in entries.items():\n"
         f"    put = f'database put press1 {{shlex.quote(key)}} {{shlex.quote(val)}}'\n"
         f"    r = subprocess.run(['/usr/sbin/asterisk', '-rx', put], capture_output=True, text=True)\n"
-        f"    if r.returncode != 0:\n"
-        f"        raise SystemExit((r.stderr or r.stdout or 'db put failed').strip())\n"
+        f"    body = ((r.stdout or '') + (r.stderr or '')).strip()\n"
+        f"    if not db_ok(r):\n"
+        f"        raise SystemExit(body or 'db put failed')\n"
         f"    get = f'database get press1 {{shlex.quote(key)}}'\n"
         f"    got = subprocess.run(['/usr/sbin/asterisk', '-rx', get], capture_output=True, text=True)\n"
-        f"    body = (got.stdout or '') + (got.stderr or '')\n"
-        f"    if val not in body:\n"
-        f"        raise SystemExit(f'verify failed {{key}}={{val!r}} got {{body!r}}')\n"
+        f"    gbody = (got.stdout or '') + (got.stderr or '')\n"
+        f"    if val not in gbody:\n"
+        f"        raise SystemExit(f'verify failed {{key}}={{val!r}} got {{gbody!r}}')\n"
         f"PY",
-        timeout=30,
+        timeout=45,
     )
+
+
+def stop_all_dialers() -> str:
+    """Kill every press-1 dial script and touch all stop markers."""
+    return run_remote(
+        "for pid in $(pgrep -f '/tmp/press1_dial_' 2>/dev/null); do kill -9 \"$pid\" 2>/dev/null || true; done; "
+        "pkill -9 -f 'press1_dial_run.sh' 2>/dev/null || true; "
+        "pkill -9 -f 'press1_dial_' 2>/dev/null || true; "
+        "touch /tmp/press1_dial_stop 2>/dev/null || true; "
+        "for f in /tmp/press1_stop_*; do touch \"$f\" 2>/dev/null || true; done; "
+        "rm -f /tmp/press1_pause_* 2>/dev/null || true; "
+        "sleep 2; "
+        "pgrep -af '/tmp/press1_dial_' 2>/dev/null || echo 'all dialers stopped'",
+        timeout=40,
+    ).strip()
 
 
 def _write_run_xfer_file(run_id: str, xfer: str) -> None:
@@ -334,6 +353,7 @@ def apply_lead_run_config(lead_digits: str, chat_id: int, *, run_id: str | None 
     digits = re.sub(r"\D", "", lead_digits)
     _put_press1_db_entries(
         {
+            "lead": digits,
             f"runs/{digits}": rid,
             f"lead/{digits}": digits,
             f"leadxfer/{digits}": cfg["xfer_dial"],
@@ -538,11 +558,15 @@ def bootstrap_press1_stack() -> dict[str, str]:
 
 
 def _dialplan_resolve_leadnum() -> str:
-    """Dialplan lines that recover LEADNUM when AMI redirect drops channel vars."""
+    """Recover LEADNUM when channel vars are missing (concurrent campaigns)."""
     return """ same => n,Set(LEADNUM=${FILTER(0-9,${LEADNUM})})
+ same => n,Set(LEADNUM=${IF($[${LEN(${LEADNUM})}>=10]?${LEADNUM}:${FILTER(0-9,${GLOBAL(P1LEAD_${CHANNEL(uniqueid)})})})})
+ same => n,Set(LEADNUM=${IF($[${LEN(${LEADNUM})}>=10]?${LEADNUM}:${FILTER(0-9,${__LEADNUM})})})
+ same => n,Set(LEADNUM=${IF($[${LEN(${LEADNUM})}>=10]?${LEADNUM}:${FILTER(0-9,${DB(press1/lead/${FILTER(0-9,${LEADNUM})})})})})
  same => n,Set(LEADNUM=${IF($[${LEN(${LEADNUM})}>=10]?${LEADNUM}:${FILTER(0-9,${DB(press1/lead)})})})
  same => n,Set(LEADNUM=${IF($[${LEN(${LEADNUM})}>=10]?${LEADNUM}:${FILTER(0-9,${CALLERID(dnid)})})})
- same => n,Set(LEADNUM=${IF($[${LEN(${LEADNUM})}>=10]?${LEADNUM}:${FILTER(0-9,${PJSIP_HEADER(read,To)})})})"""
+ same => n,Set(LEADNUM=${IF($[${LEN(${LEADNUM})}>=10]?${LEADNUM}:${FILTER(0-9,${PJSIP_HEADER(read,To)})})})
+ same => n,Set(__LEADNUM=${LEADNUM})"""
 
 
 def _dialplan_resolve_xfer(*, default_sound: str, default_xfer: str, allow_default: bool) -> str:
@@ -572,20 +596,23 @@ exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{LEADNUM}})}})
 
 exten => ivr,1,Answer()
  same => n,Wait(2)
+ same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{__LEADNUM}})}})}})
+ same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{DB(press1/lead/${{FILTER(0-9,${{LEADNUM}})}})}})}})}})
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{DB(press1/lead)}})}})}})
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{CALLERID(dnid)}})}})}})
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{PJSIP_HEADER(read,To)}})}})}})
+ same => n,Set(__LEADNUM=${{LEADNUM}})
+ same => n,Set(P1UID=${{CHANNEL(uniqueid)}})
+ same => n,Set(GLOBAL(P1LEAD_${{P1UID}})=${{LEADNUM}})
  same => n,Set(CHANNEL(language)=en)
  same => n,NoOp(IVR lead=${{LEADNUM}})
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=False)}
  same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
- same => n,Set(TIMEOUT(digit)=5)
- same => n,Set(TIMEOUT(response)=45)
- same => n,Background(${{P1SOUND}})
- same => n,WaitExten(45)
- same => n,Goto(hang,1)
+ same => n,Read(P1DTMF,${{P1SOUND}},1,,1,45)
+ same => n,GotoIf($["${{P1DTMF}}" = "1"]?1,1)
+ same => n,Hangup()
 
 exten => hang,1,Hangup()
 
@@ -1288,13 +1315,9 @@ def originate_press1(phone: str, chat_id: int | None = None) -> str:
         raise ValueError(f"invalid number: {phone!r}")
     if chat_id is not None:
         apply_lead_run_config(digits, chat_id)
+    else:
+        _put_press1_db_entries({"lead": digits, f"lead/{digits}": digits})
     cid = outbound_caller_id(digits)
-    _put_press1_db_entries(
-        {
-            "lead": digits,
-            f"lead/{digits}": digits,
-        }
-    )
     _place_call_file(digits, cid)
     return digits
 

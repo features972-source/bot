@@ -71,6 +71,7 @@ sub try_xfer_on_one {
         Exten    => '1',
         Priority => '1',
     );
+    # Do not read AMI response here — mixed reads corrupt the event loop.
     logmsg("Redirect sent for $chan");
 }
 
@@ -114,9 +115,8 @@ while (1) {
             my $digit = $ev{Digit} // '';
             next unless length $digit;
 
-            $lead_cache{$chan} = ami_getvar($sock, $chan, 'LEADNUM') unless $lead_cache{$chan};
             my $lead = $lead_cache{$chan} // '';
-            $lead =~ s/\D//g;
+            $lead =~ s/\D//g if $lead;
             $digits{$chan} //= '';
             $digits{$chan} .= $digit;
             emit_event(
