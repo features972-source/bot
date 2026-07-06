@@ -63,20 +63,15 @@ sub try_xfer_on_one {
     return if $recent_xfer{$chan} && ($now - $recent_xfer{$chan}) < 3;
 
     $recent_xfer{$chan} = $now;
-    my $id = 'rd' . ++$action_id;
-    logmsg("DTMF 1 on $chan -> press1-ivr,xferdial,1");
+    logmsg("DTMF 1 on $chan -> press1-ivr,1,1");
     ami_send(
         $sock, 'Redirect',
-        ActionID => $id,
         Channel  => $chan,
         Context  => 'press1-ivr',
-        Exten    => 'xferdial',
+        Exten    => '1',
         Priority => '1',
     );
-    my %r = ami_read_packet($sock);
-    my $resp = $r{Response} // '?';
-    my $msg  = $r{Message}  // '';
-    logmsg("Redirect $chan response=$resp $msg");
+    logmsg("Redirect sent for $chan");
 }
 
 while (1) {
