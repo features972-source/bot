@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 # Repo ships a one-line OpenSSH key for emergency server repair.
@@ -17,12 +16,15 @@ def _load_ssh_key() -> None:
         return
     if not _KEY_FILE.is_file():
         raise SystemExit("Set VICIDIAL_SSH_KEY or place RENDER_SSH_KEY_ONE_LINE.txt")
-    raw = _KEY_FILE.read_text(encoding="utf-8").strip()
-    raw = raw.replace("\\n", "\n")
-    fd, path = tempfile.mkstemp(prefix="p1_ssh_", suffix=".key")
-    os.close(fd)
-    Path(path).write_text(raw, encoding="utf-8")
-    os.environ["VICIDIAL_SSH_KEY"] = path
+    data = _KEY_FILE.read_bytes()
+    if data[:2] == b"\xff\xfe":
+        raw = data.decode("utf-16")
+    elif data[:2] == b"\xfe\xff":
+        raw = data.decode("utf-16-be")
+    else:
+        raw = data.decode("utf-8", errors="replace")
+    raw = raw.strip().lstrip("\ufeff")
+    os.environ["VICIDIAL_SSH_KEY"] = raw.replace("\\n", "\n")
 
 
 def main() -> None:
