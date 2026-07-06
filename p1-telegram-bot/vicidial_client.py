@@ -500,7 +500,7 @@ def _dialplan_resolve_leadnum() -> str:
 
 def _dialplan_resolve_xfer(*, default_sound: str, default_xfer: str, allow_default: bool) -> str:
     """Resolve P1RUN/P1XFER from leadxfer then per-run cfg; optional Swapofica fallback."""
-    fallback = (
+    xfer_fallback = (
         f' same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER={default_xfer}))'
         if allow_default
         else ""
@@ -510,7 +510,7 @@ def _dialplan_resolve_xfer(*, default_sound: str, default_xfer: str, allow_defau
  same => n,Set(P1XFER=${{DB(press1/leadxfer/${{FILTER(0-9,${{LEADNUM}})}})}})
  same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER=${{DB(press1/cfg/${{P1RUN}}/xfer)}}))
  same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND=${{DB(press1/cfg/${{P1RUN}}/sound)}}))
- same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND={default_sound})){fallback}"""
+ same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND={default_sound})){xfer_fallback}"""
 
 
 def _press1_ivr_dialplan(*, server_ip: str, default_sound: str, default_xfer: str) -> str:
@@ -533,18 +533,16 @@ exten => ivr,1,Answer()
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=False)}
  same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
- same => n,Read(P1DIG,${{P1SOUND}},1,,1,45)
- same => n,NoOp(Press1 digit=${{P1DIG}} lead=${{LEADNUM}} sound=${{P1SOUND}} xfer=${{P1XFER}})
- same => n,GotoIf($["${{P1DIG}}" = "1"]?xfer,1)
- same => n,GotoIf($["${{IVRTRY}}" = "1"]?hang,1)
- same => n,Set(IVRTRY=1)
- same => n,Goto(ivr,1)
+ same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
+ same => n,Playback(${{P1SOUND}})
+ same => n,WaitExten(45)
+ same => n,Goto(hang,1)
 
 exten => hang,1,Hangup()
 
-exten => 1,1,StopPlaytones()
+exten => 1,1,NoOp(Press-1 from ${{CALLERID(num)}} lead=${{LEADNUM}})
 {_dialplan_resolve_leadnum()}
-{_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=False)}
+{_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
  same => n,Goto(xfer,1)
 
 exten => xfer,1,NoOp(Press1 xfer lead ${{LEADNUM}} to ${{P1XFER}})
@@ -626,7 +624,7 @@ def ensure_press1_dialplan() -> str:
         f"PY\n"
         f"asterisk -rx 'module reload res_pjsip.so' >/dev/null 2>&1; "
         f"asterisk -rx 'dialplan reload' >/dev/null; "
-        f"asterisk -rx 'dialplan show ivr@press1-ivr' | grep -E 'Read|xfer' | head -3",
+        f"asterisk -rx 'dialplan show 1@press1-ivr' | grep -E 'Playback|WaitExten|xfer' | head -5",
         timeout=60,
     )
     return out.strip()
@@ -1105,13 +1103,30 @@ def fetch_dtmf_events(line_offset: int = 0) -> tuple[list[dict[str, str]], int]:
 
 
 def ensure_dtmf_listener() -> str:
-    """Deploy AMI listener that captures all DTMF digits on connected calls."""
+    """Deploy AMI listener that captures DTMF and triggers press-1 xfer."""
     import base64
 
     listener = Path(__file__).with_name("AST_press1_dtmf.pl")
     if not listener.is_file():
         raise RuntimeError("AST_press1_dtmf.pl missing next to vicidial_client.py")
     b64 = base64.b64encode(listener.read_bytes()).decode()
+    unit = """[Unit]
+Description=P1 Press-1 DTMF AMI listener
+After=network.target asterisk.service
+Wants=asterisk.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/perl /usr/share/astguiclient/AST_press1_dtmf.pl
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/astguiclient/press1_dtmf.log
+StandardError=append:/var/log/astguiclient/press1_dtmf.log
+
+[Install]
+WantedBy=multi-user.target
+"""
+    unit_b64 = base64.b64encode(unit.encode()).decode()
     return run_remote(
         f"python3 <<'PY'\n"
         f"import base64\nfrom pathlib import Path\n"
@@ -1122,14 +1137,20 @@ def ensure_dtmf_listener() -> str:
         f"p.chmod(0o755)\n"
         f"Path('{DTMF_EVENTS_FILE}').parent.mkdir(parents=True, exist_ok=True)\n"
         f"Path('{DTMF_EVENTS_FILE}').touch()\n"
+        f"Path('/etc/systemd/system/press1-dtmf.service').write_bytes(base64.b64decode('{unit_b64}'))\n"
         f"print('listener written')\n"
         f"PY\n"
+        f"systemctl daemon-reload; "
         f"systemctl stop press1dtmf-new 2>/dev/null; "
+        f"systemctl stop press1-dtmf 2>/dev/null; "
         f"pkill -f '[A]ST_press1_dtmf.pl' 2>/dev/null; sleep 1; "
-        f"systemd-run --unit=press1dtmf-new --collect /usr/share/astguiclient/AST_press1_dtmf.pl; "
-        f"sleep 2; systemctl is-active press1dtmf-new 2>/dev/null || echo inactive; "
-        f"tail -2 /var/log/astguiclient/press1_dtmf.log 2>/dev/null",
-        timeout=45,
+        f"systemctl enable press1-dtmf 2>/dev/null; "
+        f"systemctl restart press1-dtmf; "
+        f"sleep 2; "
+        f"systemctl is-active press1-dtmf 2>/dev/null || echo inactive; "
+        f"pgrep -af '[A]ST_press1_dtmf' 2>/dev/null | head -2 || echo no-process; "
+        f"tail -3 /var/log/astguiclient/press1_dtmf.log 2>/dev/null",
+        timeout=60,
     ).strip()
 
 
@@ -1184,7 +1205,8 @@ def deploy_audio(files: dict[str, Path], sound_name: str) -> None:
         f"chown asterisk:asterisk {globs} 2>/dev/null; chmod 644 {globs}; "
         f"for d in {' '.join(SOUND_DIRS)}; do "
         f"rm -f $d/{stem}.gsm $d/{stem}.g722 2>/dev/null; done; "
-        f"asterisk -rx 'core reload' >/dev/null 2>&1 || asterisk -rx 'dialplan reload' >/dev/null"
+        f"/usr/sbin/asterisk -rx 'core reload' >/dev/null 2>&1 || "
+        f"/usr/sbin/asterisk -rx 'dialplan reload' >/dev/null"
     )
 
 

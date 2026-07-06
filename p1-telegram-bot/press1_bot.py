@@ -1432,6 +1432,24 @@ async def _webhook_watchdog(app: Application) -> None:
             print(f"[press1] webhook watchdog: {e}")
 
 
+async def _dtmf_watchdog_loop(app: Application) -> None:
+    """Restart press-1 DTMF listener if it dies on the dial server."""
+    while True:
+        try:
+            await asyncio.sleep(300)
+            status = await asyncio.to_thread(
+                vd.run_remote,
+                "systemctl is-active press1-dtmf 2>/dev/null || echo inactive",
+                15,
+            )
+            if "active" not in status.strip().lower():
+                print("[press1] DTMF listener down — restarting")
+                out = await asyncio.to_thread(vd.ensure_dtmf_listener)
+                print(f"[press1] DTMF restart: {out[:200]}")
+        except Exception as e:
+            print(f"[press1] dtmf watchdog: {e}")
+
+
 async def post_init(app: Application) -> None:
     if _use_polling_mode() and not _cloud_deployed():
         await app.bot.delete_webhook(drop_pending_updates=True)
@@ -1476,6 +1494,7 @@ async def post_init(app: Application) -> None:
     asyncio.create_task(_webhook_watchdog(app))
     app.bot_data["dtmf_offset"] = 0
     asyncio.create_task(_dtmf_notify_loop(app))
+    asyncio.create_task(_dtmf_watchdog_loop(app))
     asyncio.create_task(_schedule_loop(app))
     asyncio.create_task(_resume_dashboards(app))
 
