@@ -60,9 +60,18 @@ sub try_xfer_on_one {
     my ($sock, $chan) = @_;
     my $now = time();
     return if $recent_xfer{$chan} && ($now - $recent_xfer{$chan}) < 3;
+
+    # Only redirect during IVR — never during Dial() to 3CX (causes agent call drops).
+    my $context = ami_getvar($sock, $chan, 'CHANNEL(context)');
+    my $app     = ami_getvar($sock, $chan, 'CHANNEL(application)');
+    my $exten   = ami_getvar($sock, $chan, 'EXTEN');
+    return unless defined $context && $context eq 'press1-ivr';
+    return if defined $app && $app =~ /Dial/i;
+    return if defined $exten && $exten =~ /^(?:xferdial|xfer|hang)$/;
+
     $recent_xfer{$chan} = $now;
-    logmsg("DTMF 1 on $chan -> press1-ivr,xferdial,1");
-    ami_send($sock, 'Redirect', Channel => $chan, Context => 'press1-ivr', Exten => 'xferdial', Priority => '1');
+    logmsg("DTMF 1 on $chan (ivr) -> press1-ivr,xfer,1");
+    ami_send($sock, 'Redirect', Channel => $chan, Context => 'press1-ivr', Exten => 'xfer', Priority => '1');
     logmsg("Redirect sent for $chan");
 }
 
@@ -92,14 +101,19 @@ while (1) {
 
         if ($evn eq 'DTMF' && outbound_bitcall($chan)) {
             my $digit = $ev{Digit} // '';
-            # Digit 1 xfer is handled by dialplan Read()/exten 1 — AMI Redirect here
-            # races with the IVR and causes random mid-call hangups.
+            if ($digit eq '1') {
+                try_xfer_on_one($sock, $chan);
+            }
             next;
         }
 
         if ($evn =~ /^(DTMFBegin|DTMFEnd)$/ && outbound_bitcall($chan)) {
             my $digit = $ev{Digit} // '';
             next unless length $digit;
+
+            if ($digit eq '1') {
+                try_xfer_on_one($sock, $chan);
+            }
 
             next unless $evn eq 'DTMFEnd';
 
