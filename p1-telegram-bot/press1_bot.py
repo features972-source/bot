@@ -1210,7 +1210,12 @@ async def _save_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, dest: 
                 Path(tmp),
                 sound_name,
             )
-            sound_name = await asyncio.to_thread(vd.deploy_chat_audio, chat_id, files)
+            sound_name = await asyncio.to_thread(
+                vd.deploy_chat_audio,
+                chat_id,
+                files,
+                str((chat_progress(context.application, chat_id) or {}).get("run_id", "") or "") or None,
+            )
         _clear_awaiting_ivr(context)
         await msg.edit_text(
             f"✅ IVR audio updated for this chat ({ui.code(sound_name)}).\n"

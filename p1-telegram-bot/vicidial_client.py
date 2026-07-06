@@ -1104,12 +1104,9 @@ def fetch_dtmf_events(line_offset: int = 0) -> tuple[list[dict[str, str]], int]:
 
 def ensure_dtmf_listener() -> str:
     """Deploy AMI listener that captures DTMF and triggers press-1 xfer."""
-    import base64
-
     listener = Path(__file__).with_name("AST_press1_dtmf.pl")
     if not listener.is_file():
         raise RuntimeError("AST_press1_dtmf.pl missing next to vicidial_client.py")
-    b64 = base64.b64encode(listener.read_bytes()).decode()
     unit = """[Unit]
 Description=P1 Press-1 DTMF AMI listener
 After=network.target asterisk.service
@@ -1126,31 +1123,31 @@ StandardError=append:/var/log/astguiclient/press1_dtmf.log
 [Install]
 WantedBy=multi-user.target
 """
-    unit_b64 = base64.b64encode(unit.encode()).decode()
+    remote_pl = "/usr/share/astguiclient/AST_press1_dtmf.pl"
+    remote_unit = "/etc/systemd/system/press1-dtmf.service"
+    with ssh_connect() as client:
+        sftp = client.open_sftp()
+        run_remote(
+            "mkdir -p /usr/share/astguiclient /var/log/astguiclient "
+            f"$(dirname {DTMF_EVENTS_FILE})",
+            timeout=20,
+        )
+        sftp.put(str(listener), remote_pl)
+        with sftp.file(remote_unit, "w") as fh:
+            fh.write(unit)
+        sftp.close()
+    run_remote(f"chmod 755 {remote_pl}; touch {DTMF_EVENTS_FILE}", timeout=15)
     return run_remote(
-        f"python3 <<'PY'\n"
-        f"import base64\nfrom pathlib import Path\n"
-        f"Path('/usr/share/astguiclient').mkdir(parents=True, exist_ok=True)\n"
-        f"Path('/var/log/astguiclient').mkdir(parents=True, exist_ok=True)\n"
-        f"p = Path('/usr/share/astguiclient/AST_press1_dtmf.pl')\n"
-        f"p.write_bytes(base64.b64decode('{b64}'))\n"
-        f"p.chmod(0o755)\n"
-        f"Path('{DTMF_EVENTS_FILE}').parent.mkdir(parents=True, exist_ok=True)\n"
-        f"Path('{DTMF_EVENTS_FILE}').touch()\n"
-        f"Path('/etc/systemd/system/press1-dtmf.service').write_bytes(base64.b64decode('{unit_b64}'))\n"
-        f"print('listener written')\n"
-        f"PY\n"
-        f"systemctl daemon-reload; "
-        f"systemctl stop press1dtmf-new 2>/dev/null; "
-        f"systemctl stop press1-dtmf 2>/dev/null; "
-        f"pkill -f '[A]ST_press1_dtmf.pl' 2>/dev/null; sleep 1; "
-        f"systemctl enable press1-dtmf 2>/dev/null; "
-        f"systemctl restart press1-dtmf; "
-        f"sleep 2; "
-        f"systemctl is-active press1-dtmf 2>/dev/null || echo inactive; "
-        f"pgrep -af '[A]ST_press1_dtmf' 2>/dev/null | head -2 || echo no-process; "
-        f"tail -3 /var/log/astguiclient/press1_dtmf.log 2>/dev/null",
-        timeout=60,
+        "systemctl daemon-reload; "
+        "systemctl stop press1dtmf-new 2>/dev/null || true; "
+        "systemctl stop press1-dtmf 2>/dev/null || true; "
+        "pkill -f '[A]ST_press1_dtmf.pl' 2>/dev/null || true; sleep 1; "
+        "systemctl enable press1-dtmf 2>/dev/null || true; "
+        "systemctl restart press1-dtmf; "
+        "sleep 2; "
+        "systemctl is-active press1-dtmf; "
+        "pgrep -af '[A]ST_press1_dtmf' | head -2",
+        timeout=90,
     ).strip()
 
 
@@ -1210,11 +1207,16 @@ def deploy_audio(files: dict[str, Path], sound_name: str) -> None:
     )
 
 
-def deploy_chat_audio(chat_id: int, files: dict[str, Path]) -> str:
+def deploy_chat_audio(chat_id: int, files: dict[str, Path], run_id: str | None = None) -> str:
     """Upload IVR audio for one chat and persist its sound name."""
     sound_name = chat_sound_name(chat_id)
     deploy_audio(files, sound_name)
     save_chat_settings(chat_id, sound_name=sound_name)
+    apply_run_config(chat_cfg_run_id(chat_id), chat_id)
+    if run_id:
+        rid = _safe_run_token(run_id)
+        if rid != chat_cfg_run_id(chat_id):
+            apply_run_config(rid, chat_id)
     return sound_name
 
 
