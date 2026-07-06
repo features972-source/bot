@@ -70,6 +70,31 @@ SCHEDULES_PATH = "/var/lib/asterisk/press1_schedules.json"
 DASHBOARDS_PATH = "/var/lib/asterisk/press1_dashboards.json"
 PJSIP_CONF = "/etc/asterisk/pjsip.conf"
 
+# Keep bridged BitCall <-> 3CX calls up (RTP keepalive, session timers, no RTP kill on hold).
+_PJSIP_TRUNK_STABILITY = (
+    "direct_media=no\n"
+    "rtp_symmetric=yes\n"
+    "force_rport=yes\n"
+    "rewrite_contact=yes\n"
+    "rtp_keepalive=30\n"
+    "rtp_timeout=0\n"
+    "rtp_timeout_hold=0\n"
+    "timers=always\n"
+    "timers_min_se=90\n"
+    "timers_sess_expires=3600\n"
+    "send_connected_line=no\n"
+    "connected_line_method=invite\n"
+)
+
+_PJSIP_STABILITY_KV = {
+    "rtp_keepalive": "30",
+    "rtp_timeout": "0",
+    "rtp_timeout_hold": "0",
+    "timers": "always",
+    "timers_min_se": "90",
+    "timers_sess_expires": "3600",
+}
+
 
 def load_dashboards() -> list[dict]:
     """Persisted pinned dashboards: [{chat_id, message_id, user_id}]."""
@@ -332,10 +357,7 @@ def ensure_all_threex_endpoints() -> str:
             f"context=from-trunk\n"
             f"disallow=all\n"
             f"allow=alaw,ulaw\n"
-            f"direct_media=no\n"
-            f"rtp_symmetric=yes\n"
-            f"force_rport=yes\n"
-            f"rewrite_contact=yes\n"
+            f"{_PJSIP_TRUNK_STABILITY}"
             f"aors={ep}-aor\n"
             f"\n[{ep}-aor]\n"
             f"type=aor\n"
@@ -499,7 +521,7 @@ exten => xferdial,1,StopPlaytones()
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
  same => n,NoOp(XFER lead=${{LEADNUM}} run=${{P1RUN}} dest=${{P1XFER}})
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/press1 &' )
- same => n,Dial(${{P1XFER}},180,tTr)
+ same => n,Dial(${{P1XFER}},,Tr)
  same => n,Hangup()
 
 exten => t,1,Hangup()
@@ -539,6 +561,10 @@ def ensure_press1_dialplan() -> str:
         f"    b = re.sub(r'dtmf_mode=\\w+', 'dtmf_mode=rfc4733', b, count=1) if 'dtmf_mode=' in b else b.rstrip() + '\\ndtmf_mode=rfc4733\\n'\n"
         f"    if 'telephone-event' not in b:\n"
         f"        b = re.sub(r'allow=alaw', 'allow=alaw\\nallow=telephone-event', b, count=1)\n"
+        f"    stability = {repr(_PJSIP_STABILITY_KV)}\n"
+        f"    for k, v in stability.items():\n"
+        f"        if re.search(r'^' + re.escape(k) + r'=', b, re.M) is None:\n"
+        f"            b = b.rstrip() + f'\\n{{k}}={{v}}\\n'\n"
         f"    t = t[:m.start(1)] + b + t[m.end(1):]\n"
         f"    p.write_text(t)\n"
         f"ac = Path('{ast_conf}')\n"
