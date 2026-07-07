@@ -52,6 +52,11 @@ def normalize_phone(phone: str) -> tuple[str, str]:
             national = _strip_leading_zero(digits[len(code) :])
             return code, national
 
+    # North American Numbering Plan: 1 + NXX-NXX-XXXX (area/exchange digit is 2-9).
+    # Must be checked before the generic fallback so US/Canada numbers aren't given a UK code.
+    if digits.startswith("1") and len(digits) == 11 and digits[1] in "23456789":
+        return "1", digits[1:]
+
     if digits.startswith("0"):
         rest = digits[1:]
         if digits.startswith("04") and len(digits) == 10:

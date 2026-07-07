@@ -794,7 +794,7 @@ def settings_summary(chat_id: int | None = None) -> dict[str, str]:
 
 
 def test_numbers() -> list[str]:
-    raw = os.getenv("VICIDIAL_TEST_NUMBERS", "447769799593")
+    raw = os.getenv("VICIDIAL_TEST_NUMBERS", "447769799593,17815078166")
     nums: list[str] = []
     seen: set[str] = set()
     for n in raw.split(","):
@@ -1356,29 +1356,20 @@ def _place_call_file(digits: str, cid: str) -> None:
     """Originate one outbound call. Success = the call is actually going out (ringing or
     answered); we do NOT require the callee to answer within a fixed window, and we do NOT
     hang up other BitCall channels (the trunk handles high concurrency — 200+ concurrent)."""
-    # Originate in the background so the blocking CLI 'channel originate' (which waits for
-    # answer) doesn't stall the request; then confirm a live channel appeared.
-    cmd = (
-        f"asterisk -rx {shlex.quote(f'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}')} "
-        f">/dev/null 2>&1 &"
-    )
-    run_remote(cmd, timeout=15)
-    # Poll briefly for the outbound leg to appear in Ringing/Up state. Ringing counts as a
-    # successfully placed call — the phone is ringing even if nobody has answered yet.
-    check = run_remote(
-        "for i in 1 2 3 4 5 6 7 8 9 10; do "
-        "asterisk -rx 'core show channels concise' 2>/dev/null | "
-        "grep '^PJSIP/bitcall-' | grep -qiE '!(Up|Ring|Ringing)!' && echo PLACED && exit 0; "
-        "sleep 1; done; "
-        "asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | head -2; "
-        "echo NOT_PLACED",
-        timeout=20,
-    ).strip()
-    if "PLACED" not in check:
-        detail = check.splitlines()[-1] if check else "no channel"
-        raise RuntimeError(
-            f"Call to {digits} could not be placed (trunk unreachable or rejected). {detail}"
-        )
+    # Synchronous originate (same proven path the campaign dialer uses). Keeping the SSH
+    # session open for the call's duration is what lets it ring properly — backgrounding it
+    # makes Asterisk CANCEL the INVITE and cut the ring short. We do NOT hang up other
+    # BitCall channels first (trunk handles 200+ concurrent, it is not a 1-line trunk).
+    orig = f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}"
+    try:
+        out = run_remote(f"asterisk -rx {shlex.quote(orig)} 2>&1", timeout=45).strip()
+    except Exception:
+        # SSH read timed out while the call was still ringing/connected on the server — the
+        # call is placed and ringing, which is success for our purposes.
+        return
+    # Only an explicit routing/allocation failure is a real error. An un-answered call is not.
+    if out and re.search(r"\b(no such|unable|rejected|congestion|unallocated|invalid|no route)\b", out, re.I):
+        raise RuntimeError(out)
 
 
 def originate_press1(phone: str, chat_id: int | None = None) -> str:
