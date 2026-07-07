@@ -491,22 +491,29 @@ def unstick_dial_server() -> str:
 
 
 def fix_bitcall_endpoint() -> str:
-    """Normalize [bitcall] PJSIP endpoint — fixes duplicate allow= lines that break outbound dials."""
-    trunk = _PJSIP_TRUNK_STABILITY.replace("\n", "\\n")
+    """Rebuild BitCall PJSIP (dedupe sections, fix realm, reload + re-register)."""
     return run_remote(
         f"python3 <<'PY'\n"
         f"import re\nfrom pathlib import Path\n"
         f"p = Path('{PJSIP_CONF}')\n"
-        f"t = p.read_text()\n"
-        f"m = re.search(r'\\[bitcall\\][\\s\\S]*?(?=\\n\\[|\\Z)', t)\n"
-        f"if not m:\n"
-        f"    print('no bitcall section')\n"
-        f"    raise SystemExit(0)\n"
-        f"old = m.group(0)\n"
-        f"def grab(key, default=''):\n"
-        f"    g = re.search(r'^{{key}}=(.*)$', old, re.M)\n"
-        f"    return (g.group(1).strip() if g else default)\n"
-        f"block = (\n"
+        f"text = p.read_text()\n"
+        f"def grab(name):\n"
+        f"    m = re.search(rf'\\[{{re.escape(name)}}\\][\\s\\S]*?(?=\\n\\[|\\Z)', text)\n"
+        f"    return m.group(0) if m else ''\n"
+        f"auth = grab('bitcall-auth')\n"
+        f"aor = grab('bitcall-aor')\n"
+        f"reg = grab('bitcall-registration')\n"
+        f"ident = grab('bitcall-identify')\n"
+        f"if auth:\n"
+        f"    auth = re.sub(r'^realm=.*$', 'realm=gateway.bitcall.io', auth, flags=re.M)\n"
+        f"    if 'realm=' not in auth:\n"
+        f"        auth = auth.replace('type=auth', 'type=auth\\nrealm=gateway.bitcall.io', 1)\n"
+        f"    auth = re.sub(r'realm=sippysoft\\.com', 'realm=gateway.bitcall.io', auth)\n"
+        f"def g(old, key, default=''):\n"
+        f"    m = re.search(rf'^{{key}}=(.*)$', old, re.M)\n"
+        f"    return (m.group(1).strip() if m else default)\n"
+        f"old = grab('bitcall')\n"
+        f"endpoint = (\n"
         f"    '[bitcall]\\n'\n"
         f"    'type=endpoint\\n'\n"
         f"    'transport=transport-udp\\n'\n"
@@ -515,23 +522,26 @@ def fix_bitcall_endpoint() -> str:
         f"    'allow=ulaw\\n'\n"
         f"    'allow=alaw\\n'\n"
         f"    'allow=telephone-event\\n'\n"
-        f"    f'from_user={{grab(\"from_user\", \"f-features896\")}}\\n'\n"
-        f"    f'from_domain={{grab(\"from_domain\", \"gateway.bitcall.io\")}}\\n'\n"
-        f"    f'outbound_auth={{grab(\"outbound_auth\", \"bitcall-auth\")}}\\n'\n"
-        f"    f'aors={{grab(\"aors\", \"bitcall-aor\")}}\\n'\n"
-        f"    '{trunk}'\n"
+        f"    f'from_user={{g(old, \"from_user\", \"f-features896\")}}\\n'\n"
+        f"    f'from_domain={{g(old, \"from_domain\", \"gateway.bitcall.io\")}}\\n'\n"
+        f"    'outbound_auth=bitcall-auth\\n'\n"
+        f"    'aors=bitcall-aor\\n'\n"
+        f"    '{_PJSIP_TRUNK_STABILITY.replace(chr(10), chr(10))}'\n"
         f"    'trust_id_outbound=yes\\n'\n"
         f"    'send_pai=yes\\n'\n"
         f"    'dtmf_mode=rfc4733\\n'\n"
         f")\n"
-        f"t = t[:m.start()] + block + t[m.end():]\n"
-        f"p.write_text(t)\n"
-        f"print('OK: bitcall endpoint normalized')\n"
+        f"text = re.sub(r'\\[bitcall[^\\]]*\\][\\s\\S]*?(?=\\n\\[|\\Z)', '', text)\n"
+        f"text = re.sub(r'\\n{{3,}}', '\\n\\n', text).rstrip() + '\\n\\n'\n"
+        f"parts = [x for x in (auth, aor, endpoint, ident, reg) if x.strip()]\n"
+        f"p.write_text(text + '\\n'.join(parts) + '\\n')\n"
+        f"print('OK: bitcall pjsip rebuilt')\n"
         f"PY\n"
         f"asterisk -rx 'module reload res_pjsip.so' 2>&1 | tail -1; "
-        f"rm -f /var/spool/asterisk/outgoing/press1_test*.call 2>/dev/null; "
-        f"asterisk -rx 'pjsip show endpoint bitcall' 2>&1 | grep -E '^allow|^Endpoint' | head -3",
-        timeout=45,
+        f"sleep 2; "
+        f"asterisk -rx 'pjsip send register bitcall-registration' 2>&1; "
+        f"asterisk -rx 'pjsip show registrations' 2>&1 | grep -i bitcall | head -1",
+        timeout=55,
     ).strip()
 
 
@@ -864,32 +874,15 @@ while IFS= read -r num || [ -n "$num" ]; do
     XFER=$(tr -d '\\r\\n' < "/tmp/press1_xfer_$RUNID.txt")
     /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >>"$LOG" 2>&1 || echo "$(date '+%Y-%m-%d %H:%M:%S') leadxfer FAIL $num" >>"$LOG"
   fi
-  callfile="$TMPDIR/press1_${{RUNID}}_${{digits}}_$$.call"
-  mkdir -p "$TMPDIR" "$SPOOLDIR" 2>/dev/null
-  {{
-    echo "Channel: PJSIP/${{num}}@bitcall"
-    if [ -n "$AU_CALLER_ID" ]; then
-      printf 'CallerID: "%s" <%s>\\n' "$AU_CALLER_ID" "$AU_CALLER_ID"
-    fi
-    cat <<'CALLBODY'
-MaxRetries: 0
-RetryTime: 60
-WaitTime: 45
-Context: press1-ivr
-Extension: NUMPLACEHOLDER
-Priority: 1
-Setvar: LEADNUM=NUMPLACEHOLDER
-Setvar: __LEADNUM=NUMPLACEHOLDER
-CALLBODY
-  }} | sed "s/NUMPLACEHOLDER/${{num}}/g" > "$callfile"
-  if chown asterisk:asterisk "$callfile" 2>/dev/null && chmod 0640 "$callfile" 2>/dev/null && mv "$callfile" "$SPOOLDIR/" 2>>"$LOG"
-  then
+  cid="${{AU_CALLER_ID:-442038969244}}"
+  orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid ${{cid}}" 2>&1)
+  if echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
+    f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') fail $num $orig_out" >>"$LOG"
+  else
     echo "$num" >>"$DONE"
     s=$(wc -l < "$DONE" 2>/dev/null || echo 0); echo "$s" > "$STARTED"
     echo "$(date '+%Y-%m-%d %H:%M:%S') ok $num" >>"$LOG"
-  else
-    f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') fail $num" >>"$LOG"
   fi
   batch_n=$((batch_n+1))
   wait_if_paused
@@ -1053,7 +1046,13 @@ def add_leads(phones: list[str]) -> int:
 
 
 def ping() -> str:
-    return run_remote("echo ok && asterisk -rx 'pjsip show registrations' | grep -i bitcall | head -1")
+    """Liveness + BitCall endpoint check (registration optional; outbound uses gateway contact)."""
+    return run_remote(
+        "echo ok; "
+        "asterisk -rx 'pjsip show endpoint bitcall' 2>&1 | grep -E '^Endpoint:|^ allow' | head -3; "
+        "asterisk -rx 'pjsip show aor bitcall-aor' 2>&1 | grep -i contact | head -1",
+        timeout=20,
+    )
 
 
 def refill_hopper() -> None:
@@ -1299,44 +1298,11 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path], run_id: str | None =
 
 
 def _place_call_file(digits: str, cid: str) -> None:
-    """Drop a .call file into Asterisk outgoing spool (same path as campaigns)."""
-    run_remote(
-        f"python3 <<'PY'\n"
-        f"import os\nfrom pathlib import Path\n"
-        f"digits = {digits!r}\n"
-        f"cid = {cid!r}\n"
-        f"body = (\n"
-        f"    f'Channel: PJSIP/{{digits}}@bitcall\\n'\n"
-        f"    f'CallerID: \"{{cid}}\" <{{cid}}>\\n'\n"
-        f"    'MaxRetries: 0\\n'\n"
-        f"    'RetryTime: 60\\n'\n"
-        f"    'WaitTime: 45\\n'\n"
-        f"    f'Context: press1-ivr\\n'\n"
-        f"    f'Extension: {{digits}}\\n'\n"
-        f"    'Priority: 1\\n'\n"
-        f"    f'Setvar: LEADNUM={{digits}}\\n'\n"
-        f"    f'Setvar: __LEADNUM={{digits}}\\n'\n"
-        f"    'Archive: yes\\n'\n"
-        f")\n"
-        f"name = f'press1_test_{{digits}}.call'\n"
-        f"tmp = Path('/var/spool/asterisk/tmp') / name\n"
-        f"out = Path('/var/spool/asterisk/outgoing') / name\n"
-        f"tmp.parent.mkdir(parents=True, exist_ok=True)\n"
-        f"out.parent.mkdir(parents=True, exist_ok=True)\n"
-        f"tmp.write_text(body)\n"
-        f"os.chmod(tmp, 0o640)\n"
-        f"try:\n"
-        f"    import pwd, grp\n"
-        f"    os.chown(tmp, pwd.getpwnam('asterisk').pw_uid, grp.getgrnam('asterisk').gr_gid)\n"
-        f"except Exception:\n"
-        f"    pass\n"
-        f"if out.exists():\n"
-        f"    out.unlink()\n"
-        f"tmp.rename(out)\n"
-        f"print('callfile', digits)\n"
-        f"PY",
-        timeout=30,
-    )
+    """Originate one test call directly (call-file spool was expiring)."""
+    cmd = f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}"
+    out = run_remote(f"asterisk -rx {shlex.quote(cmd)} 2>&1", timeout=25).strip()
+    if out and re.search(r"error|failed|reject|unable", out, re.I):
+        raise RuntimeError(out)
 
 
 def originate_press1(phone: str, chat_id: int | None = None) -> str:
@@ -1724,6 +1690,10 @@ def test_calls(numbers: list[str] | None = None, chat_id: int | None = None) -> 
     nums = numbers or test_numbers()
     if not nums:
         raise RuntimeError("No test numbers configured — set VICIDIAL_TEST_NUMBERS on Render")
+    try:
+        repair_press1_server()
+    except Exception:
+        pass
     placed: list[str] = []
     errors: list[str] = []
     for num in nums:
