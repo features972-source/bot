@@ -919,8 +919,11 @@ while IFS= read -r num || [ -n "$num" ]; do
     sleep 1
   done
   digits=$(echo "$num" | tr -cd '0-9')
+  # Per-lead routing keys only. The shared global 'lead' key was removed: under high
+  # concurrency every call overwrote it (SQLite row contention -> 'unable to open database
+  # file') and reads could return another call's number. LEADNUM comes from the dialed
+  # extension in the dialplan, so it is not needed.
   /usr/sbin/asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >>"$LOG" 2>&1
-  /usr/sbin/asterisk -rx "database put press1 lead ${{digits}}" >>"$LOG" 2>&1
   /usr/sbin/asterisk -rx "database put press1 lead/${{digits}} ${{num}}" >>"$LOG" 2>&1
   if [ -f "/tmp/press1_xfer_$RUNID.txt" ]; then
     XFER=$(tr -d '\\r\\n' < "/tmp/press1_xfer_$RUNID.txt")
@@ -1349,40 +1352,32 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path], run_id: str | None =
     return sound_name
 
 
-def _hangup_bitcall_channels() -> None:
-    """Free BitCall capacity — stale IVR channels block new test calls (1-line trunk)."""
-    try:
-        run_remote(
-            "asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | "
-            "cut -d'!' -f1 | while read -r ch; do "
-            "  [ -n \"$ch\" ] && asterisk -rx \"channel request hangup $ch\" 2>/dev/null; "
-            "done; echo ok",
-            timeout=20,
-        )
-    except Exception:
-        pass
-
-
 def _place_call_file(digits: str, cid: str) -> None:
-    """Originate one test call directly (call-file spool was expiring)."""
-    _hangup_bitcall_channels()
-    cmd = f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}"
-    out = run_remote(f"asterisk -rx {shlex.quote(cmd)} 2>&1", timeout=25).strip()
-    if out and re.search(r"\b(error|reject|unable)\b", out, re.I):
-        raise RuntimeError(out)
+    """Originate one outbound call. Success = the call is actually going out (ringing or
+    answered); we do NOT require the callee to answer within a fixed window, and we do NOT
+    hang up other BitCall channels (the trunk handles high concurrency — 200+ concurrent)."""
+    # Originate in the background so the blocking CLI 'channel originate' (which waits for
+    # answer) doesn't stall the request; then confirm a live channel appeared.
+    cmd = (
+        f"asterisk -rx {shlex.quote(f'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}')} "
+        f">/dev/null 2>&1 &"
+    )
+    run_remote(cmd, timeout=15)
+    # Poll briefly for the outbound leg to appear in Ringing/Up state. Ringing counts as a
+    # successfully placed call — the phone is ringing even if nobody has answered yet.
     check = run_remote(
-        "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do "
+        "for i in 1 2 3 4 5 6 7 8 9 10; do "
         "asterisk -rx 'core show channels concise' 2>/dev/null | "
-        "grep '^PJSIP/bitcall-' | grep -q '!Up!' && echo CONNECTED && exit 0; "
+        "grep '^PJSIP/bitcall-' | grep -qiE '!(Up|Ring|Ringing)!' && echo PLACED && exit 0; "
         "sleep 1; done; "
         "asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | head -2; "
-        "echo NOT_CONNECTED",
-        timeout=25,
+        "echo NOT_PLACED",
+        timeout=20,
     ).strip()
-    if "CONNECTED" not in check:
+    if "PLACED" not in check:
         detail = check.splitlines()[-1] if check else "no channel"
         raise RuntimeError(
-            f"Call to {digits} did not connect (BitCall busy or unreachable). {detail}"
+            f"Call to {digits} could not be placed (trunk unreachable or rejected). {detail}"
         )
 
 
@@ -1724,6 +1719,15 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         f"pkill -9 -f '{paths['script']}' 2>/dev/null; true; "
         f"sleep 1; "
         f"rm -f {paths['stop']}; rm -f {paths['pause']}; "
+        # Safety valve: if per-lead routing keys have bloated (they accumulate one row per
+        # unique number ever dialed), clear them so SQLite stops throwing 'unable to open
+        # database file' under concurrency. The dialer rewrites each lead's keys just-in-time
+        # and cfg/<run>/xfer remains as the fallback, so this is safe for live/concurrent runs.
+        f"LX=$(asterisk -rx 'database show press1 leadxfer' 2>/dev/null | grep -c leadxfer); "
+        f"if [ \"${{LX:-0}}\" -gt 40000 ]; then "
+        f"asterisk -rx 'database deltree press1 leadxfer' >/dev/null 2>&1; "
+        f"asterisk -rx 'database deltree press1 runs' >/dev/null 2>&1; "
+        f"echo \"$(date '+%Y-%m-%d %H:%M:%S') pruned astdb bloat (leadxfer=$LX)\" >> {DIAL_LOG}; fi; "
         f"echo 0 > {paths['started']}; echo 0 > {paths['failed']}; "
         f"mkdir -p {DIAL_STATS_DIR}/{run_id}; "
         f": > {_stats_answered_path(run_id)}; : > {_stats_press1_path(run_id)}; "
