@@ -38,29 +38,23 @@ sub outbound_bitcall {
 my %recent_xfer;
 my %digits;
 my %lead_cache;
-my %chan_ctx;
 my %chan_app;
-my %chan_ext;
 
-sub ivr_active {
+sub xfer_allowed {
     my ($chan) = @_;
-    my $ctx = $chan_ctx{$chan} // '';
     my $app = $chan_app{$chan} // '';
     return 0 if $app =~ /Dial/i;
-    my $ext = $chan_ext{$chan} // '';
-    return 0 if $ext =~ /^(?:xfer|xferdial|hang)$/i;
-    return 0 if $ctx ne '' && $ctx ne 'press1-ivr';
     return 1;
 }
 
 sub try_xfer_on_one {
     my ($sock, $chan) = @_;
     my $now = time();
-    return if $recent_xfer{$chan} && ($now - $recent_xfer{$chan}) < 3;
-    return unless ivr_active($chan);
+    return if $recent_xfer{$chan} && ($now - $recent_xfer{$chan}) < 2;
+    return unless xfer_allowed($chan);
 
     $recent_xfer{$chan} = $now;
-    logmsg("DTMF 1 on $chan (ivr) -> press1-ivr,1,1");
+    logmsg("DTMF 1 on $chan -> press1-ivr,1,1");
     ami_send(
         $sock, 'Redirect',
         Channel  => $chan,
@@ -74,7 +68,7 @@ sub try_xfer_on_one {
 while (1) {
     my $sock = IO::Socket::INET->new(PeerAddr=>$host, PeerPort=>$port, Proto=>'tcp', Timeout=>10);
     unless ($sock) { logmsg("AMI connect failed: $!"); sleep 5; next; }
-    ami_send($sock, 'Login', Username=>$user, Secret=>$pass, Events=>'call,dtmf');
+    ami_send($sock, 'Login', Username=>$user, Secret=>$pass, Events=>'call,dtmf,dtmfbegin,dtmfend');
     my $buf = ''; my $li = 0;
     logmsg("AMI connected (call+dtmf)");
     while (my $line = <$sock>) {
@@ -97,8 +91,6 @@ while (1) {
         next unless outbound_bitcall($chan);
 
         if ($evn eq 'Newexten') {
-            $chan_ctx{$chan} = $ev{Context} // $chan_ctx{$chan} // '';
-            $chan_ext{$chan}  = $ev{Extension} // $chan_ext{$chan} // '';
             if (defined $ev{Application} && length $ev{Application}) {
                 $chan_app{$chan} = $ev{Application};
             }
@@ -108,20 +100,17 @@ while (1) {
             next;
         }
 
-        if ($evn =~ /^(?:DTMF|DTMFBegin|DTMFEnd)$/) {
+        if ($evn =~ /^(?:DTMF|DTMFBegin|DTMFEnd)$/i) {
             my $digit = $ev{Digit} // '';
             next unless length $digit;
 
-            $chan_ctx{$chan} = $ev{Context} if defined $ev{Context} && $ev{Context} ne '';
-            $chan_ext{$chan}  = $ev{Exten}   if defined $ev{Exten}   && $ev{Exten} ne '';
+            try_xfer_on_one($sock, $chan) if $digit eq '1';
 
-            try_xfer_on_one($sock, $chan) if $digit eq '1' && $evn eq 'DTMFEnd';
-
-            my $lead = $lead_cache{$chan} // '';
-            $lead =~ s/\D//g if $lead;
-            $digits{$chan} //= '';
-            $digits{$chan} .= $digit if $evn eq 'DTMFEnd';
-            if ($evn eq 'DTMFEnd') {
+            if ($evn =~ /End$/i) {
+                my $lead = $lead_cache{$chan} // '';
+                $lead =~ s/\D//g if $lead;
+                $digits{$chan} //= '';
+                $digits{$chan} .= $digit;
                 emit_event(
                     t    => int(time()),
                     e    => 'digit',
@@ -152,9 +141,7 @@ while (1) {
             delete $digits{$chan};
             delete $lead_cache{$chan};
             delete $recent_xfer{$chan};
-            delete $chan_ctx{$chan};
             delete $chan_app{$chan};
-            delete $chan_ext{$chan};
         }
     }
     logmsg("AMI disconnected");

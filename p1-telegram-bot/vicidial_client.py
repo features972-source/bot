@@ -492,6 +492,7 @@ def unstick_dial_server() -> str:
 
 def fix_bitcall_endpoint() -> str:
     """Rebuild BitCall PJSIP (dedupe sections, fix realm, reload + re-register)."""
+    trunk = _PJSIP_TRUNK_STABILITY.replace("\n", "\\n")
     return run_remote(
         f"python3 <<'PY'\n"
         f"import re\nfrom pathlib import Path\n"
@@ -526,10 +527,12 @@ def fix_bitcall_endpoint() -> str:
         f"    f'from_domain={{g(old, \"from_domain\", \"gateway.bitcall.io\")}}\\n'\n"
         f"    'outbound_auth=bitcall-auth\\n'\n"
         f"    'aors=bitcall-aor\\n'\n"
-        f"    '{_PJSIP_TRUNK_STABILITY.replace(chr(10), chr(10))}'\n"
+        f"    '{trunk}\\n'\n"
         f"    'trust_id_outbound=yes\\n'\n"
         f"    'send_pai=yes\\n'\n"
         f"    'dtmf_mode=rfc4733\\n'\n"
+        f"    '100rel=no\\n'\n"
+        f"    'inband_progress=no\\n'\n"
         f")\n"
         f"text = re.sub(r'\\[bitcall[^\\]]*\\][\\s\\S]*?(?=\\n\\[|\\Z)', '', text)\n"
         f"text = re.sub(r'\\n{{3,}}', '\\n\\n', text).rstrip() + '\\n\\n'\n"
@@ -540,7 +543,7 @@ def fix_bitcall_endpoint() -> str:
         f"asterisk -rx 'module reload res_pjsip.so' 2>&1 | tail -1; "
         f"sleep 2; "
         f"asterisk -rx 'pjsip send register bitcall-registration' 2>&1; "
-        f"asterisk -rx 'pjsip show registrations' 2>&1 | grep -i bitcall | head -1",
+        f"asterisk -rx 'pjsip show endpoint bitcall' 2>&1 | grep -E '^ allow|dtmf_mode' | head -5",
         timeout=55,
     ).strip()
 
@@ -645,6 +648,8 @@ exten => ivr,1,Answer()
  same => n,Set(TIMEOUT(digit)=5)
  same => n,Set(TIMEOUT(response)=45)
  same => n,Background(${{P1SOUND}})
+ same => n,Read(P1KEY,,1,,1,45)
+ same => n,GotoIf($["${{P1KEY}}" = "1"]?1,1)
  same => n,WaitExten(45)
  same => n,Hangup()
 
