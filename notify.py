@@ -68,8 +68,6 @@ ANNOUNCE_DEDUPE_SECONDS = 120
 
 ACTIVE_CALLS_DIGEST_SECONDS = 300
 
-LIVE_COUNT_REFRESH_LIMIT = 7
-
 TELEGRAM_SEND_QUEUE_KEY = "telegram_send_queue"
 TELEGRAM_SEND_WORKER_KEY = "telegram_send_worker"
 TELEGRAM_SEND_SEQ_KEY = "telegram_send_seq"
@@ -281,22 +279,13 @@ def _agent_name_only(link: ExtensionLink) -> str:
     return f"ext {html.escape(link.extension)}"
 
 
-def _live_calls_footer(count: int) -> str:
-    if count <= 0:
-        return ""
-    word = "call" if count == 1 else "calls"
-    return f"\n▪️ {count} active {word}"
-
-
 def format_on_phone_message(
     link: ExtensionLink,
     *,
     elapsed_seconds: int | None = None,
-    live_count: int | None = None,
 ) -> str:
     agent = _agent_name_only(link)
-    footer = _live_calls_footer(live_count) if live_count is not None else ""
-    return f"<blockquote>📞🟢 <b>{agent}</b> is on a call{footer}</blockquote>"
+    return f"<blockquote>📞🟢 <b>{agent}</b> is on a call</blockquote>"
 
 
 
@@ -326,7 +315,6 @@ def format_transfer_live_message(
     from_extension: str,
     to_link: ExtensionLink,
     elapsed_seconds: int | None = None,
-    live_count: int | None = None,
 ) -> str:
     to_label = _agent_name_only(to_link)
     from_label = (
@@ -334,9 +322,8 @@ def format_transfer_live_message(
         if from_link is not None
         else f"ext {html.escape(from_extension)}"
     )
-    footer = _live_calls_footer(live_count) if live_count is not None else ""
     return (
-        f"<blockquote>🔀 <b>{from_label}</b> → <b>{to_label}</b> is on a call{footer}</blockquote>"
+        f"<blockquote>🔀 <b>{from_label}</b> → <b>{to_label}</b> is on a call</blockquote>"
     )
 
 
@@ -729,100 +716,6 @@ def was_recent_transfer_out(bot_data: dict, extension: str) -> bool:
 
 
 
-def _live_call_text(live_call: LiveCall, live_count: int) -> str:
-
-    if live_call.call_kind == "transfer":
-
-        return format_transfer_live_message(
-
-            from_link=live_call.transfer_from_link,
-
-            from_extension=live_call.transfer_from_extension or "?",
-
-            to_link=live_call.link,
-
-            live_count=live_count,
-
-        )
-
-    return format_on_phone_message(
-        live_call.link,
-        live_count=live_count,
-    )
-
-
-def _on_call_refs_for_count_refresh(
-    live_calls: dict[str, LiveCall],
-    *,
-    limit: int = LIVE_COUNT_REFRESH_LIMIT,
-) -> list[tuple[LiveCall, int, int]]:
-    """Pick up to `limit` ON CALL messages to refresh with the active call total.
-
-    Single group: the newest N on-call posts in that chat.
-    Multiple groups: the newest on-call post in each of up to N chats.
-    """
-    active = [
-        live_call
-        for live_call in live_calls.values()
-        if not live_call.silent and live_call.message_ids
-    ]
-    if not active:
-        return []
-
-    chat_ids = {chat_id for live_call in active for chat_id in live_call.message_ids}
-    refs: list[tuple[LiveCall, int, int]] = []
-
-    if len(chat_ids) == 1:
-        active.sort(key=lambda live_call: live_call.started_at, reverse=True)
-        for live_call in active[:limit]:
-            for chat_id, message_id in live_call.message_ids.items():
-                refs.append((live_call, chat_id, message_id))
-        return refs
-
-    best_by_chat: dict[int, tuple[float, int, LiveCall]] = {}
-    for live_call in active:
-        for chat_id, message_id in live_call.message_ids.items():
-            entry = best_by_chat.get(chat_id)
-            if entry is None or live_call.started_at > entry[0]:
-                best_by_chat[chat_id] = (live_call.started_at, message_id, live_call)
-
-    ranked = sorted(
-        best_by_chat.items(),
-        key=lambda item: item[1][0],
-        reverse=True,
-    )[:limit]
-    for chat_id, (_started_at, message_id, live_call) in ranked:
-        refs.append((live_call, chat_id, message_id))
-    return refs
-
-
-async def _refresh_all_live_call_counts(bot, bot_data: dict) -> None:
-    """Re-edit recent ON CALL messages with the current active call total."""
-    live_calls = _live_calls(bot_data)
-    if not live_calls:
-        return
-
-    count = len(live_calls)
-    refs = _on_call_refs_for_count_refresh(live_calls)
-    if not refs:
-        return
-
-    async def _refresh_one(live_call: LiveCall, chat_id: int, message_id: int) -> None:
-        text = _live_call_text(live_call, count)
-        await _edit_one_live_message(
-            bot,
-            bot_data,
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-        )
-
-    await asyncio.gather(*(_refresh_one(lc, cid, mid) for lc, cid, mid in refs))
-
-
-
-
-
 def _live_call_final_text(live_call: LiveCall, duration: int) -> str:
 
     if live_call.call_kind == "transfer":
@@ -1012,7 +905,6 @@ async def _start_live_call(
             await asyncio.gather(*(_send_one(cid) for cid in chat_ids))
 
         await _send_initial()
-        await _refresh_all_live_call_counts(bot, bot_data)
     except Exception:
         live_calls.pop(extension, None)
         raise
@@ -1122,7 +1014,6 @@ async def _stop_live_call(
             )
 
     if live_call.silent:
-        await _refresh_all_live_call_counts(bot, bot_data)
         return live_call
 
     if live_call.message_ids:
@@ -1166,8 +1057,6 @@ async def _stop_live_call(
             bot_data,
             text=final_text,
         )
-
-    await _refresh_all_live_call_counts(bot, bot_data)
 
     return live_call
 
@@ -1277,10 +1166,7 @@ async def announce_call_started(
 
             link=link,
 
-            initial_text=format_on_phone_message(
-                link,
-                live_count=len(_live_calls(bot_data)) + 1,
-            ),
+            initial_text=format_on_phone_message(link),
 
             caller_name=caller_name,
 
@@ -1505,8 +1391,6 @@ async def announce_transfer_received(
             from_extension=from_extension,
 
             to_link=to_link,
-
-            live_count=len(_live_calls(bot_data)) + 1,
 
         ),
 
