@@ -1353,23 +1353,50 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path], run_id: str | None =
 
 
 def _place_call_file(digits: str, cid: str) -> None:
-    """Originate one outbound call. Success = the call is actually going out (ringing or
-    answered); we do NOT require the callee to answer within a fixed window, and we do NOT
-    hang up other BitCall channels (the trunk handles high concurrency — 200+ concurrent)."""
-    # Synchronous originate (same proven path the campaign dialer uses). Keeping the SSH
-    # session open for the call's duration is what lets it ring properly — backgrounding it
-    # makes Asterisk CANCEL the INVITE and cut the ring short. We do NOT hang up other
-    # BitCall channels first (trunk handles 200+ concurrent, it is not a 1-line trunk).
+    """Originate one test call and VERIFY it actually reaches the carrier (Ringing/Up).
+
+    The CLI 'channel originate ... extension' returns immediately with empty output even when
+    BitCall later rejects the call asynchronously (most commonly '403 Call Loop Detected' when
+    the same number is dialed repeatedly in a short window). Trusting that empty output is why
+    the bot reported "placed" for calls that never came through. Instead we snapshot existing
+    BitCall legs, originate, then poll for a NEW outbound leg reaching Ringing/Up. Loop/flood
+    rejections are transient, so we pause and retry once before giving up with the real reason.
+    This path is used ONLY by /testcall, never by bulk campaigns."""
     orig = f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}"
+    # POSIX-sh probe: only a brand-new bitcall leg in Ring/Ringing/Up counts as delivered.
+    probe = (
+        "TMP=/tmp/p1_tc_before.$$; "
+        "asterisk -rx 'core show channels concise' 2>/dev/null | "
+        "grep -oE '^PJSIP/bitcall-[0-9a-f]+' | sort -u > $TMP; "
+        f"asterisk -rx {shlex.quote(orig)} >/dev/null 2>&1; "
+        "PLACED=NO; i=0; "
+        "while [ $i -lt 12 ]; do i=$((i+1)); sleep 1; "
+        "NEW=$(asterisk -rx 'core show channels concise' 2>/dev/null | "
+        "grep -iE '![[:space:]]*(Up|Ring|Ringing)[[:space:]]*!' | "
+        "grep -oE '^PJSIP/bitcall-[0-9a-f]+' | grep -vxF -f $TMP); "
+        "if [ -n \"$NEW\" ]; then PLACED=YES; break; fi; done; "
+        "rm -f $TMP; echo PLACED=$PLACED"
+    )
     try:
-        out = run_remote(f"asterisk -rx {shlex.quote(orig)} 2>&1", timeout=45).strip()
+        out = run_remote(probe, timeout=30).strip()
     except Exception:
-        # SSH read timed out while the call was still ringing/connected on the server — the
-        # call is placed and ringing, which is success for our purposes.
+        # SSH read timed out while the call was still live — that means it is ringing/connected.
         return
-    # Only an explicit routing/allocation failure is a real error. An un-answered call is not.
-    if out and re.search(r"\b(no such|unable|rejected|congestion|unallocated|invalid|no route)\b", out, re.I):
-        raise RuntimeError(out)
+    if "PLACED=YES" in out:
+        return
+    # Transient carrier rejection (loop/flood guard) — pause so BitCall's guard resets, retry once.
+    time.sleep(15)
+    try:
+        out = run_remote(probe, timeout=30).strip()
+    except Exception:
+        return
+    if "PLACED=YES" in out:
+        return
+    raise RuntimeError(
+        f"Call to {digits} was accepted by Asterisk but never reached the carrier — most likely "
+        f"a temporary BitCall rejection (e.g. 'Call Loop Detected') from dialing the same number "
+        f"repeatedly. Wait ~30s and try again, or test a different number."
+    )
 
 
 def originate_press1(phone: str, chat_id: int | None = None) -> str:
