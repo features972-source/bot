@@ -39,6 +39,9 @@ CPS = int(os.getenv("VICIDIAL_CPS", "30"))
 # Stable outbound caller ID for BitCall (required — empty CLI causes instant hangup).
 DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038969244")) or "442038969244"
 AU_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_AU_CALLER_ID", DEFAULT_CALLER_ID)) or DEFAULT_CALLER_ID
+BITCALL_SIP_USER = os.getenv("BITCALL_SIP_USER", "f-features896").strip()
+BITCALL_SIP_PASSWORD = os.getenv("BITCALL_SIP_PASSWORD", "").strip()
+BITCALL_SIP_REALM = os.getenv("BITCALL_SIP_REALM", "gateway.bitcall.io").strip()
 MIN_PHONE_DIGITS = 9
 
 
@@ -491,28 +494,70 @@ def unstick_dial_server() -> str:
 
 
 def fix_bitcall_endpoint() -> str:
-    """Rebuild BitCall PJSIP (dedupe sections, fix realm, reload + re-register)."""
+    """Rebuild BitCall PJSIP, apply credentials, clear rejection, re-register."""
+    import base64
+
     trunk = _PJSIP_TRUNK_STABILITY.replace("\n", "\\n")
+    creds = base64.b64encode(
+        json.dumps(
+            {
+                "user": BITCALL_SIP_USER,
+                "password": BITCALL_SIP_PASSWORD,
+                "realm": BITCALL_SIP_REALM,
+            }
+        ).encode()
+    ).decode()
     return run_remote(
         f"python3 <<'PY'\n"
-        f"import re\nfrom pathlib import Path\n"
+        f"import re, json, base64\nfrom pathlib import Path\n"
+        f"creds = json.loads(base64.b64decode('{creds}').decode())\n"
+        f"user = creds['user'] or 'f-features896'\n"
+        f"realm = creds['realm'] or 'gateway.bitcall.io'\n"
         f"p = Path('{PJSIP_CONF}')\n"
         f"text = p.read_text()\n"
         f"def grab(name):\n"
         f"    m = re.search(rf'\\[{{re.escape(name)}}\\][\\s\\S]*?(?=\\n\\[|\\Z)', text)\n"
         f"    return m.group(0) if m else ''\n"
-        f"auth = grab('bitcall-auth')\n"
-        f"aor = grab('bitcall-aor')\n"
-        f"reg = grab('bitcall-registration')\n"
-        f"ident = grab('bitcall-identify')\n"
-        f"if auth:\n"
-        f"    auth = re.sub(r'^realm=.*$', 'realm=gateway.bitcall.io', auth, flags=re.M)\n"
-        f"    if 'realm=' not in auth:\n"
-        f"        auth = auth.replace('type=auth', 'type=auth\\nrealm=gateway.bitcall.io', 1)\n"
-        f"    auth = re.sub(r'realm=sippysoft\\.com', 'realm=gateway.bitcall.io', auth)\n"
-        f"def g(old, key, default=''):\n"
-        f"    m = re.search(rf'^{{key}}=(.*)$', old, re.M)\n"
+        f"def g(block, key, default=''):\n"
+        f"    m = re.search(rf'^{{key}}=(.*)$', block, re.M)\n"
         f"    return (m.group(1).strip() if m else default)\n"
+        f"old_auth = grab('bitcall-auth')\n"
+        f"password = creds.get('password') or g(old_auth, 'password', '')\n"
+        f"if not password:\n"
+        f"    raise SystemExit('no bitcall password — set BITCALL_SIP_PASSWORD')\n"
+        f"auth = (\n"
+        f"    '[bitcall-auth]\\n'\n"
+        f"    'type=auth\\n'\n"
+        f"    'auth_type=userpass\\n'\n"
+        f"    f'username={{user}}\\n'\n"
+        f"    f'password={{password}}\\n'\n"
+        f"    f'realm={{realm}}\\n'\n"
+        f")\n"
+        f"aor = (\n"
+        f"    '[bitcall-aor]\\n'\n"
+        f"    'type=aor\\n'\n"
+        f"    'contact=sip:gateway.bitcall.io\\n'\n"
+        f"    'qualify_frequency=60\\n'\n"
+        f")\n"
+        f"ident = grab('bitcall-identify') or (\n"
+        f"    '[bitcall-identify]\\n'\n"
+        f"    'type=identify\\n'\n"
+        f"    'endpoint=bitcall\\n'\n"
+        f"    'match=gateway.bitcall.io\\n'\n"
+        f")\n"
+        f"reg = (\n"
+        f"    '[bitcall-registration]\\n'\n"
+        f"    'type=registration\\n'\n"
+        f"    'transport=transport-udp\\n'\n"
+        f"    'outbound_auth=bitcall-auth\\n'\n"
+        f"    'endpoint=bitcall\\n'\n"
+        f"    f'server_uri=sip:{{realm}}\\n'\n"
+        f"    f'client_uri=sip:{{user}}@{{realm}}\\n'\n"
+        f"    f'contact_user={{user}}\\n'\n"
+        f"    'expiration=3600\\n'\n"
+        f"    'retry_interval=60\\n'\n"
+        f"    'forbidden_retry_interval=0\\n'\n"
+        f")\n"
         f"old = grab('bitcall')\n"
         f"endpoint = (\n"
         f"    '[bitcall]\\n'\n"
@@ -521,8 +566,8 @@ def fix_bitcall_endpoint() -> str:
         f"    'context=from-trunk\\n'\n"
         f"    'disallow=all\\n'\n"
         f"    'allow=ulaw,alaw,telephone-event\\n'\n"
-        f"    f'from_user={{g(old, \"from_user\", \"f-features896\")}}\\n'\n"
-        f"    f'from_domain={{g(old, \"from_domain\", \"gateway.bitcall.io\")}}\\n'\n"
+        f"    f'from_user={{user}}\\n'\n"
+        f"    f'from_domain={{realm}}\\n'\n"
         f"    'outbound_auth=bitcall-auth\\n'\n"
         f"    'aors=bitcall-aor\\n'\n"
         f"    '{trunk}\\n'\n"
@@ -532,17 +577,19 @@ def fix_bitcall_endpoint() -> str:
         f"    '100rel=no\\n'\n"
         f"    'inband_progress=no\\n'\n"
         f")\n"
-        f"text = re.sub(r'\\[bitcall[^\\]]*\\][\\s\\S]*?(?=\\n\\[|\\Z)', '', text)\n"
+        f"for name in ('bitcall-auth', 'bitcall-aor', 'bitcall', 'bitcall-identify', 'bitcall-registration'):\n"
+        f"    text = re.sub(rf'\\[{{re.escape(name)}}\\][\\s\\S]*?(?=\\n\\[|\\Z)', '', text)\n"
         f"text = re.sub(r'\\n{{3,}}', '\\n\\n', text).rstrip() + '\\n\\n'\n"
-        f"parts = [x for x in (auth, aor, endpoint, ident, reg) if x.strip()]\n"
-        f"p.write_text(text + '\\n'.join(parts) + '\\n')\n"
+        f"p.write_text(text + '\\n'.join([auth, aor, endpoint, ident, reg]) + '\\n')\n"
         f"print('OK: bitcall pjsip rebuilt')\n"
         f"PY\n"
+        f"asterisk -rx 'pjsip send unregister bitcall-registration' 2>&1; "
         f"asterisk -rx 'module reload res_pjsip.so' 2>&1 | tail -1; "
-        f"sleep 2; "
+        f"sleep 3; "
         f"asterisk -rx 'pjsip send register bitcall-registration' 2>&1; "
-        f"asterisk -rx 'pjsip show endpoint bitcall' 2>&1 | grep -E '^ allow|dtmf_mode' | head -5",
-        timeout=55,
+        f"sleep 4; "
+        f"asterisk -rx 'pjsip show registrations' 2>&1 | grep -i bitcall | head -1",
+        timeout=75,
     ).strip()
 
 
@@ -1052,11 +1099,11 @@ def add_leads(phones: list[str]) -> int:
 
 
 def ping() -> str:
-    """Liveness + BitCall endpoint check (registration optional; outbound uses gateway contact)."""
+    """Liveness + BitCall registration status."""
     return run_remote(
         "echo ok; "
-        "asterisk -rx 'pjsip show endpoint bitcall' 2>&1 | grep -E '^Endpoint:|^ allow' | head -3; "
-        "asterisk -rx 'pjsip show aor bitcall-aor' 2>&1 | grep -i contact | head -1",
+        "asterisk -rx 'pjsip show registrations' 2>&1 | grep -i bitcall | head -1; "
+        "asterisk -rx 'pjsip show endpoint bitcall' 2>&1 | grep -E '^Endpoint:' | head -1",
         timeout=20,
     )
 

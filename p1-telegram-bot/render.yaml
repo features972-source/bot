@@ -52,3 +52,9 @@ services:
         sync: false
       - key: VICIDIAL_SSH_KEY
         sync: false
+      - key: BITCALL_SIP_USER
+        value: f-features896
+      - key: BITCALL_SIP_PASSWORD
+        sync: false
+      - key: BITCALL_SIP_REALM
+        value: gateway.bitcall.io
