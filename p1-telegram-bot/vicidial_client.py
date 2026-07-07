@@ -588,6 +588,9 @@ def _press1_ivr_dialplan(*, server_ip: str, default_sound: str, default_xfer: st
     """Canonical press1-ivr: per-run sound/xfer from Asterisk DB."""
     return f"""[press1-ivr]
 exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
+ same => n,Set(__LEADNUM=${{LEADNUM}})
+ same => n,Set(P1UID=${{CHANNEL(uniqueid)}})
+ same => n,Set(GLOBAL(P1LEAD_${{P1UID}})=${{LEADNUM}})
  same => n,Goto(ivr,1)
 
 exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{LEADNUM}})}})
@@ -610,8 +613,8 @@ exten => ivr,1,Answer()
  same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
- same => n,Read(P1DTMF,${{P1SOUND}},1,,1,45)
- same => n,GotoIf($["${{P1DTMF}}" = "1"]?1,1)
+ same => n,Playback(${{P1SOUND}})
+ same => n,Wait(45)
  same => n,Hangup()
 
 exten => hang,1,Hangup()
@@ -677,7 +680,7 @@ def ensure_press1_dialplan() -> str:
         f"print('OK: press1-ivr dialplan')\n"
         f"PY\n"
         f"asterisk -rx 'dialplan reload' >/dev/null; "
-        f"asterisk -rx 'dialplan show ivr@press1-ivr' | grep -E 'Background|WaitExten' | head -3",
+        f"asterisk -rx 'dialplan show ivr@press1-ivr' | grep -E 'Playback|Wait' | head -3",
         timeout=60,
     )
     return out.strip()
@@ -855,6 +858,7 @@ Context: press1-ivr
 Extension: NUMPLACEHOLDER
 Priority: 1
 Setvar: LEADNUM=NUMPLACEHOLDER
+Setvar: __LEADNUM=NUMPLACEHOLDER
 CALLBODY
   }} | sed "s/NUMPLACEHOLDER/${{num}}/g" > "$callfile"
   if chown asterisk:asterisk "$callfile" 2>/dev/null && chmod 0640 "$callfile" 2>/dev/null && mv "$callfile" "$SPOOLDIR/" 2>>"$LOG"
@@ -1286,6 +1290,7 @@ def _place_call_file(digits: str, cid: str) -> None:
         f"    'MaxRetries: 0\\nWaitTime: 45\\n'\n"
         f"    f'Context: press1-ivr\\nExtension: {{digits}}\\nPriority: 1\\n'\n"
         f"    f'Setvar: LEADNUM={{digits}}\\n'\n"
+        f"    f'Setvar: __LEADNUM={{digits}}\\n'\n"
         f")\n"
         f"name = f'press1_test_{{digits}}.call'\n"
         f"tmp = Path('/var/spool/asterisk/tmp') / name\n"

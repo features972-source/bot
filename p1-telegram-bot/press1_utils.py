@@ -121,17 +121,11 @@ def parse_csv(content: bytes) -> list[str]:
 
 
 def convert_audio_for_asterisk(src: Path, dest_dir: Path, stem: str) -> dict[str, Path]:
-    """Convert to 8 kHz telephony formats — clean band-limited audio without clipping."""
+    """Convert to 8 kHz telephony formats — band-limited, no dynamic processing (avoids crackle)."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     wav = dest_dir / f"{stem}.wav"
-    # Phone band + gentle dynamics; no heavy gain boost (avoids crackle/distortion).
-    af = (
-        "aresample=48000:resampler=soxr:precision=28,"
-        "highpass=f=100,lowpass=f=3600,"
-        "dynaudnorm=f=150:g=12:maxgain=8,"
-        "alimiter=limit=0.92:attack=5:release=80:level=0,"
-        "aresample=8000:resampler=soxr:precision=28"
-    )
+    # Single resample + phone band; skip dynaudnorm/limiter (they cause pumping/crackle on IVR).
+    af = "aresample=8000:resampler=soxr:precision=28,highpass=f=200,lowpass=f=3400"
     proc = subprocess.run(
         [
             "ffmpeg", "-y", "-i", str(src),
