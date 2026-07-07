@@ -1349,12 +1349,41 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path], run_id: str | None =
     return sound_name
 
 
+def _hangup_bitcall_channels() -> None:
+    """Free BitCall capacity — stale IVR channels block new test calls (1-line trunk)."""
+    try:
+        run_remote(
+            "asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | "
+            "cut -d'!' -f1 | while read -r ch; do "
+            "  [ -n \"$ch\" ] && asterisk -rx \"channel request hangup $ch\" 2>/dev/null; "
+            "done; echo ok",
+            timeout=20,
+        )
+    except Exception:
+        pass
+
+
 def _place_call_file(digits: str, cid: str) -> None:
     """Originate one test call directly (call-file spool was expiring)."""
+    _hangup_bitcall_channels()
     cmd = f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}"
     out = run_remote(f"asterisk -rx {shlex.quote(cmd)} 2>&1", timeout=25).strip()
-    if out and re.search(r"error|failed|reject|unable", out, re.I):
+    if out and re.search(r"\b(error|reject|unable)\b", out, re.I):
         raise RuntimeError(out)
+    check = run_remote(
+        "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do "
+        "asterisk -rx 'core show channels concise' 2>/dev/null | "
+        "grep '^PJSIP/bitcall-' | grep -q '!Up!' && echo CONNECTED && exit 0; "
+        "sleep 1; done; "
+        "asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | head -2; "
+        "echo NOT_CONNECTED",
+        timeout=25,
+    ).strip()
+    if "CONNECTED" not in check:
+        detail = check.splitlines()[-1] if check else "no channel"
+        raise RuntimeError(
+            f"Call to {digits} did not connect (BitCall busy or unreachable). {detail}"
+        )
 
 
 def originate_press1(phone: str, chat_id: int | None = None) -> str:
