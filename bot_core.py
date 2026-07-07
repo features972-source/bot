@@ -35,10 +35,6 @@ from queue_alert import queue_alert_loop
 from milestone import milestone_loop
 from handlers.blast import blast_content_trigger, blast_domain_trigger
 from handlers.attendance import seed_attendance_reset
-from handlers.pass_queue import (
-    build_pass_queue_handlers,
-    pass_repost_loop,
-)
 from payments_excel_export import schedule_payments_excel_sync
 from threex_token import get_token_holder
 from threex_ws import ASYNCIO_LOOP_KEY
@@ -125,11 +121,6 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
             ready_check_shift_loop(app.bot, settings, app.bot_data),
             name=f"ready-check-{instance_id}",
         )
-        if not settings.credo_only_mode:
-            asyncio.create_task(
-                pass_repost_loop(app.bot, settings, app.bot_data),
-                name=f"pass-repost-{instance_id}",
-            )
         from onedrive_cloud_sync import remember_excel_web_url
         from handlers.payment_reports import refresh_payment_report
 
@@ -181,9 +172,6 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         tg_app.add_handler(handler, group=-1)
     for handler in build_payment_message_handlers():
         tg_app.add_handler(handler, group=-1)
-    if not settings.credo_only_mode:
-        for handler in build_pass_queue_handlers():
-            tg_app.add_handler(handler)
     for handler in build_mailer_handlers():
         tg_app.add_handler(handler, group=-1)
     for handler in build_admin_handlers():
