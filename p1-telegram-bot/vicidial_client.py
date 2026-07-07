@@ -477,6 +477,19 @@ def cleanup_stale_dialers(chat_id: int | None = None) -> str:
     return run_remote(" ; ".join(parts), timeout=25)
 
 
+def unstick_dial_server() -> str:
+    """Clear stale spool files and stuck dialers so new test/campaign calls are not blocked."""
+    return run_remote(
+        "pkill -9 -f '/tmp/press1_dial_' 2>/dev/null || true; "
+        "pkill -9 -f 'press1_dial_run.sh' 2>/dev/null || true; "
+        "find /var/spool/asterisk/outgoing -name 'press1_*.call' -delete 2>/dev/null || true; "
+        "find /var/spool/asterisk/tmp -name 'press1_*.call' -delete 2>/dev/null || true; "
+        "rm -f /tmp/press1_dial.lock /tmp/press1_dial_stop 2>/dev/null || true; "
+        "echo cleared",
+        timeout=25,
+    ).strip()
+
+
 def fix_bitcall_endpoint() -> str:
     """Normalize [bitcall] PJSIP endpoint — fixes duplicate allow= lines that break outbound dials."""
     trunk = _PJSIP_TRUNK_STABILITY.replace("\n", "\\n")
@@ -499,7 +512,9 @@ def fix_bitcall_endpoint() -> str:
         f"    'transport=transport-udp\\n'\n"
         f"    'context=from-trunk\\n'\n"
         f"    'disallow=all\\n'\n"
-        f"    'allow=ulaw,alaw,telephone-event\\n'\n"
+        f"    'allow=ulaw\\n'\n"
+        f"    'allow=alaw\\n'\n"
+        f"    'allow=telephone-event\\n'\n"
         f"    f'from_user={{grab(\"from_user\", \"f-features896\")}}\\n'\n"
         f"    f'from_domain={{grab(\"from_domain\", \"gateway.bitcall.io\")}}\\n'\n"
         f"    f'outbound_auth={{grab(\"outbound_auth\", \"bitcall-auth\")}}\\n'\n"
@@ -523,6 +538,10 @@ def fix_bitcall_endpoint() -> str:
 def repair_press1_server(chat_id: int | None = None, *, stop_stale: bool = False) -> dict[str, str]:
     """Re-deploy dialplan/DTMF; optionally stop stale dialers for one chat."""
     result: dict[str, str] = {}
+    try:
+        result["unstick"] = unstick_dial_server()
+    except Exception as e:
+        result["unstick"] = f"error: {e}"
     try:
         result["bitcall"] = fix_bitcall_endpoint()
     except Exception as e:
@@ -613,8 +632,10 @@ exten => ivr,1,Answer()
  same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
- same => n,Playback(${{P1SOUND}})
- same => n,Wait(45)
+ same => n,Set(TIMEOUT(digit)=5)
+ same => n,Set(TIMEOUT(response)=45)
+ same => n,Background(${{P1SOUND}})
+ same => n,WaitExten(45)
  same => n,Hangup()
 
 exten => hang,1,Hangup()
@@ -680,7 +701,7 @@ def ensure_press1_dialplan() -> str:
         f"print('OK: press1-ivr dialplan')\n"
         f"PY\n"
         f"asterisk -rx 'dialplan reload' >/dev/null; "
-        f"asterisk -rx 'dialplan show ivr@press1-ivr' | grep -E 'Playback|Wait' | head -3",
+        f"asterisk -rx 'dialplan show ivr@press1-ivr' | grep -E 'Background|WaitExten' | head -3",
         timeout=60,
     )
     return out.strip()
@@ -1287,10 +1308,15 @@ def _place_call_file(digits: str, cid: str) -> None:
         f"body = (\n"
         f"    f'Channel: PJSIP/{{digits}}@bitcall\\n'\n"
         f"    f'CallerID: \"{{cid}}\" <{{cid}}>\\n'\n"
-        f"    'MaxRetries: 0\\nWaitTime: 45\\n'\n"
-        f"    f'Context: press1-ivr\\nExtension: {{digits}}\\nPriority: 1\\n'\n"
+        f"    'MaxRetries: 0\\n'\n"
+        f"    'RetryTime: 60\\n'\n"
+        f"    'WaitTime: 45\\n'\n"
+        f"    f'Context: press1-ivr\\n'\n"
+        f"    f'Extension: {{digits}}\\n'\n"
+        f"    'Priority: 1\\n'\n"
         f"    f'Setvar: LEADNUM={{digits}}\\n'\n"
         f"    f'Setvar: __LEADNUM={{digits}}\\n'\n"
+        f"    'Archive: yes\\n'\n"
         f")\n"
         f"name = f'press1_test_{{digits}}.call'\n"
         f"tmp = Path('/var/spool/asterisk/tmp') / name\n"
@@ -1318,11 +1344,17 @@ def originate_press1(phone: str, chat_id: int | None = None) -> str:
     digits = to_e164(phone) or re.sub(r"\D", "", phone)
     if len(digits) < MIN_PHONE_DIGITS + 2:
         raise ValueError(f"invalid number: {phone!r}")
+    try:
+        unstick_dial_server()
+    except Exception:
+        pass
     if chat_id is not None:
         apply_lead_run_config(digits, chat_id)
     else:
         _put_press1_db_entries({"lead": digits, f"lead/{digits}": digits})
     cid = outbound_caller_id(digits)
+    if not cid:
+        raise RuntimeError("No outbound caller ID configured (VICIDIAL_AU_CALLER_ID)")
     _place_call_file(digits, cid)
     return digits
 

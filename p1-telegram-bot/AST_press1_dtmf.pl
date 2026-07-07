@@ -45,11 +45,11 @@ my %chan_ext;
 sub ivr_active {
     my ($chan) = @_;
     my $ctx = $chan_ctx{$chan} // '';
-    return 0 unless $ctx eq 'press1-ivr';
     my $app = $chan_app{$chan} // '';
     return 0 if $app =~ /Dial/i;
     my $ext = $chan_ext{$chan} // '';
-    return 0 if $ext =~ /^(?:xfer|xferdial|hang|1)$/i;
+    return 0 if $ext =~ /^(?:xfer|xferdial|hang)$/i;
+    return 0 if $ctx ne '' && $ctx ne 'press1-ivr';
     return 1;
 }
 
@@ -68,7 +68,6 @@ sub try_xfer_on_one {
         Exten    => '1',
         Priority => '1',
     );
-    # Do not read AMI response here — mixed reads corrupt the event loop.
     logmsg("Redirect sent for $chan");
 }
 
@@ -109,25 +108,30 @@ while (1) {
             next;
         }
 
-        if ($evn eq 'DTMFEnd') {
+        if ($evn =~ /^(?:DTMF|DTMFBegin|DTMFEnd)$/) {
             my $digit = $ev{Digit} // '';
             next unless length $digit;
 
-            try_xfer_on_one($sock, $chan) if $digit eq '1';
+            $chan_ctx{$chan} = $ev{Context} if defined $ev{Context} && $ev{Context} ne '';
+            $chan_ext{$chan}  = $ev{Exten}   if defined $ev{Exten}   && $ev{Exten} ne '';
+
+            try_xfer_on_one($sock, $chan) if $digit eq '1' && $evn eq 'DTMFEnd';
 
             my $lead = $lead_cache{$chan} // '';
             $lead =~ s/\D//g if $lead;
             $digits{$chan} //= '';
-            $digits{$chan} .= $digit;
-            emit_event(
-                t    => int(time()),
-                e    => 'digit',
-                c    => $chan,
-                lead => $lead,
-                d    => $digit,
-                seq  => $digits{$chan},
-            );
-            logmsg("captured $digit on $chan lead=$lead seq=$digits{$chan}");
+            $digits{$chan} .= $digit if $evn eq 'DTMFEnd';
+            if ($evn eq 'DTMFEnd') {
+                emit_event(
+                    t    => int(time()),
+                    e    => 'digit',
+                    c    => $chan,
+                    lead => $lead,
+                    d    => $digit,
+                    seq  => $digits{$chan},
+                );
+                logmsg("captured $digit on $chan lead=$lead seq=$digits{$chan}");
+            }
             next;
         }
 
