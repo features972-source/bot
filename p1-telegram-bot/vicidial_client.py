@@ -1710,6 +1710,13 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         f"pkill -9 -f '{paths['script']}' 2>/dev/null; true; "
         f"sleep 1; "
         f"rm -f {paths['stop']}; rm -f {paths['pause']}; "
+        # Safety net: raise Asterisk's open-file limit before a high-concurrency run. The default
+        # soft limit (1024) is exhausted by a few hundred concurrent RTP legs, and once FDs run out
+        # SQLite can't open the astdb -> DB(press1/leadxfer/...) reads return empty -> a caller can
+        # press 1 but P1XFER is blank so the transfer silently dies. This is applied live (no
+        # restart) and is idempotent.
+        f"AST_PID=$(pgrep -x asterisk | head -1); "
+        f"if [ -n \"$AST_PID\" ]; then prlimit --pid $AST_PID --nofile=65536:524288 2>/dev/null; fi; "
         # Safety valve: if per-lead routing keys have bloated (they accumulate one row per
         # unique number ever dialed), clear them so SQLite stops throwing 'unable to open
         # database file' under concurrency. The dialer rewrites each lead's keys just-in-time
