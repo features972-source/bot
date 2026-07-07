@@ -520,9 +520,7 @@ def fix_bitcall_endpoint() -> str:
         f"    'transport=transport-udp\\n'\n"
         f"    'context=from-trunk\\n'\n"
         f"    'disallow=all\\n'\n"
-        f"    'allow=ulaw\\n'\n"
-        f"    'allow=alaw\\n'\n"
-        f"    'allow=telephone-event\\n'\n"
+        f"    'allow=ulaw,alaw,telephone-event\\n'\n"
         f"    f'from_user={{g(old, \"from_user\", \"f-features896\")}}\\n'\n"
         f"    f'from_domain={{g(old, \"from_domain\", \"gateway.bitcall.io\")}}\\n'\n"
         f"    'outbound_auth=bitcall-auth\\n'\n"
@@ -530,7 +528,7 @@ def fix_bitcall_endpoint() -> str:
         f"    '{trunk}\\n'\n"
         f"    'trust_id_outbound=yes\\n'\n"
         f"    'send_pai=yes\\n'\n"
-        f"    'dtmf_mode=rfc4733\\n'\n"
+        f"    'dtmf_mode=auto\\n'\n"
         f"    '100rel=no\\n'\n"
         f"    'inband_progress=no\\n'\n"
         f")\n"
@@ -611,6 +609,7 @@ def _dialplan_resolve_xfer(*, default_sound: str, default_xfer: str, allow_defau
     return f""" same => n,Set(P1RUN=${{IF($[${{LEN(${{P1RUN}})}}>0]?${{P1RUN}}:${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}})}})
  same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
  same => n,Set(P1XFER=${{DB(press1/leadxfer/${{FILTER(0-9,${{LEADNUM}})}})}})
+ same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER=${{GLOBAL(P1XFER_${{P1UID}})}}))
  same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER=${{DB(press1/cfg/${{P1RUN}}/xfer)}}))
  same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND=${{DB(press1/cfg/${{P1RUN}}/sound)}}))
  same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND={default_sound})){xfer_fallback}"""
@@ -645,22 +644,24 @@ exten => ivr,1,Answer()
  same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
+ same => n,Set(GLOBAL(P1XFER_${{P1UID}})=${{P1XFER}})
  same => n,Set(TIMEOUT(digit)=5)
  same => n,Set(TIMEOUT(response)=45)
  same => n,Background(${{P1SOUND}})
- same => n,Read(P1KEY,,1,,1,45)
- same => n,GotoIf($["${{P1KEY}}" = "1"]?1,1)
  same => n,WaitExten(45)
  same => n,Hangup()
 
 exten => hang,1,Hangup()
 
-exten => 1,1,NoOp(Press-1 from ${{CALLERID(num)}} lead=${{LEADNUM}})
+exten => 1,1,StopPlaytones()
+ same => n,NoOp(Press-1 from ${{CALLERID(num)}} lead=${{LEADNUM}})
 {_dialplan_resolve_leadnum()}
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
  same => n,Goto(xfer,1)
 
 exten => xfer,1,NoOp(Press1 xfer lead ${{LEADNUM}} to ${{P1XFER}})
+{_dialplan_resolve_leadnum()}
+{_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
  same => n,StopPlaytones()
  same => n,GotoIf($[${{LEN(${{LEADNUM}})}}<10]?xferdial,1)
  same => n,Set(CIDNUM=+${{LEADNUM}})
@@ -681,7 +682,7 @@ exten => xferdial,1,StopPlaytones()
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
  same => n,NoOp(XFER lead=${{LEADNUM}} run=${{P1RUN}} dest=${{P1XFER}})
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/press1 &' )
- same => n,Dial(${{P1XFER}},,Tr)
+ same => n,Dial(${{P1XFER}},120,Tr)
  same => n,Hangup()
 
 exten => t,1,Hangup()
@@ -1695,10 +1696,6 @@ def test_calls(numbers: list[str] | None = None, chat_id: int | None = None) -> 
     nums = numbers or test_numbers()
     if not nums:
         raise RuntimeError("No test numbers configured — set VICIDIAL_TEST_NUMBERS on Render")
-    try:
-        repair_press1_server()
-    except Exception:
-        pass
     placed: list[str] = []
     errors: list[str] = []
     for num in nums:

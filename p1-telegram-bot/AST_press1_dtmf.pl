@@ -42,8 +42,8 @@ my %chan_app;
 
 sub xfer_allowed {
     my ($chan) = @_;
-    my $app = $chan_app{$chan} // '';
-    return 0 if $app =~ /Dial/i;
+    my $app = lc($chan_app{$chan} // '');
+    return 0 if $app =~ /dial/i;
     return 1;
 }
 
@@ -68,7 +68,7 @@ sub try_xfer_on_one {
 while (1) {
     my $sock = IO::Socket::INET->new(PeerAddr=>$host, PeerPort=>$port, Proto=>'tcp', Timeout=>10);
     unless ($sock) { logmsg("AMI connect failed: $!"); sleep 5; next; }
-    ami_send($sock, 'Login', Username=>$user, Secret=>$pass, Events=>'call,dtmf,dtmfbegin,dtmfend');
+    ami_send($sock, 'Login', Username=>$user, Secret=>$pass, Events=>'call,dtmf');
     my $buf = ''; my $li = 0;
     logmsg("AMI connected (call+dtmf)");
     while (my $line = <$sock>) {
@@ -100,17 +100,17 @@ while (1) {
             next;
         }
 
-        if ($evn =~ /^(?:DTMF|DTMFBegin|DTMFEnd)$/i) {
-            my $digit = $ev{Digit} // '';
+        if ($evn =~ /^(?:DTMF|DTMFBegin|DTMFEnd|ChannelDtmfReceived)$/i) {
+            my $digit = $ev{Digit} // $ev{DigitReceived} // '';
             next unless length $digit;
 
             try_xfer_on_one($sock, $chan) if $digit eq '1';
 
-            if ($evn =~ /End$/i) {
+            if ($evn =~ /(?:End|Received)$/i || $evn eq 'DTMF') {
                 my $lead = $lead_cache{$chan} // '';
                 $lead =~ s/\D//g if $lead;
                 $digits{$chan} //= '';
-                $digits{$chan} .= $digit;
+                $digits{$chan} .= $digit unless $digits{$chan} =~ /$digit$/;
                 emit_event(
                     t    => int(time()),
                     e    => 'digit',
