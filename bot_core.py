@@ -40,6 +40,9 @@ from threex_ws import ASYNCIO_LOOP_KEY
 
 logger = logging.getLogger(__name__)
 
+# Visible at /health — bump when Q1 group-bot behaviour changes.
+Q1_BUILD = "q1-no-pass-notes-v44"
+
 
 @dataclass
 class BotRuntime:
@@ -61,6 +64,13 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         logger.info("[%s] Using persistent database at %s", instance_id, settings.database_path)
 
     init_db(settings.database_path)
+    from database import clear_circulating_pass_notes
+
+    cleared = clear_circulating_pass_notes(settings.database_path)
+    if any(cleared.values()):
+        logger.info("[%s] Cleared stale pass/notes state: %s", instance_id, cleared)
+    logger.info("[%s] Pass/notes queue disabled (%s)", instance_id, Q1_BUILD)
+
     stored_notify_chat_id = get_notify_chat_id(settings.database_path)
     if stored_notify_chat_id is not None:
         runtime_notify_chat_id = stored_notify_chat_id

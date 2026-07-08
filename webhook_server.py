@@ -22,7 +22,11 @@ from listen_stream import (
 from notify import announce_call_ended, announce_call_started
 from threex_api import admin_extension
 
+from bot_core import Q1_BUILD
+
 logger = logging.getLogger(__name__)
+
+# Bump when Q1 behaviour changes — visible at /health so we can confirm Render deployed.
 
 ANSWER_EVENTS = {
     "answered",
@@ -105,6 +109,8 @@ def _start_webhook_app(
         return {
             "id": runtime.instance_id,
             "bot": settings.bot_display_name,
+            "build": Q1_BUILD,
+            "pass_notes_enabled": False,
             "database_path": settings.database_path,
             "notify_chat_id": notify_id,
             "payments_logged": payment_count,
