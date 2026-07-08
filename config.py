@@ -215,7 +215,22 @@ def load_settings(env_prefix: str = "", *, optional: bool = False) -> Settings |
     if not secret:
         if optional:
             return None
-        raise RuntimeError(f"WEBHOOK_SECRET is not set for {env_prefix or 'primary'} bot.")
+        if _cloud_deployed():
+            # Render blueprint uses generateValue, but manual/migrated services sometimes
+            # lose WEBHOOK_SECRET — derive a stable fallback so the bot can start.
+            if token and ":" in token:
+                secret = token.split(":", 1)[0]
+            else:
+                import secrets
+
+                secret = secrets.token_urlsafe(24)
+            logger.warning(
+                "WEBHOOK_SECRET not set for %s bot — using auto-derived secret (set "
+                "WEBHOOK_SECRET in Render env for a fixed value).",
+                env_prefix or "primary",
+            )
+        else:
+            raise RuntimeError(f"WEBHOOK_SECRET is not set for {env_prefix or 'primary'} bot.")
 
     requested_data_dir = _data_dir()
     data_dir_path: Path | None = None

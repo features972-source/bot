@@ -41,7 +41,7 @@ from threex_ws import ASYNCIO_LOOP_KEY
 logger = logging.getLogger(__name__)
 
 # Visible at /health — bump when Q1 group-bot behaviour changes.
-Q1_BUILD = "q1-no-pass-notes-v44"
+Q1_BUILD = "q1-no-pass-notes-v45"
 
 
 @dataclass
