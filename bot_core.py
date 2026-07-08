@@ -27,7 +27,6 @@ from handlers.payments import build_payment_message_handlers
 from handlers.ready_check import build_ready_check_handlers, ready_check_shift_loop
 from mailer_bridge import init_mailer_bridge
 from notify import (
-    active_calls_digest_loop,
     daily_summary_loop,
     ensure_telegram_send_worker,
 )
@@ -89,10 +88,6 @@ def prepare_bot_runtime(settings: Settings, *, instance_id: str) -> BotRuntime:
         asyncio.create_task(
             start_call_control_listener(settings, app.bot, app.bot_data),
             name=f"call-control-{instance_id}",
-        )
-        asyncio.create_task(
-            active_calls_digest_loop(app.bot, settings, app.bot_data),
-            name=f"active-calls-{instance_id}",
         )
         asyncio.create_task(
             daily_summary_loop(app.bot, settings, app.bot_data),
