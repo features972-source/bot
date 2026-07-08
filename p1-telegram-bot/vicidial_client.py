@@ -29,13 +29,13 @@ SOUND_DIRS = (
     "/var/lib/asterisk/sounds/custom",
 )
 SERVER_IP = os.getenv("VICIDIAL_SERVER_IP", "206.189.118.204")
-MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "100"))
-DIALER_CONCURRENT_CAP = int(os.getenv("VICIDIAL_DIALER_CAP", "0"))
+MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "25"))
+DIALER_CONCURRENT_CAP = int(os.getenv("VICIDIAL_DIALER_CAP", "25"))
 BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "100"))
 BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "0"))
-CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.08"))
+CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.2"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
-CPS = int(os.getenv("VICIDIAL_CPS", "30"))
+CPS = int(os.getenv("VICIDIAL_CPS", "5"))
 # Stable outbound caller ID for BitCall (required — empty CLI causes instant hangup).
 DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038969244")) or "442038969244"
 AU_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_AU_CALLER_ID", DEFAULT_CALLER_ID)) or DEFAULT_CALLER_ID
