@@ -128,10 +128,10 @@ $envVars = @(
     @{ key = "VICIDIAL_LIST_ID"; value = "101" }
     @{ key = "VICIDIAL_SOUND_NAME"; value = "press1_alice" }
     @{ key = "VICIDIAL_SERVER_IP"; value = "206.189.118.204" }
-    @{ key = "VICIDIAL_MAX_CONCURRENT"; value = "25" }
-    @{ key = "VICIDIAL_DIALER_CAP"; value = "25" }
-    @{ key = "VICIDIAL_CALL_GAP_SEC"; value = "0.2" }
-    @{ key = "VICIDIAL_CPS"; value = "5" }
+    @{ key = "VICIDIAL_MAX_CONCURRENT"; value = "0" }
+    @{ key = "VICIDIAL_DIALER_CAP"; value = "0" }
+    @{ key = "VICIDIAL_CALL_GAP_SEC"; value = "0.1" }
+    @{ key = "VICIDIAL_CPS"; value = "10" }
     @{ key = "VICIDIAL_TEST_NUMBERS"; value = "447769799593,61421875784" }
 )
 
