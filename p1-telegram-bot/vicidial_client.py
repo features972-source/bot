@@ -1423,32 +1423,43 @@ def _place_call_file(digits: str, cid: str) -> None:
         "grep -oE '^PJSIP/bitcall-[0-9a-f]+' | sort -u > $TMP; "
         f"asterisk -rx {shlex.quote(orig)} >/dev/null 2>&1; "
         "PLACED=NO; i=0; "
-        "while [ $i -lt 12 ]; do i=$((i+1)); sleep 1; "
+        "while [ $i -lt 20 ]; do i=$((i+1)); sleep 1; "
         "NEW=$(asterisk -rx 'core show channels concise' 2>/dev/null | "
-        "grep -iE '![[:space:]]*(Up|Ring|Ringing)[[:space:]]*!' | "
+        "grep -iE '![[:space:]]*(Up|Ring|Ringing|Progress)[[:space:]]*!' | "
         "grep -oE '^PJSIP/bitcall-[0-9a-f]+' | grep -vxF -f $TMP); "
         "if [ -n \"$NEW\" ]; then PLACED=YES; break; fi; done; "
-        "rm -f $TMP; echo PLACED=$PLACED"
+        "REJ=$(grep -iE 'Call Loop|403|reject|failed|unable' /var/log/asterisk/messages 2>/dev/null | tail -1); "
+        "rm -f $TMP; echo PLACED=$PLACED; [ -n \"$REJ\" ] && echo REJ=$REJ"
     )
     try:
-        out = run_remote(probe, timeout=30).strip()
+        out = run_remote(probe, timeout=45).strip()
     except Exception:
         # SSH read timed out while the call was still live — that means it is ringing/connected.
         return
     if "PLACED=YES" in out:
         return
+    reject = ""
+    for line in out.splitlines():
+        if line.startswith("REJ="):
+            reject = line[4:].strip()
     # Transient carrier rejection (loop/flood guard) — pause so BitCall's guard resets, retry once.
     time.sleep(15)
     try:
-        out = run_remote(probe, timeout=30).strip()
+        out = run_remote(probe, timeout=40).strip()
     except Exception:
         return
     if "PLACED=YES" in out:
         return
+    for line in out.splitlines():
+        if line.startswith("REJ="):
+            reject = line[4:].strip()
+    detail = (
+        f" Carrier: {reject[:120]}" if reject else ""
+    )
     raise RuntimeError(
         f"Call to {digits} was accepted by Asterisk but never reached the carrier — most likely "
         f"a temporary BitCall rejection (e.g. 'Call Loop Detected') from dialing the same number "
-        f"repeatedly. Wait ~30s and try again, or test a different number."
+        f"repeatedly.{detail} Wait ~30s and try again, or test a different number."
     )
 
 
@@ -1461,8 +1472,18 @@ def originate_press1(phone: str, chat_id: int | None = None) -> str:
         unstick_dial_server()
     except Exception:
         pass
+    try:
+        ensure_all_threex_endpoints()
+    except Exception:
+        pass
     if chat_id is not None:
-        apply_lead_run_config(digits, chat_id)
+        try:
+            apply_lead_run_config(digits, chat_id)
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not apply this chat's transfer/audio settings ({e}). "
+                f"Open /settings, re-select your destination, then try /testcall again."
+            ) from e
     else:
         _put_press1_db_entries({"lead": digits, f"lead/{digits}": digits})
     cid = outbound_caller_id(digits)

@@ -663,6 +663,7 @@ async def cmd_revokekey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
+        await update.message.reply_text(ui.error("Access denied — use /addkey or ask an admin."))
         return
     nums: list[str] | None = None
     if context.args:
