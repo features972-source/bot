@@ -708,7 +708,15 @@ async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         await msg.edit_text(card)
     except Exception as e:
-        await msg.edit_text(ui.error(f"Test call failed: {e}"))
+        err = str(e)
+        if "Wait " in err and "BitCall" in err:
+            await msg.edit_text(ui.error(err))
+        else:
+            await msg.edit_text(
+                ui.error(f"Test call failed: {e}")
+                + "\n\n<i>If your phone didn't ring, wait 60s and try once. "
+                "Rapid /testcall retries get blocked by the carrier.</i>"
+            )
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

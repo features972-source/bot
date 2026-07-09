@@ -1422,8 +1422,44 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path], run_id: str | None =
     return sound_name
 
 
+TESTCALL_COOLDOWN_SEC = int(os.getenv("PRESS1_TESTCALL_COOLDOWN_SEC", "60"))
+
+
+def _enforce_testcall_cooldown(digits: str) -> None:
+    """BitCall rejects rapid redials to the same number — enforce a gap."""
+    marker = f"/tmp/p1_tc_last_{digits}"
+    out = run_remote(
+        f"MARK={marker}; NOW=$(date +%s); "
+        f"if [ -f \"$MARK\" ]; then LAST=$(cat \"$MARK\" 2>/dev/null || echo 0); "
+        f"GAP=$((NOW-LAST)); NEED={TESTCALL_COOLDOWN_SEC}; "
+        f'if [ "$GAP" -lt "$NEED" ]; then echo "WAIT=$((NEED-GAP))"; exit 0; fi; fi; '
+        f'echo "$NOW" > "$MARK"; echo OK',
+        timeout=15,
+    ).strip()
+    for line in out.splitlines():
+        if line.startswith("WAIT="):
+            secs = line.split("=", 1)[-1].strip()
+            raise RuntimeError(
+                f"Wait {secs}s before another test call to this number "
+                f"(BitCall blocks rapid redials)."
+            )
+
+
+def _hangup_bitcall_test_legs() -> None:
+    """Clear stuck outbound BitCall legs so a test call starts clean."""
+    run_remote(
+        "asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | "
+        "grep -v 'xferdial' | cut -d'!' -f1 | while read -r ch; do "
+        '[ -n "$ch" ] && asterisk -rx "channel request hangup $ch" 2>/dev/null; done; '
+        "echo cleared",
+        timeout=20,
+    )
+
+
 def _place_call_file(digits: str, cid: str) -> None:
     """Originate one test call and verify a new BitCall leg reaches the carrier."""
+    _enforce_testcall_cooldown(digits)
+    _hangup_bitcall_test_legs()
     orig = f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}"
     # Single SSH round-trip: snapshot, originate, and poll in one shell (no PID/snap races).
     script = (
