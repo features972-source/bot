@@ -139,6 +139,58 @@ def chat_cfg_run_id(chat_id: int) -> str:
     return f"9{abs(int(chat_id))}"
 
 
+def _chat_run_marker(chat_id: int) -> str:
+    return f"/tmp/press1_chat_run_{abs(int(chat_id))}"
+
+
+def _clear_chat_run_marker_for_run(run_id: str) -> None:
+    token = _safe_run_token(run_id)
+    m = re.search(r"_(\d+)$", token)
+    if not m:
+        return
+    try:
+        run_remote(f"rm -f {_chat_run_marker(int(m.group(1)))}", timeout=10)
+    except Exception:
+        pass
+
+
+def resolve_chat_run_id(chat_id: int) -> str:
+    """Return active or stalled run_id for this chat (survives bot restarts)."""
+    cid = abs(int(chat_id))
+    marker = _chat_run_marker(chat_id)
+    suffix = f"_{cid}"
+    out = run_remote(
+        f"marker={shlex.quote(marker)}; suffix={shlex.quote(suffix)}; active={shlex.quote(ACTIVE_RUN_ID)}; "
+        "candidates=''; "
+        '[ -f "$marker" ] && candidates="$candidates $(cat "$marker" 2>/dev/null)"; '
+        '[ -f "$active" ] && candidates="$candidates $(cat "$active" 2>/dev/null)"; '
+        'for f in /tmp/press1_dial_*"$suffix".sh; do '
+        '  [ -f "$f" ] || continue; '
+        '  rid="${f#/tmp/press1_dial_}"; rid="${rid%.sh}"; '
+        '  candidates="$candidates $rid"; '
+        "done; "
+        'best=""; bests=0; '
+        "for rid in $candidates; do "
+        '  [ -z "$rid" ] && continue; '
+        '  case "$rid" in *"$suffix") ;; *) continue;; esac; '
+        '  script="/tmp/press1_dial_${rid}.sh"; '
+        '  total=$(cat "/tmp/press1_total_${rid}" 2>/dev/null || echo 0); '
+        '  started=$(cat "/tmp/press1_started_${rid}" 2>/dev/null || echo 0); '
+        '  failed=$(cat "/tmp/press1_failed_${rid}" 2>/dev/null || echo 0); '
+        "  left=$((total - started - failed)); "
+        '  running=$(ps aux 2>/dev/null | grep -c "[b]ash $script" || echo 0); '
+        '  [ "$total" -le 0 ] && continue; '
+        '  [ "$running" -le 0 ] && [ "$left" -le 0 ] && continue; '
+        '  ts="${rid%%_*}"; '
+        '  [ "$ts" -gt "$bests" ] && best="$rid" && bests="$ts"; '
+        "done; "
+        'echo "$best"',
+        timeout=25,
+    ).strip().splitlines()
+    rid = _safe_run_token((out[-1] if out else "").strip())
+    return rid if rid and rid != "0" else ""
+
+
 def _run_paths(run_id: str) -> dict[str, str]:
     """Per-campaign file paths on the dial server (supports parallel group runs)."""
     rid = _safe_run_token(run_id)
@@ -1660,6 +1712,7 @@ def _stop_remote_dialer(run_id: str | None = None) -> None:
                 f"pkill -9 -f '{p['script']}' 2>/dev/null; true",
                 timeout=20,
             )
+            _clear_chat_run_marker_for_run(run_id)
         else:
             run_remote(
                 f"touch {DIAL_STOP} 2>/dev/null; rm -f {DIAL_PAUSE} 2>/dev/null; "
@@ -1869,6 +1922,7 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         f"chmod 664 {_stats_answered_path(run_id)} {_stats_press1_path(run_id)} 2>/dev/null; "
         f"rm -f {paths['done']}; "
         f"echo {len(numbers)} > {paths['total']}; "
+        f"echo {run_id} > {_chat_run_marker(chat_id)}; "
         f"echo \"=== RUN {run_id} chat {chat_id} {len(numbers)} leads $(date -Iseconds) ===\" >> {DIAL_LOG}",
         timeout=30,
     )

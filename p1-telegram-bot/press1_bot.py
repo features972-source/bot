@@ -154,6 +154,22 @@ def set_chat_progress(app: Application, chat_id: int, progress: dict) -> None:
     app.bot_data.setdefault("chat_campaigns", {}).setdefault(chat_id, {})["progress"] = progress
 
 
+async def _campaign_run_id(app: Application, chat_id: int) -> tuple[str, dict | None]:
+    """Resolve run_id from memory or the dial server (survives Render restarts)."""
+    progress = chat_progress(app, chat_id)
+    run_id = str((progress or {}).get("run_id", "") or "").strip()
+    if not run_id:
+        run_id = await asyncio.to_thread(vd.resolve_chat_run_id, chat_id) or ""
+    if run_id:
+        if progress is None:
+            progress = {"chat_id": chat_id, "run_id": run_id, "running": True}
+            set_chat_progress(app, chat_id, progress)
+        elif not progress.get("run_id"):
+            progress["run_id"] = run_id
+            progress.setdefault("chat_id", chat_id)
+    return run_id, progress
+
+
 async def control_guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Pause/unpause/stop: any member in group chats; DMs still require access."""
     if _is_group_chat(update):
@@ -456,6 +472,8 @@ def _stop_dialer(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     if progress:
         progress["stop"] = True
     run_id = str((progress or {}).get("run_id", "") or "")
+    if not run_id:
+        run_id = vd.resolve_chat_run_id(chat_id) or ""
     if run_id:
         try:
             vd._stop_remote_dialer(run_id)
@@ -734,8 +752,7 @@ async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await control_guard(update, context):
         return
     chat_id = update.effective_chat.id
-    progress = chat_progress(context.application, chat_id)
-    run_id = str((progress or {}).get("run_id", "") or "")
+    run_id, progress = await _campaign_run_id(context.application, chat_id)
     if not run_id:
         await update.message.reply_text(ui.error("No active campaign in this chat."))
         return
@@ -767,8 +784,7 @@ async def cmd_unpause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not await control_guard(update, context):
         return
     chat_id = update.effective_chat.id
-    progress = chat_progress(context.application, chat_id)
-    run_id = str((progress or {}).get("run_id", "") or "")
+    run_id, progress = await _campaign_run_id(context.application, chat_id)
     if not run_id:
         await update.message.reply_text(ui.error("No active campaign in this chat."))
         return
