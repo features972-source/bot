@@ -840,7 +840,7 @@ def settings_summary(chat_id: int | None = None) -> dict[str, str]:
     }
 
 
-OWNER_TEST_NUMBER = (os.getenv("PRESS1_OWNER_TEST_NUMBER", "353873279075") or "").strip()
+OWNER_TEST_NUMBER = (os.getenv("PRESS1_OWNER_TEST_NUMBER", "447769799593") or "").strip()
 
 
 def _owner_test_digits() -> str:
@@ -855,7 +855,7 @@ def test_numbers(*, prefer_owner: bool = False) -> list[str]:
         owner = _owner_test_digits()
         if owner:
             return [owner]
-    raw = os.getenv("VICIDIAL_TEST_NUMBERS", OWNER_TEST_NUMBER or "353873279075")
+    raw = os.getenv("VICIDIAL_TEST_NUMBERS", OWNER_TEST_NUMBER or "447769799593")
     nums: list[str] = []
     seen: set[str] = set()
     for n in raw.split(","):

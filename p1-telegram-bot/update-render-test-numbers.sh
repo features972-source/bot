@@ -3,7 +3,7 @@
 set -euo pipefail
 : "${RENDER_API_KEY:?Set RENDER_API_KEY}"
 SVC="${P1_RENDER_SERVICE_ID:-srv-d92bpksm0tmc73dt2fj0}"
-NUMBERS="447769799593,61421875784"
+NUMBERS="447769799593"
 API="https://api.render.com/v1/services/${SVC}"
 
 curl -fsS -H "Authorization: Bearer ${RENDER_API_KEY}" -H "Accept: application/json" \

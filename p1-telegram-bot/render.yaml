@@ -47,9 +47,9 @@ services:
       - key: VICIDIAL_CPS
         value: "10"
       - key: VICIDIAL_TEST_NUMBERS
-        value: 353873279075
+        value: 447769799593
       - key: PRESS1_OWNER_TEST_NUMBER
-        value: 353873279075
+        value: 447769799593
       - key: BOT_TOKEN
         sync: false
       - key: TELEGRAM_ALLOWED_IDS
