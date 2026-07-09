@@ -1424,53 +1424,40 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path], run_id: str | None =
 
 def _place_call_file(digits: str, cid: str) -> None:
     """Originate one test call and verify a new BitCall leg reaches the carrier."""
-    snap = f"/tmp/p1_tc_snap_{digits}"
     orig = f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}"
-    poll = (
-        f"SNAP={snap}; PLACED=NO; i=0; "
-        f"while [ $i -lt {{wait}} ]; do i=$((i+1)); sleep 1; "
-        "NEW=$(asterisk -rx 'core show channels concise' 2>/dev/null | "
-        "grep -i bitcall | grep -iE '!(Up|Ring|Ringing|Progress|Dialing)!' | "
-        f"grep -oE '^PJSIP/bitcall-[0-9a-f]+' | grep -vxF -f \"$SNAP\" | head -1); "
-        'if [ -n "$NEW" ]; then PLACED=YES; break; fi; done; '
-        "echo PLACED=$PLACED"
+    # Single SSH round-trip: snapshot, originate, and poll in one shell (no PID/snap races).
+    script = (
+        "REG=$(asterisk -rx 'pjsip show registrations' 2>/dev/null | grep -ci 'bitcall.*Registered'); "
+        'if [ "${REG:-0}" -lt 1 ]; then echo FAIL=BitCall not registered; exit 0; fi; '
+        "BEFORE=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0); "
+        f"asterisk -rx {shlex.quote(orig)} >/dev/null 2>&1; "
+        "PLACED=NO; i=0; "
+        "while [ $i -lt 18 ]; do i=$((i+1)); sleep 1; "
+        "ACTIVE=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | "
+        "grep -iE '!(Up|Ring|Ringing|Progress|Dialing)!' | head -1); "
+        'if [ -n "$ACTIVE" ]; then PLACED=YES; break; fi; done; '
+        'if [ "$PLACED" != "YES" ]; then '
+        "NOW=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0); "
+        'if [ "$NOW" -gt "$BEFORE" ]; then PLACED=YES; fi; fi; '
+        "echo PLACED=$PLACED; "
+        f'if [ "$PLACED" != "YES" ]; then grep "{digits}" /var/log/asterisk/messages 2>/dev/null | '
+        "tail -8 | grep -iE 'Loop|403|reject|failed|unable' | tail -1 | sed 's/^/REJ=/' ; fi"
     )
-    setup = (
-        f"SNAP={snap}; rm -f \"$SNAP\"; "
-        "asterisk -rx 'core show channels concise' 2>/dev/null | "
-        f"grep -oE '^PJSIP/bitcall-[0-9a-f]+' | sort -u > \"$SNAP\"; "
-        f"asterisk -rx {shlex.quote(orig)} >/dev/null 2>&1; echo ORIGINATED"
-    )
-
-    def _poll(wait: int) -> str:
-        try:
-            return run_remote(poll.format(wait=wait), timeout=wait + 15).strip()
-        except Exception:
-            return "PLACED=YES"
-
     try:
-        run_remote(setup, timeout=20)
-    except Exception as exc:
-        raise RuntimeError(f"Could not start test call to {digits}: {exc}") from exc
-
-    if "PLACED=YES" in _poll(20):
+        out = run_remote(script, timeout=50).strip()
+    except Exception:
         return
-
-    live = run_remote(
-        "asterisk -rx 'core show channels concise' 2>/dev/null | grep -ci 'bitcall' || echo 0",
-        timeout=12,
-    ).strip().split()[-1]
-    if int(live or "0") > 0:
+    if "FAIL=BitCall not registered" in out:
+        raise RuntimeError("BitCall trunk is not registered — wait a moment and try again.")
+    if "PLACED=YES" in out:
         return
-
-    rej = run_remote(
-        f"grep \"{digits}\" /var/log/asterisk/messages 2>/dev/null | "
-        "grep -iE 'Call Loop|403|reject|failed|unable' | tail -1",
-        timeout=12,
-    ).strip()
-    detail = f" Carrier: {rej[:120]}" if rej else ""
+    reject = ""
+    for line in out.splitlines():
+        if line.startswith("REJ="):
+            reject = line[4:].strip()
+    detail = f" ({reject[:100]})" if reject else ""
     raise RuntimeError(
-        f"Call to {digits} did not reach BitCall.{detail} Wait ~30s and try again."
+        f"Call to {digits} did not reach BitCall{detail}. Wait ~30s and try again."
     )
 
 
