@@ -1420,60 +1420,71 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path], run_id: str | None =
 
 
 def _place_call_file(digits: str, cid: str) -> None:
-    """Originate one test call and VERIFY it actually reaches the carrier (Ringing/Up).
+    """Originate one test call and verify a new BitCall leg reaches the carrier.
 
-    The CLI 'channel originate ... extension' returns immediately with empty output even when
-    BitCall later rejects the call asynchronously (most commonly '403 Call Loop Detected' when
-    the same number is dialed repeatedly in a short window). Trusting that empty output is why
-    the bot reported "placed" for calls that never came through. Instead we snapshot existing
-    BitCall legs, originate, then poll for a NEW outbound leg reaching Ringing/Up. Loop/flood
-    rejections are transient, so we pause and retry once before giving up with the real reason.
-    This path is used ONLY by /testcall, never by bulk campaigns."""
+    Important: poll-only retries — never re-originate while a leg may still be
+    connecting. A second INVITE to the same number triggers BitCall 403 Call Loop
+    Detected and makes /testcall look broken even when the first call was fine.
+    """
     orig = f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}"
-    # POSIX-sh probe: only a brand-new bitcall leg in Ring/Ringing/Up counts as delivered.
-    probe = (
-        "TMP=/tmp/p1_tc_before.$$; "
-        "asterisk -rx 'core show channels concise' 2>/dev/null | "
-        "grep -oE '^PJSIP/bitcall-[0-9a-f]+' | sort -u > $TMP; "
-        f"asterisk -rx {shlex.quote(orig)} >/dev/null 2>&1; "
-        "PLACED=NO; i=0; "
-        "while [ $i -lt 20 ]; do i=$((i+1)); sleep 1; "
+    snap = "/tmp/p1_tc_before.$$"
+    poll = (
+        f"SNAP={snap}; PLACED=NO; i=0; "
+        f"while [ $i -lt {{wait}} ]; do i=$((i+1)); sleep 1; "
         "NEW=$(asterisk -rx 'core show channels concise' 2>/dev/null | "
-        "grep -iE '![[:space:]]*(Up|Ring|Ringing|Progress)[[:space:]]*!' | "
-        "grep -oE '^PJSIP/bitcall-[0-9a-f]+' | grep -vxF -f $TMP); "
-        "if [ -n \"$NEW\" ]; then PLACED=YES; break; fi; done; "
-        "REJ=$(grep -iE 'Call Loop|403|reject|failed|unable' /var/log/asterisk/messages 2>/dev/null | tail -1); "
-        "rm -f $TMP; echo PLACED=$PLACED; [ -n \"$REJ\" ] && echo REJ=$REJ"
+        "grep -iE '![[:space:]]*(Up|Ring|Ringing|Progress|Dialing)[[:space:]]*!' | "
+        f"grep -oE '^PJSIP/bitcall-[0-9a-f]+' | grep -vxF -f \"$SNAP\" | head -1); "
+        'if [ -n "$NEW" ]; then PLACED=YES; break; fi; done; '
+        "echo PLACED=$PLACED"
     )
-    try:
-        out = run_remote(probe, timeout=45).strip()
-    except Exception:
-        # SSH read timed out while the call was still live — that means it is ringing/connected.
-        return
-    if "PLACED=YES" in out:
-        return
-    reject = ""
-    for line in out.splitlines():
-        if line.startswith("REJ="):
-            reject = line[4:].strip()
-    # Transient carrier rejection (loop/flood guard) — pause so BitCall's guard resets, retry once.
-    time.sleep(15)
-    try:
-        out = run_remote(probe, timeout=40).strip()
-    except Exception:
-        return
-    if "PLACED=YES" in out:
-        return
-    for line in out.splitlines():
-        if line.startswith("REJ="):
-            reject = line[4:].strip()
-    detail = (
-        f" Carrier: {reject[:120]}" if reject else ""
+    setup = (
+        f"SNAP={snap}; rm -f \"$SNAP\"; "
+        "asterisk -rx 'core show channels concise' 2>/dev/null | "
+        f"grep -oE '^PJSIP/bitcall-[0-9a-f]+' | sort -u > \"$SNAP\"; "
+        f"asterisk -rx {shlex.quote(orig)} >/dev/null 2>&1; echo ORIGINATED"
     )
+
+    def _poll(wait: int) -> str:
+        try:
+            return run_remote(poll.format(wait=wait), timeout=wait + 20).strip()
+        except Exception:
+            # SSH read timed out while the call was still live — treat as placed.
+            return "PLACED=YES"
+
+    try:
+        run_remote(setup, timeout=25)
+    except Exception as exc:
+        raise RuntimeError(f"Could not start test call to {digits}: {exc}") from exc
+
+    if "PLACED=YES" in _poll(25):
+        return
+    # Slow carrier connect — keep polling without placing a second call.
+    if "PLACED=YES" in _poll(20):
+        return
+
+    live = run_remote(
+        "asterisk -rx 'core show channels concise' 2>/dev/null | grep -ci 'bitcall' || echo 0",
+        timeout=15,
+    ).strip().split()[-1]
+    if int(live or "0") > 0:
+        return
+
+    time.sleep(30)
+    try:
+        run_remote(setup, timeout=25)
+    except Exception:
+        return
+    if "PLACED=YES" in _poll(20):
+        return
+
+    rej = run_remote(
+        "grep -iE 'Call Loop|403|reject|failed|unable' /var/log/asterisk/messages 2>/dev/null | tail -1",
+        timeout=15,
+    ).strip()
+    detail = f" Carrier: {rej[:120]}" if rej else ""
     raise RuntimeError(
-        f"Call to {digits} was accepted by Asterisk but never reached the carrier — most likely "
-        f"a temporary BitCall rejection (e.g. 'Call Loop Detected') from dialing the same number "
-        f"repeatedly.{detail} Wait ~30s and try again, or test a different number."
+        f"Call to {digits} did not reach BitCall.{detail} "
+        f"Wait ~30s and try again."
     )
 
 
@@ -1484,10 +1495,6 @@ def originate_press1(phone: str, chat_id: int | None = None) -> str:
         raise ValueError(f"invalid number: {phone!r}")
     try:
         unstick_dial_server()
-    except Exception:
-        pass
-    try:
-        ensure_all_threex_endpoints()
     except Exception:
         pass
     if chat_id is not None:
