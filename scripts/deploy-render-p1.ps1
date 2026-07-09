@@ -132,7 +132,8 @@ $envVars = @(
     @{ key = "VICIDIAL_DIALER_CAP"; value = "0" }
     @{ key = "VICIDIAL_CALL_GAP_SEC"; value = "0.1" }
     @{ key = "VICIDIAL_CPS"; value = "10" }
-    @{ key = "VICIDIAL_TEST_NUMBERS"; value = "447769799593,61421875784" }
+    @{ key = "VICIDIAL_TEST_NUMBERS"; value = "353873279075" }
+    @{ key = "PRESS1_OWNER_TEST_NUMBER"; value = "353873279075" }
 )
 
 if ($local["TELEGRAM_ALLOWED_IDS"]) {

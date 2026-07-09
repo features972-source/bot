@@ -86,7 +86,7 @@ HELP = (
             ui.bullet("/pause", "hold new calls (this chat only)", icon="▪️"),
             ui.bullet("/unpause", "resume this chat's campaign", icon="▪️"),
             ui.bullet("/stop", "end this chat's campaign", icon="▪️"),
-            ui.bullet("/testcall", "ring the test numbers", icon="▪️"),
+            ui.bullet("/testcall", "ring you (owners) or test numbers · /testcall me", icon="▪️"),
             "",
             "⏰ <b>SCHEDULE</b>",
             ui.bullet("/schedule 9am", "run at a set time", icon="▪️"),
@@ -666,23 +666,30 @@ async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(ui.error("Access denied — use /addkey or ask an admin."))
         return
     nums: list[str] | None = None
+    user_id = update.effective_user.id if update.effective_user else 0
     if context.args:
         from press1_utils import to_e164
         import re
 
-        parsed: list[str] = []
-        for arg in context.args:
-            digits = to_e164(arg) or re.sub(r"\D", "", arg)
-            if len(digits) >= vd.MIN_PHONE_DIGITS + 2:
-                parsed.append(digits)
-        if not parsed:
-            await update.message.reply_text(
-                ui.error("Invalid number(s). Example: /testcall 447934567847")
-            )
-            return
-        nums = parsed
+        if len(context.args) == 1 and context.args[0].lower() == "me":
+            nums = await asyncio.to_thread(vd.test_numbers, prefer_owner=True)
+        else:
+            parsed: list[str] = []
+            for arg in context.args:
+                if arg.lower() == "me":
+                    continue
+                digits = to_e164(arg) or re.sub(r"\D", "", arg)
+                if len(digits) >= vd.MIN_PHONE_DIGITS + 2:
+                    parsed.append(digits)
+            if not parsed:
+                await update.message.reply_text(
+                    ui.error("Invalid number(s). Example: /testcall 447934567847 or /testcall me")
+                )
+                return
+            nums = parsed
     else:
-        nums = await asyncio.to_thread(vd.test_numbers)
+        prefer_owner = access.is_owner(user_id)
+        nums = await asyncio.to_thread(vd.test_numbers, prefer_owner=prefer_owner)
         if not nums:
             await update.message.reply_text(
                 ui.error(
