@@ -39,6 +39,7 @@ CPS = int(os.getenv("VICIDIAL_CPS", "10"))
 # Stable outbound caller ID for BitCall (required — empty CLI causes instant hangup).
 DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038969244")) or "442038969244"
 AU_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_AU_CALLER_ID", DEFAULT_CALLER_ID)) or DEFAULT_CALLER_ID
+NZ_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_NZ_CALLER_ID", "")) or ""
 BITCALL_SIP_USER = os.getenv("BITCALL_SIP_USER", "f-features896").strip()
 BITCALL_SIP_PASSWORD = os.getenv("BITCALL_SIP_PASSWORD", "").strip()
 BITCALL_SIP_REALM = os.getenv("BITCALL_SIP_REALM", "gateway.bitcall.io").strip()
@@ -46,8 +47,13 @@ MIN_PHONE_DIGITS = 9
 
 
 def outbound_caller_id(number: str) -> str:
-    """Return CLI for call files."""
-    return AU_CALLER_ID
+    """Return CLI for call files — NZ/AU/UK based on destination prefix."""
+    digits = re.sub(r"\D", "", number or "")
+    if digits.startswith("64"):
+        return NZ_CALLER_ID or AU_CALLER_ID or DEFAULT_CALLER_ID
+    if digits.startswith("61"):
+        return AU_CALLER_ID or DEFAULT_CALLER_ID
+    return AU_CALLER_ID or DEFAULT_CALLER_ID
 
 DIAL_SCRIPT = "/tmp/press1_dial_run.sh"
 DIAL_NUMBERS = "/tmp/press1_dial_numbers.txt"
@@ -996,6 +1002,7 @@ PAUSE={pause}
 GAP={gap}
 CAP={DIALER_CONCURRENT_CAP}
 AU_CALLER_ID={AU_CALLER_ID}
+NZ_CALLER_ID={NZ_CALLER_ID or AU_CALLER_ID}
 SPOOLDIR=/var/spool/asterisk/outgoing
 TMPDIR=/var/spool/asterisk/tmp
 wait_if_paused() {{
@@ -1051,6 +1058,9 @@ while IFS= read -r num || [ -n "$num" ]; do
     /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >>"$LOG" 2>&1 || echo "$(date '+%Y-%m-%d %H:%M:%S') leadxfer FAIL $num" >>"$LOG"
   fi
   cid="${{AU_CALLER_ID:-442038969244}}"
+  case "$num" in
+    64*) cid="${{NZ_CALLER_ID:-$AU_CALLER_ID}}" ;;
+  esac
   orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid ${{cid}}" 2>&1)
   if echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
     f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"

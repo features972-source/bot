@@ -12,6 +12,15 @@ from pathlib import Path
 MIN_PHONE_DIGITS = 9
 DEFAULT_PHONE_CODE = (os.getenv("PRESS1_DEFAULT_PHONE_CODE", "44").strip() or "44")
 
+# NZ local prefixes (leading 0): mobile 020-029, geographic, toll-free.
+_NZ_LOCAL_RE = re.compile(
+    r"^0("
+    r"2[0-9]\d{7,8}|"  # mobile 021-029
+    r"[34679]\d{7,8}|"  # geographic
+    r"(800|508)\d{6,7}"  # toll-free
+    r")$"
+)
+
 # Irish geographic prefixes (local format with leading 0).
 _IE_GEO_PREFIXES = (
     "01", "021", "022", "023", "024", "025", "026", "027", "028", "029",
@@ -41,13 +50,17 @@ def _is_irish_local(digits: str) -> bool:
     return False
 
 
+def _is_nz_local(digits: str) -> bool:
+    return bool(_NZ_LOCAL_RE.fullmatch(digits))
+
+
 def normalize_phone(phone: str) -> tuple[str, str]:
     """Return (phone_code, national_digits) for VICIdial / dialing."""
     digits = _digits(phone)
     if not digits:
         return "", ""
 
-    for code in ("353", "44", "61"):
+    for code in ("353", "44", "61", "64"):
         if digits.startswith(code):
             national = _strip_leading_zero(digits[len(code) :])
             return code, national
@@ -64,11 +77,15 @@ def normalize_phone(phone: str) -> tuple[str, str]:
         # UK mobile 07xxxxxxxxx before Irish geographic 07x prefixes.
         if re.fullmatch(r"07\d{9}", digits):
             return "44", rest
+        if _is_nz_local(digits):
+            return "64", rest
         if _is_irish_local(digits):
             return "353", rest
         return "44", rest
 
     # Bare national numbers (no leading 0).
+    if re.fullmatch(r"2[0-9]\d{7,8}", digits) and DEFAULT_PHONE_CODE == "64":
+        return "64", digits
     if re.fullmatch(r"8\d{8}", digits):
         return "353", digits
     if re.fullmatch(r"7\d{9}", digits):
