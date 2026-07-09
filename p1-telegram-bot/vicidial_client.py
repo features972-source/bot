@@ -1423,19 +1423,14 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path], run_id: str | None =
 
 
 def _place_call_file(digits: str, cid: str) -> None:
-    """Originate one test call and verify a new BitCall leg reaches the carrier.
-
-    Important: poll-only retries — never re-originate while a leg may still be
-    connecting. A second INVITE to the same number triggers BitCall 403 Call Loop
-    Detected and makes /testcall look broken even when the first call was fine.
-    """
+    """Originate one test call and verify a new BitCall leg reaches the carrier."""
+    snap = f"/tmp/p1_tc_snap_{digits}"
     orig = f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}"
-    snap = "/tmp/p1_tc_before.$$"
     poll = (
         f"SNAP={snap}; PLACED=NO; i=0; "
         f"while [ $i -lt {{wait}} ]; do i=$((i+1)); sleep 1; "
         "NEW=$(asterisk -rx 'core show channels concise' 2>/dev/null | "
-        "grep -iE '![[:space:]]*(Up|Ring|Ringing|Progress|Dialing)[[:space:]]*!' | "
+        "grep -i bitcall | grep -iE '!(Up|Ring|Ringing|Progress|Dialing)!' | "
         f"grep -oE '^PJSIP/bitcall-[0-9a-f]+' | grep -vxF -f \"$SNAP\" | head -1); "
         'if [ -n "$NEW" ]; then PLACED=YES; break; fi; done; '
         "echo PLACED=$PLACED"
@@ -1449,45 +1444,33 @@ def _place_call_file(digits: str, cid: str) -> None:
 
     def _poll(wait: int) -> str:
         try:
-            return run_remote(poll.format(wait=wait), timeout=wait + 20).strip()
+            return run_remote(poll.format(wait=wait), timeout=wait + 15).strip()
         except Exception:
-            # SSH read timed out while the call was still live — treat as placed.
             return "PLACED=YES"
 
     try:
-        run_remote(setup, timeout=25)
+        run_remote(setup, timeout=20)
     except Exception as exc:
         raise RuntimeError(f"Could not start test call to {digits}: {exc}") from exc
 
-    if "PLACED=YES" in _poll(25):
-        return
-    # Slow carrier connect — keep polling without placing a second call.
     if "PLACED=YES" in _poll(20):
         return
 
     live = run_remote(
         "asterisk -rx 'core show channels concise' 2>/dev/null | grep -ci 'bitcall' || echo 0",
-        timeout=15,
+        timeout=12,
     ).strip().split()[-1]
     if int(live or "0") > 0:
         return
 
-    time.sleep(30)
-    try:
-        run_remote(setup, timeout=25)
-    except Exception:
-        return
-    if "PLACED=YES" in _poll(20):
-        return
-
     rej = run_remote(
-        "grep -iE 'Call Loop|403|reject|failed|unable' /var/log/asterisk/messages 2>/dev/null | tail -1",
-        timeout=15,
+        f"grep \"{digits}\" /var/log/asterisk/messages 2>/dev/null | "
+        "grep -iE 'Call Loop|403|reject|failed|unable' | tail -1",
+        timeout=12,
     ).strip()
     detail = f" Carrier: {rej[:120]}" if rej else ""
     raise RuntimeError(
-        f"Call to {digits} did not reach BitCall.{detail} "
-        f"Wait ~30s and try again."
+        f"Call to {digits} did not reach BitCall.{detail} Wait ~30s and try again."
     )
 
 
