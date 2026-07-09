@@ -738,11 +738,14 @@ exten => ivr,1,Answer()
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
  same => n,Set(GLOBAL(P1XFER_${{P1UID}})=${{P1XFER}})
- same => n,Set(TIMEOUT(digit)=5)
- same => n,Set(TIMEOUT(response)=45)
- same => n,Background(${{P1SOUND}})
- same => n,WaitExten(45)
- same => n,Hangup()
+ same => n,Set(P1TRIES=0)
+ same => n(ivrloop),Set(P1TRIES=$[${{P1TRIES}}+1])
+ same => n,GotoIf($[${{P1TRIES}}>2]?hang,1)
+ same => n,Read(P1DIGIT,${{P1SOUND}},1,,,15)
+ same => n,NoOp(IVR digit=${{P1DIGIT}} try=${{P1TRIES}})
+ same => n,GotoIf($["${{P1DIGIT}}" = "1"]?1,1)
+ same => n,GotoIf($[${{LEN(${{P1DIGIT}})}}=0]?ivrloop,1)
+ same => n,Goto(ivrloop,1)
 
 exten => hang,1,Hangup()
 
@@ -810,7 +813,7 @@ def ensure_press1_dialplan() -> str:
         f"print('OK: press1-ivr dialplan')\n"
         f"PY\n"
         f"asterisk -rx 'dialplan reload' >/dev/null; "
-        f"asterisk -rx 'dialplan show ivr@press1-ivr' | grep -E 'Background|WaitExten' | head -3",
+        f"asterisk -rx 'dialplan show ivr@press1-ivr' | grep -E 'Read|Background|WaitExten' | head -3",
         timeout=60,
     )
     return out.strip()

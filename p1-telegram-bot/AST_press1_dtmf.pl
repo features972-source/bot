@@ -44,22 +44,23 @@ sub xfer_allowed {
     my ($chan) = @_;
     my $app = lc($chan_app{$chan} // '');
     return 0 if $app =~ /dial/i;
+    return 1 if $app =~ /^(?:background|waitexten|read|playback)$/;
     return 1;
 }
 
 sub try_xfer_on_one {
     my ($sock, $chan) = @_;
     my $now = time();
-    return if $recent_xfer{$chan} && ($now - $recent_xfer{$chan}) < 2;
+    return if $recent_xfer{$chan} && ($now - $recent_xfer{$chan}) < 3;
     return unless xfer_allowed($chan);
 
     $recent_xfer{$chan} = $now;
-    logmsg("DTMF 1 on $chan -> press1-ivr,1,1");
+    logmsg("DTMF 1 on $chan (app=$chan_app{$chan}) -> press1-ivr,xfer,1");
     ami_send(
         $sock, 'Redirect',
         Channel  => $chan,
         Context  => 'press1-ivr',
-        Exten    => '1',
+        Exten    => 'xfer',
         Priority => '1',
     );
     logmsg("Redirect sent for $chan");
@@ -100,27 +101,32 @@ while (1) {
             next;
         }
 
-        if ($evn =~ /^(?:DTMF|DTMFBegin|DTMFEnd|ChannelDtmfReceived)$/i) {
+        if ($evn =~ /^(?:DTMFEnd|ChannelDtmfReceived|DTMF)$/i) {
             my $digit = $ev{Digit} // $ev{DigitReceived} // '';
             next unless length $digit;
 
             try_xfer_on_one($sock, $chan) if $digit eq '1';
 
-            if ($evn =~ /(?:End|Received)$/i || $evn eq 'DTMF') {
-                my $lead = $lead_cache{$chan} // '';
-                $lead =~ s/\D//g if $lead;
-                $digits{$chan} //= '';
-                $digits{$chan} .= $digit unless $digits{$chan} =~ /$digit$/;
-                emit_event(
-                    t    => int(time()),
-                    e    => 'digit',
-                    c    => $chan,
-                    lead => $lead,
-                    d    => $digit,
-                    seq  => $digits{$chan},
-                );
-                logmsg("captured $digit on $chan lead=$lead seq=$digits{$chan}");
-            }
+            my $lead = $lead_cache{$chan} // '';
+            $lead =~ s/\D//g if $lead;
+            $digits{$chan} //= '';
+            $digits{$chan} .= $digit unless $digits{$chan} =~ /$digit$/;
+            emit_event(
+                t    => int(time()),
+                e    => 'digit',
+                c    => $chan,
+                lead => $lead,
+                d    => $digit,
+                seq  => $digits{$chan},
+            );
+            logmsg("captured $digit on $chan lead=$lead seq=$digits{$chan}");
+            next;
+        }
+
+        if ($evn eq 'DTMFBegin') {
+            my $digit = $ev{Digit} // '';
+            next unless $digit eq '1';
+            logmsg("DTMFBegin 1 on $chan app=$chan_app{$chan} (waiting for End)");
             next;
         }
 
