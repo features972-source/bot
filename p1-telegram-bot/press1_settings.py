@@ -79,6 +79,14 @@ THREECX_PROFILES: dict[str, dict[str, str]] = {
         "sip_contact": "work.my3cx.us",
         "ext": "8000",
     },
+    "slimzx": {
+        "id": "slimzx",
+        "label": "Slimzx Untold",
+        "fqdn": "slimzxuntold.my3cx.co.uk",
+        "host": "178.128.170.37",
+        "sip_contact": "slimzxuntold.my3cx.co.uk",
+        "ext": "8000",
+    },
     "forward020": {
         "id": "forward020",
         "label": "020 3488 3405",
