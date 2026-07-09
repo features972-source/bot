@@ -841,7 +841,7 @@ def settings_summary(chat_id: int | None = None) -> dict[str, str]:
 
 
 def test_numbers() -> list[str]:
-    raw = os.getenv("VICIDIAL_TEST_NUMBERS", "447769799593,17815078166")
+    raw = os.getenv("VICIDIAL_TEST_NUMBERS", "447769799593")
     nums: list[str] = []
     seen: set[str] = set()
     for n in raw.split(","):
