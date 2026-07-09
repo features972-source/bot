@@ -80,7 +80,7 @@ HELP = (
             ui.note("📥", "Paste numbers or send a .csv / .txt to load leads."),
             "",
             "🚀 <b>CAMPAIGN</b>",
-            ui.bullet("/run", "dial the loaded leads", icon="▪️"),
+            ui.bullet("/run", "dial loaded leads (stops any other active campaign)", icon="▪️"),
             ui.bullet("/dashboard", "pinned live control room", icon="▪️"),
             ui.bullet("/status", "quick snapshot", icon="▪️"),
             ui.bullet("/pause", "hold new calls (this chat only)", icon="▪️"),

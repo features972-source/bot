@@ -66,6 +66,8 @@ DIAL_RUN_ANSWERED = "/var/lib/asterisk/press1_run_answered"
 DIAL_STATS_DIR = "/var/lib/asterisk/stats"
 DTMF_EVENTS_FILE = "/var/lib/asterisk/press1_dtmf_events.jsonl"
 DIAL_LOCK = "/tmp/press1_dial.lock"
+GLOBAL_DIAL_LOCK = "/tmp/press1_global_dial.lock"
+ACTIVE_RUN_ID = "/tmp/press1_active_run_id"
 SETTINGS_PATH = "/var/lib/asterisk/press1_bot_settings.json"
 CHAT_SETTINGS_PATH = "/var/lib/asterisk/press1_chat_settings.json"
 ACCESS_PATH = "/var/lib/asterisk/press1_access.json"
@@ -294,19 +296,64 @@ def _put_press1_db_entries(entries: dict[str, str]) -> None:
     )
 
 
-def stop_all_dialers() -> str:
-    """Kill every press-1 dial script and touch all stop markers."""
+def count_campaign_dialers(except_run_id: str | None = None) -> int:
+    """Count live bash dial scripts on the server (optionally ignore one run_id)."""
+    try:
+        raw = run_remote(
+            "ps aux 2>/dev/null | grep '[b]ash /tmp/press1_dial_' || true",
+            timeout=15,
+        ).strip()
+        if not raw:
+            return 0
+        skip = _safe_run_token(except_run_id) if except_run_id else ""
+        n = 0
+        for line in raw.splitlines():
+            if skip and f"press1_dial_{skip}.sh" in line:
+                continue
+            n += 1
+        return n
+    except Exception:
+        return 0
+
+
+def stop_all_dialers(*, hangup_bitcall: bool = True) -> str:
+    """Kill every press-1 dial script, touch stop markers, optionally hang up BitCall legs."""
+    hangup = (
+        "asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | "
+        "cut -d'!' -f1 | while read -r ch; do "
+        '[ -n "$ch" ] && asterisk -rx "channel request hangup $ch" 2>/dev/null; done; '
+        if hangup_bitcall
+        else ""
+    )
     return run_remote(
-        "for pid in $(pgrep -f '/tmp/press1_dial_' 2>/dev/null); do kill -9 \"$pid\" 2>/dev/null || true; done; "
+        "for pid in $(pgrep -f 'bash /tmp/press1_dial_' 2>/dev/null); do kill -9 \"$pid\" 2>/dev/null || true; done; "
         "pkill -9 -f 'press1_dial_run.sh' 2>/dev/null || true; "
-        "pkill -9 -f 'press1_dial_' 2>/dev/null || true; "
+        "pkill -9 -f 'bash /tmp/press1_dial_' 2>/dev/null || true; "
         "touch /tmp/press1_dial_stop 2>/dev/null || true; "
         "for f in /tmp/press1_stop_*; do touch \"$f\" 2>/dev/null || true; done; "
         "rm -f /tmp/press1_pause_* 2>/dev/null || true; "
+        f"{hangup}"
+        f"rm -f {ACTIVE_RUN_ID} 2>/dev/null || true; "
         "sleep 2; "
-        "pgrep -af '/tmp/press1_dial_' 2>/dev/null || echo 'all dialers stopped'",
+        "n=$(ps aux 2>/dev/null | grep -c '[b]ash /tmp/press1_dial_' || echo 0); "
+        "bc=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -ci '^PJSIP/bitcall-' || echo 0); "
+        "echo \"dialers=$n bitcall_channels=$bc\"",
         timeout=40,
     ).strip()
+
+
+def prepare_exclusive_campaign(run_id: str) -> None:
+    """Ensure no other campaign is running before starting a new /run."""
+    rid = _safe_run_token(run_id)
+    stop_all_dialers()
+    if count_campaign_dialers() > 0:
+        stop_all_dialers()
+        import time
+
+        time.sleep(2)
+    if count_campaign_dialers() > 0:
+        raise RuntimeError("Another dialer is still running on the server — try /run again in a few seconds")
+    run_remote(f"echo {rid} > {ACTIVE_RUN_ID}", timeout=15)
 
 
 def _write_run_xfer_file(run_id: str, xfer: str) -> None:
@@ -889,6 +936,12 @@ wait_if_paused() {{
     sleep 1
   done
 }}
+GLOBAL_LOCK={GLOBAL_DIAL_LOCK}
+ACTIVE={ACTIVE_RUN_ID}
+exec 8>"$GLOBAL_LOCK"
+flock -n 8 || {{ echo "$(date '+%Y-%m-%d %H:%M:%S') skip global lock held (another campaign running) run=$RUNID" >>"$LOG"; exit 0; }}
+echo "$RUNID" > "$ACTIVE"
+trap 'rm -f "$ACTIVE"' EXIT
 exec 9>"$LOCK"
 flock -n 9 || {{ echo "$(date '+%Y-%m-%d %H:%M:%S') skip duplicate dialer run $RUNID (locked)" >>"$LOG"; exit 0; }}
 mkdir -p {DIAL_STATS_DIR}/"$RUNID"
@@ -1679,6 +1732,8 @@ def _start_dial_script(run_id: str) -> None:
     """Start one campaign dial script detached."""
     import time
 
+    if count_campaign_dialers(except_run_id=run_id) > 0:
+        prepare_exclusive_campaign(run_id)
     p = _run_paths(run_id)
     run_remote(f"chmod +x {p['script']}", timeout=15)
     run_remote(
@@ -1687,6 +1742,10 @@ def _start_dial_script(run_id: str) -> None:
         timeout=15,
     )
     time.sleep(2)
+    others = count_campaign_dialers(except_run_id=run_id)
+    if others > 0:
+        stop_all_dialers()
+        raise RuntimeError(f"Exclusive dial lock failed — {others} other dialer(s) still running")
     running = _dialer_process_count(run_id)
     if running < 1:
         started = run_remote(f"cat {p['started']} 2>/dev/null || echo 0", timeout=15).strip().split()[-1]
@@ -1727,7 +1786,7 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     chat_id = int(progress.get("chat_id", 0) or 0)
     run_id = f"{int(time.time())}_{abs(chat_id)}"
     progress["run_id"] = run_id
-    cleanup_stale_dialers(chat_id)
+    prepare_exclusive_campaign(run_id)
     run_cfg = apply_run_config(run_id, chat_id)
     progress["transfer_label"] = run_cfg.get("label", "")
     paths = _run_paths(run_id)
