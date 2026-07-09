@@ -86,7 +86,7 @@ HELP = (
             ui.bullet("/pause", "hold new calls (this chat only)", icon="▪️"),
             ui.bullet("/unpause", "resume this chat's campaign", icon="▪️"),
             ui.bullet("/stop", "end this chat's campaign", icon="▪️"),
-            ui.bullet("/testcall", "ring you (owners) or test numbers · /testcall me", icon="▪️"),
+            ui.bullet("/testcall", "ring +447769799593 · /testcall me or your number", icon="▪️"),
             "",
             "⏰ <b>SCHEDULE</b>",
             ui.bullet("/schedule 9am", "run at a set time", icon="▪️"),
@@ -688,13 +688,15 @@ async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
             nums = parsed
     else:
-        prefer_owner = access.is_owner(user_id)
-        nums = await asyncio.to_thread(vd.test_numbers, prefer_owner=prefer_owner)
+        # Bare /testcall always rings the configured owner test mobile.
+        nums = await asyncio.to_thread(vd.test_numbers, prefer_owner=True)
+        if not nums:
+            nums = await asyncio.to_thread(vd.test_numbers)
         if not nums:
             await update.message.reply_text(
                 ui.error(
                     "No test numbers configured on the server. "
-                    "Use /testcall 447934567847 to dial your number."
+                    "Use /testcall 447769799593 to dial your number."
                 )
             )
             return

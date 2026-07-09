@@ -854,11 +854,10 @@ def _owner_test_digits() -> str:
 
 
 def test_numbers(*, prefer_owner: bool = False) -> list[str]:
-    if prefer_owner:
-        owner = _owner_test_digits()
-        if owner:
-            return [owner]
-    raw = os.getenv("VICIDIAL_TEST_NUMBERS", OWNER_TEST_NUMBER or "447769799593")
+    owner = _owner_test_digits()
+    if prefer_owner and owner:
+        return [owner]
+    raw = os.getenv("VICIDIAL_TEST_NUMBERS", "") or owner or "447769799593"
     nums: list[str] = []
     seen: set[str] = set()
     for n in raw.split(","):
