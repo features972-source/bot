@@ -37,15 +37,21 @@ services:
       - key: VICIDIAL_MAX_CONCURRENT
         value: "0"
       - key: VICIDIAL_DIALER_CAP
-        value: "80"
+        value: "0"
       - key: VICIDIAL_BATCH_SIZE
         value: "100"
       - key: VICIDIAL_CALL_GAP_SEC
-        value: "0.05"
+        value: "0.1"
       - key: VICIDIAL_BATCH_PAUSE_SEC
         value: "0"
       - key: VICIDIAL_CPS
         value: "20"
+      - key: VICIDIAL_CALLER_ID
+        value: "442038969244"
+      - key: VICIDIAL_AU_CALLER_ID
+        value: "442038969244"
+      - key: VICIDIAL_NZ_CALLER_ID
+        value: "442038969244"
       - key: PRESS1_DEFAULT_PHONE_CODE
         value: "64"
       - key: VICIDIAL_TEST_NUMBERS

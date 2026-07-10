@@ -31,16 +31,16 @@ SOUND_DIRS = (
 )
 SERVER_IP = os.getenv("VICIDIAL_SERVER_IP", "206.189.118.204")
 MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "0"))
-DIALER_CONCURRENT_CAP = int(os.getenv("VICIDIAL_DIALER_CAP", "80"))  # concurrent live-call limit
+DIALER_CONCURRENT_CAP = int(os.getenv("VICIDIAL_DIALER_CAP", "0"))  # 0 = uncapped (matches high press-1 era)
 BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "100"))
 BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "0"))
-CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.05"))
+CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.1"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
 CPS = int(os.getenv("VICIDIAL_CPS", "20"))
-# Stable outbound caller ID for BitCall (required — empty CLI causes instant hangup).
-DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038968062")) or "442038968062"
+# CLI used during high press-1 runs (~39 p1 / 999 dialed)
+DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038969244")) or "442038969244"
 AU_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_AU_CALLER_ID", DEFAULT_CALLER_ID)) or DEFAULT_CALLER_ID
-NZ_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_NZ_CALLER_ID", "")) or ""
+NZ_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_NZ_CALLER_ID", DEFAULT_CALLER_ID)) or DEFAULT_CALLER_ID
 UK_CLI_020 = os.getenv("VICIDIAL_UK_CLI_020", "442038968062,442038969244").strip()
 UK_CLI_080 = os.getenv("VICIDIAL_UK_CLI_080", "").strip()
 UK_CLI_0330 = os.getenv("VICIDIAL_UK_CLI_0330", "443308222183").strip()
@@ -953,15 +953,15 @@ exten => _X.,1,Goto(press1-ivr,${{FILTER(0-9,${{EXTEN}})}},1)
 
 
 def _originate_bitcall_cmd(digits: str, cid: str) -> str:
-    """Originate through press1-outbound (BitCall trunk CLI — no forced per-call CID)."""
-    _ = cid  # ignored — trunk endpoint callerid is used
+    """Direct BitCall→IVR originate (same path as high press-1 campaigns)."""
+    cli = re.sub(r"\D", "", cid or "") or DEFAULT_CALLER_ID
     return (
-        f"channel originate Local/{digits}@press1-outbound/n application Wait 3600"
+        f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cli}"
     )
 
 
 def _press1_ivr_dialplan(*, server_ip: str, default_sound: str, default_xfer: str) -> str:
-    """Canonical press1-ivr: Background+WaitExten (high press-1 capture) + AMI backup."""
+    """Press-1 IVR: Read() digit capture (proven high-conversion path)."""
     return f"""[press1-ivr]
 exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
  same => n,Set(__LEADNUM=${{LEADNUM}})
@@ -970,6 +970,7 @@ exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
  same => n,Goto(ivr,1)
 
 exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{LEADNUM}})}})
+ same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{ARG1}})}})}})
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{DB(press1/lead)}})}})}})
  same => n,Goto(ivr,1)
 
@@ -992,20 +993,17 @@ exten => ivr,1,Answer()
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
  same => n,Set(GLOBAL(P1XFER_${{P1UID}})=${{P1XFER}})
- same => n,Wait(1)
- same => n,Set(TIMEOUT(digit)=8)
- same => n,Set(TIMEOUT(response)=25)
+ same => n,Wait(0.5)
  same => n,Set(P1TRIES=0)
  same => n(ivrloop),Set(P1TRIES=$[${{P1TRIES}}+1])
- same => n,GotoIf($[${{P1TRIES}}>4]?hang,1)
- same => n,Background(${{P1SOUND}})
- same => n,WaitExten(20)
+ same => n,GotoIf($[${{P1TRIES}}>3]?hang,1)
+ same => n,Read(P1DIGIT,${{P1SOUND}},1,,,25)
+ same => n,NoOp(IVR digit=${{P1DIGIT}} try=${{P1TRIES}})
+ same => n,GotoIf($["${{P1DIGIT}}" = "1"]?1,1)
+ same => n,GotoIf($[${{LEN(${{P1DIGIT}})}}=0]?ivr,ivrloop)
  same => n,Goto(ivr,ivrloop)
 
 exten => hang,1,Hangup()
-
-exten => i,1,Goto(ivr,ivrloop)
-exten => t,1,Goto(ivr,ivrloop)
 
 exten => 1,1,StopPlaytones()
  same => n,NoOp(Press-1 from ${{CALLERID(num)}} lead=${{LEADNUM}})
@@ -1285,44 +1283,21 @@ while IFS= read -r num || [ -n "$num" ]; do
   if [ -n "$XFER" ]; then
     /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >/dev/null 2>&1
   fi
-  # No per-call CLI forcing — BitCall trunk endpoint callerid is used.
-  BEFORE=0
+  # Proven high-P1 path: dial BitCall straight into press1-ivr (no Local/U() hop).
+  cid="${{AU_CALLER_ID:-{DEFAULT_CALLER_ID}}}"
   case "$num" in
-    64*) BEFORE=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0) ;;
+    64*) cid="${{NZ_CALLER_ID:-$AU_CALLER_ID}}" ;;
   esac
-  orig_out=$(/usr/sbin/asterisk -rx "channel originate Local/${{num}}@press1-outbound/n application Wait 3600" 2>&1)
+  orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid ${{cid}}" 2>&1)
   PLACED=NO
   if echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
     PLACED=NO
   else
-    case "$num" in
-      64*)
-        for _try in 1 2 3 4; do
-          sleep 1
-          ACTIVE=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep '^PJSIP/bitcall-' | grep -iE '!(Up|Ring|Ringing|Progress|Dialing)!' | head -1)
-          if [ -n "$ACTIVE" ]; then PLACED=YES; break; fi
-          NOW=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0)
-          if [ "$NOW" -gt "$BEFORE" ]; then PLACED=YES; break; fi
-        done
-        ;;
-      *)
-        PLACED=YES
-        ;;
-    esac
+    PLACED=YES
   fi
   if [ "$PLACED" != "YES" ]; then
     f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
     echo "$(date '+%Y-%m-%d %H:%M:%S') fail $num $orig_out" >>"$LOG"
-    case "$num" in
-      64*)
-        nz_fail=$((nz_fail+1))
-        if [ "$nz_fail" -ge 12 ]; then
-          echo "$(date '+%Y-%m-%d %H:%M:%S') NZ_ROUTE_DEAD BitCall not accepting +64 — stopping run $RUNID" >>"$LOG"
-          touch "$STOP"
-          exit 0
-        fi
-        ;;
-    esac
   else
     nz_fail=0
     echo "$num" >>"$DONE"
