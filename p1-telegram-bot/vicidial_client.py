@@ -1590,7 +1590,7 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path], run_id: str | None =
     return sound_name
 
 
-TESTCALL_COOLDOWN_SEC = int(os.getenv("PRESS1_TESTCALL_COOLDOWN_SEC", "60"))
+TESTCALL_COOLDOWN_SEC = int(os.getenv("PRESS1_TESTCALL_COOLDOWN_SEC", "120"))
 
 
 def _enforce_testcall_cooldown(digits: str) -> None:
@@ -1672,8 +1672,8 @@ def _place_call_file(digits: str, cid: str) -> None:
     """Originate one test call and verify a new BitCall leg reaches the carrier."""
     _enforce_testcall_cooldown(digits)
     _hangup_bitcall_test_legs()
-    orig = f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}"
-    # Single SSH round-trip: snapshot, originate, and poll in one shell (no PID/snap races).
+    orig = f'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid "{cid}" <{cid}>'
+    # Single SSH round-trip: snapshot, originate, poll carrier leg, then confirm answer/IVR.
     script = (
         "REG=$(asterisk -rx 'pjsip show registrations' 2>/dev/null | grep -ci 'bitcall.*Registered'); "
         'if [ "${REG:-0}" -lt 1 ]; then echo FAIL=BitCall not registered; exit 0; fi; '
@@ -1687,16 +1687,28 @@ def _place_call_file(digits: str, cid: str) -> None:
         'if [ "$PLACED" != "YES" ]; then '
         "NOW=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0); "
         'if [ "$NOW" -gt "$BEFORE" ]; then PLACED=YES; fi; fi; '
-        "echo PLACED=$PLACED; "
+        "DELIVERED=NO; j=0; "
+        f'while [ "$PLACED" = "YES" ] && [ $j -lt 40 ]; do j=$((j+1)); sleep 1; '
+        f'ROW=$(asterisk -rx "core show channels concise" 2>/dev/null | grep "PJSIP/bitcall-" | grep "{digits}" | head -1); '
+        '[ -z "$ROW" ] && break; '
+        'echo "$ROW" | grep -q "!Up!" && DELIVERED=YES && break; done; '
+        "echo PLACED=$PLACED; echo DELIVERED=$DELIVERED; "
         f'if [ "$PLACED" != "YES" ]; then grep "{digits}" /var/log/asterisk/messages 2>/dev/null | '
         "tail -8 | grep -iE 'Loop|401|403|reject|failed|unable' | tail -1 | sed 's/^/REJ=/' ; fi"
     )
     try:
-        out = run_remote(script, timeout=50).strip()
+        out = run_remote(script, timeout=75).strip()
     except Exception:
         return
     if "FAIL=BitCall not registered" in out:
         raise RuntimeError("BitCall trunk is not registered — wait a moment and try again.")
+    if "DELIVERED=YES" in out:
+        return
+    if "PLACED=YES" in out and "DELIVERED=NO" in out:
+        raise RuntimeError(
+            f"Call to {digits} reached BitCall but did not ring your phone "
+            "(carrier throttling after repeated test dials). Wait 2–3 minutes, then try /testcall once."
+        )
     if "PLACED=YES" in out:
         return
     reject = ""
