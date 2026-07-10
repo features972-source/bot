@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import shlex
 import time
@@ -30,19 +31,20 @@ SOUND_DIRS = (
 )
 SERVER_IP = os.getenv("VICIDIAL_SERVER_IP", "206.189.118.204")
 MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "0"))
-DIALER_CONCURRENT_CAP = int(os.getenv("VICIDIAL_DIALER_CAP", "0"))
+DIALER_CONCURRENT_CAP = int(os.getenv("VICIDIAL_DIALER_CAP", "150"))
 BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "100"))
 BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "0"))
-CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.1"))
+CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.05"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
-CPS = int(os.getenv("VICIDIAL_CPS", "10"))
+CPS = int(os.getenv("VICIDIAL_CPS", "20"))
 # Stable outbound caller ID for BitCall (required — empty CLI causes instant hangup).
-DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038969244")) or "442038969244"
+DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038968062")) or "442038968062"
 AU_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_AU_CALLER_ID", DEFAULT_CALLER_ID)) or DEFAULT_CALLER_ID
 NZ_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_NZ_CALLER_ID", "")) or ""
-UK_CLI_020 = re.sub(r"\D", "", os.getenv("VICIDIAL_UK_CLI_020", "442038969244")) or "442038969244"
-UK_CLI_080 = re.sub(r"\D", "", os.getenv("VICIDIAL_UK_CLI_080", "")) or ""
-UK_CLI_0330 = re.sub(r"\D", "", os.getenv("VICIDIAL_UK_CLI_0330", "")) or ""
+UK_CLI_020 = os.getenv("VICIDIAL_UK_CLI_020", "442038968062,442038969244").strip()
+UK_CLI_080 = os.getenv("VICIDIAL_UK_CLI_080", "").strip()
+UK_CLI_0330 = os.getenv("VICIDIAL_UK_CLI_0330", "443308222183").strip()
+UK_CLI_EXTRA = os.getenv("VICIDIAL_UK_CLI_LIST", "").strip()
 UK_CLI_CYCLE_IDX = "/var/lib/asterisk/press1_uk_cli_idx"
 BITCALL_SIP_USER = os.getenv("BITCALL_SIP_USER", "f-features896").strip()
 BITCALL_SIP_PASSWORD = os.getenv("BITCALL_SIP_PASSWORD", "").strip()
@@ -50,36 +52,58 @@ BITCALL_SIP_REALM = os.getenv("BITCALL_SIP_REALM", "gateway.bitcall.io").strip()
 MIN_PHONE_DIGITS = 9
 
 
+def _split_cli_tokens(raw: str) -> list[str]:
+    """Split comma/semicolon-separated CLI env values."""
+    out: list[str] = []
+    for part in re.split(r"[,;]+", raw or ""):
+        d = re.sub(r"\D", "", part.strip())
+        if d:
+            out.append(d)
+    return out
+
+
+def is_allowed_uk_cli(digits: str) -> bool:
+    """Only 020 / 0330 / 080 landline CLIs — never UK mobiles (447… / 07…)."""
+    d = re.sub(r"\D", "", digits or "")
+    if not d or d.startswith("447"):
+        return False
+    if d.startswith("4420") and 11 <= len(d) <= 13:
+        return True
+    if d.startswith("4433") and 11 <= len(d) <= 13:
+        return True
+    if d.startswith("4480") and 10 <= len(d) <= 13:
+        return True
+    return False
+
+
+def _sanitize_uk_cli(digits: str) -> str:
+    d = re.sub(r"\D", "", digits or "")
+    return d if is_allowed_uk_cli(d) else ""
+
+
 def _uk_cli_pool() -> list[str]:
-    """Ordered UK CLI pool: 020, 0800, 0330 (BitCall-authorized numbers)."""
+    """UK CLI pool: random pick per call from authorized 020 / 080 / 0330 only."""
     pool: list[str] = []
-    for cid in (UK_CLI_020, UK_CLI_080, UK_CLI_0330):
-        if cid and cid not in pool:
-            pool.append(cid)
-    return pool or [DEFAULT_CALLER_ID]
+    for raw in (UK_CLI_020, UK_CLI_080, UK_CLI_0330, UK_CLI_EXTRA):
+        for d in _split_cli_tokens(raw):
+            s = _sanitize_uk_cli(d)
+            if s and s not in pool:
+                pool.append(s)
+    if pool:
+        return pool
+    fallback = _sanitize_uk_cli(DEFAULT_CALLER_ID)
+    return [fallback] if fallback else ["442038968062"]
+
+
+def random_uk_caller_id() -> str:
+    """Random UK CLI from the 020/080/0330 pool (never 07 mobiles)."""
+    pool = _uk_cli_pool()
+    return random.choice(pool)
 
 
 def next_uk_caller_id() -> str:
-    """Pick next UK CLI from the 020/080/0330 rotation (server-side counter)."""
-    pool = _uk_cli_pool()
-    if len(pool) == 1:
-        return pool[0]
-    n = len(pool)
-    script = (
-        f"IDX={UK_CLI_CYCLE_IDX}; "
-        "mkdir -p $(dirname \"$IDX\"); "
-        "exec 6>\"${IDX}.lock\"; flock 6; "
-        "i=$(cat \"$IDX\" 2>/dev/null || echo 0); "
-        f"echo $((i + 1)) > \"$IDX\"; "
-        f"echo $((i % {n})); "
-        "flock -u 6"
-    )
-    try:
-        raw = run_remote(script, timeout=15).strip().splitlines()
-        idx = int((raw[-1] if raw else "0").strip())
-    except Exception:
-        idx = 0
-    return pool[idx % n]
+    """Alias — random UK CLI per call."""
+    return random_uk_caller_id()
 
 
 def uk_cli_label(cid: str) -> str:
@@ -95,14 +119,14 @@ def uk_cli_label(cid: str) -> str:
 
 
 def outbound_caller_id(number: str) -> str:
-    """Return CLI for call files — UK cycles 020/080/0330; NZ/AU use regional CLI."""
+    """Return CLI — UK random 020/080/0330; NZ/AU use regional CLI."""
     digits = re.sub(r"\D", "", number or "")
     if digits.startswith("64"):
         return NZ_CALLER_ID or AU_CALLER_ID or DEFAULT_CALLER_ID
     if digits.startswith("61"):
         return AU_CALLER_ID or DEFAULT_CALLER_ID
     if digits.startswith("44"):
-        return next_uk_caller_id()
+        return random_uk_caller_id()
     return AU_CALLER_ID or DEFAULT_CALLER_ID
 
 DIAL_SCRIPT = "/tmp/press1_dial_run.sh"
@@ -130,6 +154,7 @@ ACCESS_PATH = "/var/lib/asterisk/press1_access.json"
 SCHEDULES_PATH = "/var/lib/asterisk/press1_schedules.json"
 DASHBOARDS_PATH = "/var/lib/asterisk/press1_dashboards.json"
 PJSIP_CONF = "/etc/asterisk/pjsip.conf"
+PJSIP_P1_3CX_CONF = "/etc/asterisk/pjsip_p1_3cx.conf"
 
 # Keep bridged BitCall <-> 3CX calls up (RTP keepalive, session timers, no RTP kill on hold).
 _PJSIP_TRUNK_STABILITY = (
@@ -155,6 +180,28 @@ _PJSIP_STABILITY_KV = {
     "timers_min_se": "90",
     "timers_sess_expires": "3600",
 }
+
+# Outbound to 3CX on press-1 xfer — present the lead's number (not anonymous).
+# IMPORTANT: callerid_privacy must be allowed_* — any prohib_* makes Asterisk
+# send From: Anonymous <sip:anonymous@anonymous.invalid> (RFC3325).
+_PJSIP_3CX_OUTBOUND = (
+    "direct_media=no\n"
+    "rtp_symmetric=yes\n"
+    "force_rport=yes\n"
+    "rewrite_contact=yes\n"
+    "rtp_keepalive=30\n"
+    "rtp_timeout=0\n"
+    "rtp_timeout_hold=0\n"
+    "timers=always\n"
+    "timers_min_se=90\n"
+    "timers_sess_expires=3600\n"
+    "send_connected_line=yes\n"
+    "connected_line_method=invite\n"
+    "trust_id_outbound=yes\n"
+    "send_pai=yes\n"
+    "send_rpid=yes\n"
+    "callerid_privacy=allowed_not_screened\n"
+)
 
 
 def load_dashboards() -> list[dict]:
@@ -523,9 +570,16 @@ def apply_lead_run_config(lead_digits: str, chat_id: int, *, run_id: str | None 
     return cfg
 
 
-def ensure_all_threex_endpoints() -> str:
-    """Provision one PJSIP endpoint per 3CX profile (parallel group campaigns)."""
-    blocks: list[str] = []
+def ensure_all_threex_endpoints(*, force: bool = True) -> str:
+    """Provision one PJSIP endpoint per 3CX profile into a dedicated include file.
+
+    Stored in pjsip_p1_3cx.conf (not inline in pjsip.conf) so BitCall rebuilds
+    cannot wipe the 3CX transfer routes. Without this, press-1 xfers die with
+    'endpoint p1-legacy was not found'.
+    """
+    blocks: list[str] = [
+        "; Auto-generated P1 → 3CX endpoints — do not edit by hand\n"
+    ]
     for pid, p in THREECX_PROFILES.items():
         if p.get("mode") == "number":
             continue
@@ -538,7 +592,7 @@ def ensure_all_threex_endpoints() -> str:
             f"context=from-trunk\n"
             f"disallow=all\n"
             f"allow=alaw,ulaw\n"
-            f"{_PJSIP_TRUNK_STABILITY}"
+            f"{_PJSIP_3CX_OUTBOUND}"
             f"aors={ep}-aor\n"
             f"\n[{ep}-aor]\n"
             f"type=aor\n"
@@ -548,26 +602,50 @@ def ensure_all_threex_endpoints() -> str:
             f"endpoint={ep}\n"
             f"match={host}\n"
         )
-    marker = "# P1 per-profile 3CX endpoints"
-    body = marker + "".join(blocks) + f"\n{marker}-end\n"
+    body = "".join(blocks)
+    ep_names = [f"p1-{pid}" for pid, p in THREECX_PROFILES.items() if p.get("mode") != "number"]
+    include_line = f'#include "{PJSIP_P1_3CX_CONF}"'
+    # Skip full rewrite+reload when endpoint already live (avoids dropping xfers mid-campaign).
+    if not force:
+        check = run_remote(
+            "asterisk -rx 'pjsip show endpoint p1-legacy' 2>&1 | grep -c 'Endpoint:  p1-legacy' || true",
+            timeout=15,
+        ).strip()
+        if check.startswith("1") or check == "1":
+            return "OK: p1-legacy already loaded"
     return run_remote(
         f"python3 <<'PY'\n"
         f"from pathlib import Path\n"
         f"import re\n"
+        f"inc = Path('{PJSIP_P1_3CX_CONF}')\n"
+        f"inc.write_text({body!r})\n"
+        f"print('OK: wrote', inc)\n"
         f"p = Path('{PJSIP_CONF}')\n"
         f"text = p.read_text()\n"
-        f"block = {body!r}\n"
+        f"ep_names = {ep_names!r}\n"
+        # Strip any old inline p1-* blocks / marker from main conf (legacy location).
+        f"for name in ep_names:\n"
+        f"    for suffix in ('', '-aor', '-identify'):\n"
+        f"        sec = name + suffix\n"
+        f"        text = re.sub(rf'\\n\\[{{re.escape(sec)}}\\][\\s\\S]*?(?=\\n\\[|\\Z)', '', text)\n"
         f"text = re.sub(r'\\n# P1 per-profile 3CX endpoints[\\s\\S]*?# P1 per-profile 3CX endpoints-end\\n?', '\\n', text)\n"
-        f"if '{marker}' not in text:\n"
-        f"    text = text.rstrip() + block\n"
-        f"else:\n"
-        f"    text = re.sub(r'# P1 per-profile 3CX endpoints[\\s\\S]*?# P1 per-profile 3CX endpoints-end', block.strip(), text)\n"
+        f"if '{include_line}' not in text and \"#include pjsip_p1_3cx.conf\" not in text:\n"
+        f"    text = text.rstrip() + '\\n\\n{include_line}\\n'\n"
+        f"text = re.sub(r'\\n{{3,}}', '\\n\\n', text)\n"
         f"p.write_text(text)\n"
-        f"print('OK: p1 3cx endpoints')\n"
+        f"print('OK: pjsip.conf includes p1 3cx endpoints')\n"
         f"PY\n"
-        f"asterisk -rx 'module reload res_pjsip.so' >/dev/null 2>&1",
+        f"asterisk -rx 'module reload res_pjsip.so' 2>&1 | tail -1; "
+        f"sleep 1; "
+        f"asterisk -rx 'pjsip show endpoint p1-legacy' 2>&1 | "
+        f"grep -iE 'Endpoint:  p1-legacy|callerid_privacy|send_pai' | head -5",
         timeout=60,
     ).strip()
+
+
+def ensure_threex_endpoints_alive() -> str:
+    """Cheap check: only rewrite/reload 3CX endpoints if p1-legacy is missing."""
+    return ensure_all_threex_endpoints(force=False)
 
 
 def apply_threex_target(profile_id: str, chat_id: int | None = None) -> dict[str, str]:
@@ -578,7 +656,7 @@ def apply_threex_target(profile_id: str, chat_id: int | None = None) -> dict[str
     else:
         save_chat_settings(chat_id, threex_target=profile_id)
         apply_run_config(chat_cfg_run_id(chat_id), chat_id)
-    ensure_all_threex_endpoints()
+    ensure_all_threex_endpoints(force=True)
     return p
 
 
@@ -606,8 +684,13 @@ def sync_all_chat_xfer_configs() -> int:
 
 def ensure_press1_stack(chat_id: int | None = None, *, full: bool = False) -> dict[str, str]:
     """Refresh dial server stack. Use full=True only on boot (slow)."""
+    # Only repair 3CX endpoints if missing — never full-reload mid-campaign.
+    try:
+        ensure_threex_endpoints_alive()
+    except Exception:
+        pass
     if full:
-        ensure_all_threex_endpoints()
+        ensure_all_threex_endpoints(force=True)
         ensure_press1_dialplan()
         ensure_dtmf_listener()
         try:
@@ -665,7 +748,8 @@ def fix_bitcall_endpoint() -> str:
             }
         ).encode()
     ).decode()
-    return run_remote(
+    bitcall_cid = _sanitize_uk_cli(DEFAULT_CALLER_ID) or DEFAULT_CALLER_ID
+    out = run_remote(
         f"python3 <<'PY'\n"
         f"import re, json, base64\nfrom pathlib import Path\n"
         f"creds = json.loads(base64.b64decode('{creds}').decode())\n"
@@ -722,14 +806,16 @@ def fix_bitcall_endpoint() -> str:
         f"    'transport=transport-udp\\n'\n"
         f"    'context=from-trunk\\n'\n"
         f"    'disallow=all\\n'\n"
-        f"    'allow=ulaw,alaw\\n'\n"
-        f"    f'from_user={{user}}\\n'\n"
+        f"    'allow=ulaw,alaw,telephone-event\\n'\n"
         f"    f'from_domain={{realm}}\\n'\n"
         f"    'outbound_auth=bitcall-auth\\n'\n"
         f"    'aors=bitcall-aor\\n'\n"
         f"    '{trunk}\\n'\n"
         f"    'trust_id_outbound=yes\\n'\n"
         f"    'send_pai=yes\\n'\n"
+        f"    'send_rpid=yes\\n'\n"
+        f"    'callerid_privacy=allowed_not_screened\\n'\n"
+        f"    f'callerid=+{bitcall_cid} <+{bitcall_cid}>\\n'\n"
         f"    'dtmf_mode=rfc4733\\n'\n"
         f"    '100rel=no\\n'\n"
         f"    'inband_progress=no\\n'\n"
@@ -740,14 +826,24 @@ def fix_bitcall_endpoint() -> str:
         f"p.write_text(text + '\\n'.join([auth, aor, endpoint, ident, reg]) + '\\n')\n"
         f"print('OK: bitcall pjsip rebuilt')\n"
         f"PY\n"
-        f"asterisk -rx 'pjsip send unregister bitcall-registration' 2>&1; "
         f"asterisk -rx 'module reload res_pjsip.so' 2>&1 | tail -1; "
-        f"sleep 3; "
+        f"sleep 2; "
         f"asterisk -rx 'pjsip send register bitcall-registration' 2>&1; "
-        f"sleep 4; "
+        f"sleep 6; "
         f"asterisk -rx 'pjsip show registrations' 2>&1 | grep -i bitcall | head -1",
         timeout=75,
     ).strip()
+    # BitCall rebuild reloads PJSIP — re-apply 3CX endpoints so press-1 xfers keep working.
+    ep = ensure_all_threex_endpoints(force=True)
+    if "p1-legacy" not in ep and "already loaded" not in ep:
+        # Verify explicitly — force rewrite always prints Endpoint line when OK.
+        verify = run_remote(
+            "asterisk -rx 'pjsip show endpoint p1-legacy' 2>&1 | grep -c 'Endpoint:  p1-legacy' || true",
+            timeout=15,
+        ).strip()
+        if verify not in ("1",):
+            raise RuntimeError(f"3CX endpoint missing after BitCall rebuild: {ep!r}")
+    return out
 
 
 def repair_press1_server(chat_id: int | None = None, *, stop_stale: bool = False) -> dict[str, str]:
@@ -810,17 +906,46 @@ def _dialplan_resolve_xfer(*, default_sound: str, default_xfer: str, allow_defau
         if allow_default
         else ""
     )
-    return f""" same => n,Set(P1RUN=${{IF($[${{LEN(${{P1RUN}})}}>0]?${{P1RUN}}:${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}})}})
+    return f""" same => n,Set(P1RUN=${{IF($[${{LEN(${{P1RUN}})}}>0]?${{P1RUN}}:${{__P1RUN}})}})
+ same => n,Set(P1RUN=${{IF($[${{LEN(${{P1RUN}})}}>0]?${{P1RUN}}:${{DB(press1/runs/${{FILTER(0-9,${{LEADNUM}})}})}})}})
  same => n,ExecIf($["${{LEN(${{P1RUN}})}}" = "0"]?Set(P1RUN=0))
- same => n,Set(P1XFER=${{DB(press1/leadxfer/${{FILTER(0-9,${{LEADNUM}})}})}})
+ same => n,Set(P1XFER=${{IF($[${{LEN(${{P1XFER}})}}>0]?${{P1XFER}}:${{__P1XFER}})}})
+ same => n,Set(P1XFER=${{IF($[${{LEN(${{P1XFER}})}}>0]?${{P1XFER}}:${{DB(press1/leadxfer/${{FILTER(0-9,${{LEADNUM}})}})}})}})
  same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER=${{GLOBAL(P1XFER_${{P1UID}})}}))
  same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER=${{DB(press1/cfg/${{P1RUN}}/xfer)}}))
+ same => n,Set(P1SOUND=${{IF($[${{LEN(${{P1SOUND}})}}>0]?${{P1SOUND}}:${{__P1SOUND}})}})
  same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND=${{DB(press1/cfg/${{P1RUN}}/sound)}}))
  same => n,ExecIf($["${{LEN(${{P1SOUND}})}}" = "0"]?Set(P1SOUND={default_sound})){xfer_fallback}"""
 
 
+def _press1_outbound_dialplan(*, default_cid: str, realm: str = BITCALL_SIP_REALM) -> str:
+    """Outbound: use the single BitCall-authorized trunk CLI (no random/forced headers)."""
+    cid = re.sub(r"\D", "", default_cid or "") or DEFAULT_CALLER_ID
+    _ = realm
+    return f"""[press1-outbound]
+exten => _X.,1,Set(P1LEAD=${{FILTER(0-9,${{EXTEN}})}})
+ same => n,Set(CALLERID(num)={cid})
+ same => n,Set(CALLERID(name)={cid})
+ same => n,Set(CALLERID(pres)=allowed_not_screened)
+ same => n,NoOp(P1 outbound lead=${{P1LEAD}} cli=+{cid})
+ same => n,Dial(PJSIP/${{P1LEAD}}@bitcall,120,U(press1-conn^${{P1LEAD}}^1))
+ same => n,Hangup()
+
+[press1-conn]
+exten => _X.,1,Goto(press1-ivr,${{EXTEN}},1)
+"""
+
+
+def _originate_bitcall_cmd(digits: str, cid: str) -> str:
+    """Originate through press1-outbound (BitCall trunk CLI — no forced per-call CID)."""
+    _ = cid  # ignored — trunk endpoint callerid is used
+    return (
+        f"channel originate Local/{digits}@press1-outbound/n application Wait 3600"
+    )
+
+
 def _press1_ivr_dialplan(*, server_ip: str, default_sound: str, default_xfer: str) -> str:
-    """Canonical press1-ivr: per-run sound/xfer from Asterisk DB."""
+    """Canonical press1-ivr: Background+WaitExten (high press-1 capture) + AMI backup."""
     return f"""[press1-ivr]
 exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
  same => n,Set(__LEADNUM=${{LEADNUM}})
@@ -833,7 +958,6 @@ exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{LEADNUM}})}})
  same => n,Goto(ivr,1)
 
 exten => ivr,1,Answer()
- same => n,Wait(2)
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{__LEADNUM}})}})}})
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{DB(press1/lead/${{FILTER(0-9,${{LEADNUM}})}})}})}})}})
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{DB(press1/lead)}})}})}})
@@ -845,20 +969,27 @@ exten => ivr,1,Answer()
  same => n,Set(CHANNEL(language)=en)
  same => n,NoOp(IVR lead=${{LEADNUM}})
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=False)}
+ same => n,Set(__P1RUN=${{P1RUN}})
+ same => n,Set(__P1SOUND=${{P1SOUND}})
+ same => n,Set(__P1XFER=${{P1XFER}})
  same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
  same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
  same => n,Set(GLOBAL(P1XFER_${{P1UID}})=${{P1XFER}})
+ same => n,Wait(1)
+ same => n,Set(TIMEOUT(digit)=8)
+ same => n,Set(TIMEOUT(response)=25)
  same => n,Set(P1TRIES=0)
  same => n(ivrloop),Set(P1TRIES=$[${{P1TRIES}}+1])
- same => n,GotoIf($[${{P1TRIES}}>2]?hang,1)
- same => n,Read(P1DIGIT,${{P1SOUND}},1,,,15)
- same => n,NoOp(IVR digit=${{P1DIGIT}} try=${{P1TRIES}})
- same => n,GotoIf($["${{P1DIGIT}}" = "1"]?1,1)
- same => n,GotoIf($[${{LEN(${{P1DIGIT}})}}=0]?ivrloop,1)
- same => n,Goto(ivrloop,1)
+ same => n,GotoIf($[${{P1TRIES}}>4]?hang,1)
+ same => n,Background(${{P1SOUND}})
+ same => n,WaitExten(20)
+ same => n,Goto(ivr,ivrloop)
 
 exten => hang,1,Hangup()
+
+exten => i,1,Goto(ivr,ivrloop)
+exten => t,1,Goto(ivr,ivrloop)
 
 exten => 1,1,StopPlaytones()
  same => n,NoOp(Press-1 from ${{CALLERID(num)}} lead=${{LEADNUM}})
@@ -872,25 +1003,38 @@ exten => xfer,1,NoOp(Press1 xfer lead ${{LEADNUM}} to ${{P1XFER}})
  same => n,StopPlaytones()
  same => n,GotoIf($[${{LEN(${{LEADNUM}})}}<10]?xferdial,1)
  same => n,Set(CIDNUM=+${{LEADNUM}})
+ same => n,Set(MASTER_CHANNEL(CALLERID(num))=${{CIDNUM}})
+ same => n,Set(MASTER_CHANNEL(CALLERID(name))=${{CIDNUM}})
  same => n,Set(CALLERID(num)=${{CIDNUM}})
  same => n,Set(CALLERID(name)=${{CIDNUM}})
+ same => n,Set(CALLERID(pres)=allowed_not_screened)
  same => n,Set(CONNECTEDLINE(num)=${{CIDNUM}})
  same => n,Set(CONNECTEDLINE(name)=${{CIDNUM}})
- same => n,Set(PJSIP_HEADER(add,P-Asserted-Identity)=<sip:+${{LEADNUM}}@{server_ip}>)
  same => n,Goto(xferdial,1)
 
 exten => xferdial,1,StopPlaytones()
 {_dialplan_resolve_leadnum()}
  same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(CALLERID(num)=+${{LEADNUM}}))
  same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(CALLERID(name)=+${{LEADNUM}}))
+ same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(CALLERID(pres)=allowed_not_screened))
  same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(CONNECTEDLINE(num)=+${{LEADNUM}}))
  same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(CONNECTEDLINE(name)=+${{LEADNUM}}))
  same => n,ExecIf($[${{LEN(${{LEADNUM}})}}>=10]?Set(PJSIP_HEADER(add,P-Asserted-Identity)=<sip:+${{LEADNUM}}@{server_ip}>))
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
  same => n,NoOp(XFER lead=${{LEADNUM}} run=${{P1RUN}} dest=${{P1XFER}})
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/press1 &' )
- same => n,Dial(${{P1XFER}},120,Tr)
+ same => n,Dial(${{P1XFER}},120,b(set-3cx-cli^s^1(${{LEADNUM}}))Tr)
  same => n,Hangup()
+
+[set-3cx-cli]
+exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{ARG1}})}})
+ same => n,GotoIf($[${{LEN(${{LEADNUM}})}}<10]?done,1)
+ same => n,Set(CALLERID(num)=+${{LEADNUM}})
+ same => n,Set(CALLERID(name)=+${{LEADNUM}})
+ same => n,Set(CALLERID(pres)=allowed_not_screened)
+ same => n,Set(PJSIP_HEADER(remove,Privacy)=)
+ same => n,Set(PJSIP_HEADER(add,P-Asserted-Identity)=<sip:+${{LEADNUM}}@{server_ip}>)
+ same => n(done),Return()
 
 exten => t,1,Hangup()
 exten => i,1,Hangup()
@@ -902,7 +1046,7 @@ def ensure_press1_dialplan() -> str:
     import base64
 
     default_p = profile(DEFAULT_THREECX)
-    block = _press1_ivr_dialplan(
+    block = _press1_outbound_dialplan(default_cid=DEFAULT_CALLER_ID) + "\n" + _press1_ivr_dialplan(
         server_ip=SERVER_IP,
         default_sound=SOUND_NAME,
         default_xfer=transfer_dial_target(default_p),
@@ -916,15 +1060,22 @@ def ensure_press1_dialplan() -> str:
         f"block = base64.b64decode('{b64}').decode()\n"
         f"ext = Path('{ext_conf}')\n"
         f"text = ext.read_text()\n"
-        f"text = re.sub(r'\\[press1-ivr\\][\\s\\S]*?(?=\\n\\[default\\]|\\Z)', block + '\\n', text, count=1)\n"
-        f"if '[press1-ivr]' not in text:\n"
+        f"# Remove obsolete forced-CLI context if present\n"
+        f"text = re.sub(r'\\n\\[set-bitcall-cli\\][\\s\\S]*?(?=\\n\\[|\\Z)', '\\n', text)\n"
+        f"pat = r'\\[press1-outbound\\][\\s\\S]*?(?=\\n\\[default\\]|\\Z)'\n"
+        f"if re.search(pat, text):\n"
+        f"    text = re.sub(pat, block + '\\n', text, count=1)\n"
+        f"elif '[press1-ivr]' in text:\n"
+        f"    text = re.sub(r'\\[press1-ivr\\][\\s\\S]*?(?=\\n\\[default\\]|\\Z)', block + '\\n', text, count=1)\n"
+        f"else:\n"
         f"    text = text.rstrip() + '\\n\\n' + block + '\\n'\n"
         f"ext.write_text(text)\n"
         f"Path('{DIAL_STATS_DIR}').mkdir(parents=True, exist_ok=True)\n"
-        f"print('OK: press1-ivr dialplan')\n"
+        f"print('OK: press1-outbound + press1-ivr dialplan')\n"
         f"PY\n"
         f"asterisk -rx 'dialplan reload' >/dev/null; "
-        f"asterisk -rx 'dialplan show ivr@press1-ivr' | grep -E 'Read|Background|WaitExten' | head -3",
+        f"asterisk -rx 'dialplan show press1-outbound' 2>&1 | grep Dial | head -2; "
+        f"asterisk -rx 'dialplan show set-bitcall-cli' 2>&1 | head -2",
         timeout=60,
     )
     return out.strip()
@@ -1062,8 +1213,6 @@ GAP={gap}
 CAP={DIALER_CONCURRENT_CAP}
 AU_CALLER_ID={AU_CALLER_ID}
 NZ_CALLER_ID={NZ_CALLER_ID or AU_CALLER_ID}
-UK_CLI_POOL="{' '.join(_uk_cli_pool())}"
-UK_CLI_IDX={UK_CLI_CYCLE_IDX}
 SPOOLDIR=/var/spool/asterisk/outgoing
 TMPDIR=/var/spool/asterisk/tmp
 wait_if_paused() {{
@@ -1109,36 +1258,22 @@ while IFS= read -r num || [ -n "$num" ]; do
     sleep 1
   done
   digits=$(echo "$num" | tr -cd '0-9')
-  # Per-lead routing keys only. The shared global 'lead' key was removed: under high
-  # concurrency every call overwrote it (SQLite row contention -> 'unable to open database
-  # file') and reads could return another call's number. LEADNUM comes from the dialed
-  # extension in the dialplan, so it is not needed.
-  /usr/sbin/asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >>"$LOG" 2>&1
-  /usr/sbin/asterisk -rx "database put press1 lead/${{digits}} ${{num}}" >>"$LOG" 2>&1
+  # Sync astdb BEFORE originate so press-1 xfer always has leadxfer/run keys.
+  XFER=""
   if [ -f "/tmp/press1_xfer_$RUNID.txt" ]; then
     XFER=$(tr -d '\\r\\n' < "/tmp/press1_xfer_$RUNID.txt")
-    /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >>"$LOG" 2>&1 || echo "$(date '+%Y-%m-%d %H:%M:%S') leadxfer FAIL $num" >>"$LOG"
   fi
-  cid="${{AU_CALLER_ID:-442038969244}}"
+  /usr/sbin/asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >/dev/null 2>&1
+  /usr/sbin/asterisk -rx "database put press1 lead/${{digits}} ${{num}}" >/dev/null 2>&1
+  if [ -n "$XFER" ]; then
+    /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >/dev/null 2>&1
+  fi
+  # No per-call CLI forcing — BitCall trunk endpoint callerid is used.
+  BEFORE=0
   case "$num" in
-    44*)
-      mkdir -p "$(dirname "$UK_CLI_IDX")"
-      exec 6>"${{UK_CLI_IDX}}.lock"
-      flock 6
-      uki=$(cat "$UK_CLI_IDX" 2>/dev/null || echo 0)
-      set -- $UK_CLI_POOL
-      ukn=$#
-      if [ "$ukn" -gt 0 ]; then
-        ukpick=$((uki % ukn + 1))
-        cid=$(eval echo \\$$ukpick)
-        echo $((uki + 1)) > "$UK_CLI_IDX"
-      fi
-      flock -u 6
-      ;;
-    64*) cid="${{NZ_CALLER_ID:-$AU_CALLER_ID}}" ;;
+    64*) BEFORE=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0) ;;
   esac
-  BEFORE=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0)
-  orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid ${{cid}}" 2>&1)
+  orig_out=$(/usr/sbin/asterisk -rx "channel originate Local/${{num}}@press1-outbound/n application Wait 3600" 2>&1)
   PLACED=NO
   if echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
     PLACED=NO
@@ -1629,7 +1764,7 @@ def _probe_bitcall_route(digits: str) -> None:
     if not digits.startswith("64"):
         return
     cid = outbound_caller_id(digits)
-    orig = f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}"
+    orig = _originate_bitcall_cmd(digits, cid)
     script = (
         "REG=$(asterisk -rx 'pjsip show registrations' 2>/dev/null | grep -ci 'bitcall.*Registered'); "
         'if [ "${REG:-0}" -lt 1 ]; then echo FAIL=BitCall not registered; exit 0; fi; '
@@ -1672,7 +1807,7 @@ def _place_call_file(digits: str, cid: str) -> None:
     """Originate one test call and verify a new BitCall leg reaches the carrier."""
     _enforce_testcall_cooldown(digits)
     _hangup_bitcall_test_legs()
-    orig = f'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid "{cid}" <{cid}>'
+    orig = _originate_bitcall_cmd(digits, cid)
     # Single SSH round-trip: snapshot, originate, poll carrier leg, then confirm answer/IVR.
     script = (
         "REG=$(asterisk -rx 'pjsip show registrations' 2>/dev/null | grep -ci 'bitcall.*Registered'); "
@@ -1796,19 +1931,41 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
     """Read live counters from the server (source of truth for /run)."""
     prog = progress or {}
     expected = int(prog.get("total", 0) or 0)
-    run_id = str(prog.get("run_id", "") or "")
+    run_id = str(prog.get("run_id", "") or "").strip()
+    chat_id = prog.get("chat_id")
+    # Survive Render restarts / lost session: recover run_id from dial server.
+    if not run_id and chat_id is not None:
+        try:
+            run_id = resolve_chat_run_id(int(chat_id)) or ""
+            if run_id:
+                prog["run_id"] = run_id
+        except Exception:
+            pass
+    if not run_id:
+        try:
+            run_id = run_remote(f"cat {ACTIVE_RUN_ID} 2>/dev/null || true", timeout=10).strip()
+            if run_id:
+                prog["run_id"] = run_id
+        except Exception:
+            pass
     try:
         state = _fetch_server_dial_state(run_id or None)
         file_lines = int(state["file_lines"])
         file_total = int(state["total"])
-        total = file_lines or file_total
-        if expected > 0:
-            total = max(expected, file_lines, file_total)
+        # Server file is source of truth for the active run (avoid stale session totals).
+        if run_id and (file_total > 0 or file_lines > 0):
+            total = file_total or file_lines
+        else:
+            total = file_total or file_lines or expected
         started = int(state["started"])
         failed = int(state["failed"])
         live = int(state["live"])
         running = bool(state["script_running"])
         paused = bool(state.get("paused"))
+        # Finished dialer but live calls still up = paused-style dashboard
+        if (not running) and live > 0 and started >= total > 0:
+            paused = True
+            running = True
         left = max(0, total - started - failed)
         dial_state = _dial_state_label(running, total, left, failed, paused=paused)
 
@@ -1817,14 +1974,23 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         if run_id and bool(state.get("run_match", True)):
             if press1 == 0 and answered == 0 and (running or started > 0):
                 press1, answered = _fetch_outcome_stats(run_id)
-        elif not run_id:
-            press1, answered = 0, 0
+        # Never wipe real server counters just because session lost run_id mid-campaign.
+        if not run_id and (press1 > 0 or answered > 0):
+            pass
+        elif not run_id and started == 0:
+            press1, answered = int(prog.get("press1", 0) or 0), int(prog.get("answered", 0) or 0)
 
         # Answered/press-1 can never exceed dialed for the current run.
         if started > 0:
             answered = min(answered, started)
         if answered > 0:
             press1 = min(press1, answered)
+        # Keep the higher of server vs in-memory so a stale 0 never hides real press-1s.
+        press1 = max(press1, int(prog.get("press1", 0) or 0))
+        answered = max(answered, int(prog.get("answered", 0) or 0))
+        if started > 0:
+            answered = min(answered, started)
+            press1 = min(press1, answered) if answered > 0 else press1
 
         if dial_state == "running":
             prog["running"] = True
@@ -1868,7 +2034,7 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         "press1": str(press1),
         "answered": str(answered),
         "failed": str(failed),
-        "campaign_active": "Y" if dial_state == "running" else "N",
+        "campaign_active": "Y" if dial_state in ("running", "paused") else "N",
         "dial_state": dial_state,
         "agent_status": "—",
         "run_id": run_id,
@@ -2012,10 +2178,13 @@ def _start_dial_script(run_id: str) -> None:
         prepare_exclusive_campaign(run_id)
     p = _run_paths(run_id)
     run_remote(f"chmod +x {p['script']}", timeout=15)
+    # Kill any leftover copy of THIS run's dialer before starting (prevents double-dial).
     run_remote(
+        f"pkill -f '{p['script']}' 2>/dev/null || true; sleep 1; "
+        f"pkill -9 -f '{p['script']}' 2>/dev/null || true; "
         f"rm -f {p['stop']}; rm -f {p['pause']}; "
         f"nohup setsid bash {p['script']} >>{DIAL_LOG} 2>&1 </dev/null &",
-        timeout=15,
+        timeout=20,
     )
     time.sleep(2)
     others = count_campaign_dialers(except_run_id=run_id)
@@ -2029,12 +2198,19 @@ def _start_dial_script(run_id: str) -> None:
             return
         log = run_remote(f"tail -25 {DIAL_LOG} 2>/dev/null || echo empty", timeout=15)
         raise RuntimeError(f"Dialer did not start: {log.strip()[:250]}")
+    if running > 1:
+        run_remote(
+            f"newest=$(pgrep -f 'bash {p['script']}' | tail -1); "
+            f"for pid in $(pgrep -f 'bash {p['script']}'); do "
+            f"[ \"$pid\" != \"$newest\" ] && kill -9 $pid 2>/dev/null; done",
+            timeout=15,
+        )
 
 
 def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     """Upload list + start server-side dialer (handles 1k+ leads; bot only monitors)."""
     chat_id = int(progress.get("chat_id", 0) or 0)
-    ensure_all_threex_endpoints()
+    ensure_threex_endpoints_alive()
     seen: set[str] = set()
     numbers: list[str] = []
     for phone in phones:
