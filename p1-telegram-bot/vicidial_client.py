@@ -2217,8 +2217,19 @@ def _start_dial_script(run_id: str) -> None:
         timeout=20,
     )
     # Dialer may need a few seconds to pass flock + write started.
+    # IMPORTANT: a leftover started counter from a dead dialer must NOT count as success.
     running = 0
-    started = 0
+    started_at_begin = 0
+    try:
+        started_at_begin = int(
+            run_remote(f"cat {p['started']} 2>/dev/null || echo 0", timeout=15)
+            .strip()
+            .split()[-1]
+            or "0"
+        )
+    except Exception:
+        started_at_begin = 0
+    started = started_at_begin
     for attempt in range(2):
         for _ in range(8):
             time.sleep(1)
@@ -2232,9 +2243,10 @@ def _start_dial_script(run_id: str) -> None:
                 )
             except Exception:
                 started = 0
-            if running >= 1 or started > 0:
+            # Success = process alive (even if CAP-waiting with no new dials yet)
+            if running >= 1:
                 break
-        if running >= 1 or started > 0:
+        if running >= 1:
             break
         # Stale flock / stop file can make the script exit 0 immediately — clear and retry once.
         if attempt == 0:
@@ -2248,13 +2260,12 @@ def _start_dial_script(run_id: str) -> None:
     if others > 0:
         stop_all_dialers()
         raise RuntimeError(f"Exclusive dial lock failed — {others} other dialer(s) still running")
-    if running < 1 and started < 1:
+    if running < 1:
         log = run_remote(
             f"grep -F {shlex.quote(rid)} {DIAL_LOG} 2>/dev/null | tail -15 || "
             f"tail -15 {DIAL_LOG} 2>/dev/null || echo empty",
             timeout=15,
         )
-        # Ignore noisy astdb lines from older dialers in the shared log.
         lines = [
             ln
             for ln in (log or "").splitlines()
