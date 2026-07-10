@@ -1033,6 +1033,7 @@ fi
 chown -R asterisk:asterisk {DIAL_STATS_DIR}/"$RUNID" 2>/dev/null
 chmod 664 {DIAL_STATS_DIR}/"$RUNID"/answered {DIAL_STATS_DIR}/"$RUNID"/press1 2>/dev/null
 batch_n=0
+nz_fail=0
 while IFS= read -r num || [ -n "$num" ]; do
   wait_if_paused
   [ -f "$STOP" ] && exit 0
@@ -1061,11 +1062,33 @@ while IFS= read -r num || [ -n "$num" ]; do
   case "$num" in
     64*) cid="${{NZ_CALLER_ID:-$AU_CALLER_ID}}" ;;
   esac
+  BEFORE=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0)
   orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid ${{cid}}" 2>&1)
-  if echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
+  PLACED=NO
+  if ! echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
+    for _try in 1 2 3 4; do
+      sleep 1
+      ACTIVE=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep '^PJSIP/bitcall-' | grep -iE '!(Up|Ring|Ringing|Progress|Dialing)!' | head -1)
+      if [ -n "$ACTIVE" ]; then PLACED=YES; break; fi
+      NOW=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0)
+      if [ "$NOW" -gt "$BEFORE" ]; then PLACED=YES; break; fi
+    done
+  fi
+  if [ "$PLACED" != "YES" ]; then
     f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
     echo "$(date '+%Y-%m-%d %H:%M:%S') fail $num $orig_out" >>"$LOG"
+    case "$num" in
+      64*)
+        nz_fail=$((nz_fail+1))
+        if [ "$nz_fail" -ge 12 ]; then
+          echo "$(date '+%Y-%m-%d %H:%M:%S') NZ_ROUTE_DEAD BitCall not accepting +64 — stopping run $RUNID" >>"$LOG"
+          touch "$STOP"
+          exit 0
+        fi
+        ;;
+    esac
   else
+    nz_fail=0
     echo "$num" >>"$DONE"
     s=$(wc -l < "$DONE" 2>/dev/null || echo 0); echo "$s" > "$STARTED"
     echo "$(date '+%Y-%m-%d %H:%M:%S') ok $num" >>"$LOG"
@@ -1517,6 +1540,50 @@ def _hangup_bitcall_test_legs() -> None:
     )
 
 
+def _probe_bitcall_route(digits: str) -> None:
+    """Fail fast when BitCall rejects a destination (common on NZ until route is enabled)."""
+    if not digits.startswith("64"):
+        return
+    cid = outbound_caller_id(digits)
+    orig = f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cid}"
+    script = (
+        "REG=$(asterisk -rx 'pjsip show registrations' 2>/dev/null | grep -ci 'bitcall.*Registered'); "
+        'if [ "${REG:-0}" -lt 1 ]; then echo FAIL=BitCall not registered; exit 0; fi; '
+        "BEFORE=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0); "
+        f"asterisk -rx {shlex.quote(orig)} >/dev/null 2>&1; "
+        "PLACED=NO; i=0; "
+        "while [ $i -lt 6 ]; do i=$((i+1)); sleep 1; "
+        "ACTIVE=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | "
+        "grep -iE '!(Up|Ring|Ringing|Progress|Dialing)!' | head -1); "
+        'if [ -n "$ACTIVE" ]; then PLACED=YES; break; fi; '
+        "NOW=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0); "
+        'if [ "$NOW" -gt "$BEFORE" ]; then PLACED=YES; break; fi; done; '
+        "echo PLACED=$PLACED; "
+        f'grep "{digits}" /var/log/asterisk/messages 2>/dev/null | tail -5 | grep -i 401 | tail -1 | sed "s/^/REJ=/"'
+    )
+    out = run_remote(script, timeout=25).strip()
+    if "FAIL=BitCall not registered" in out:
+        raise RuntimeError("BitCall trunk is not registered — wait a moment and try again.")
+    if "PLACED=YES" in out:
+        run_remote(
+            "asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | "
+            "cut -d'!' -f1 | while read -r ch; do "
+            '[ -n "$ch" ] && asterisk -rx "channel request hangup $ch" 2>/dev/null; done',
+            timeout=15,
+        )
+        return
+    reject = ""
+    for line in out.splitlines():
+        if line.startswith("REJ="):
+            reject = line[4:].strip()
+    hint = (
+        "BitCall is rejecting New Zealand (+64) calls"
+        + (f" ({reject[:80]})" if reject else " (no carrier leg — often 401 until NZ is enabled)")
+        + ". Ask BitCall to enable NZ outbound on your account and set VICIDIAL_NZ_CALLER_ID to an NZ number they provide. UK/AU lists still work."
+    )
+    raise RuntimeError(hint)
+
+
 def _place_call_file(digits: str, cid: str) -> None:
     """Originate one test call and verify a new BitCall leg reaches the carrier."""
     _enforce_testcall_cooldown(digits)
@@ -1538,7 +1605,7 @@ def _place_call_file(digits: str, cid: str) -> None:
         'if [ "$NOW" -gt "$BEFORE" ]; then PLACED=YES; fi; fi; '
         "echo PLACED=$PLACED; "
         f'if [ "$PLACED" != "YES" ]; then grep "{digits}" /var/log/asterisk/messages 2>/dev/null | '
-        "tail -8 | grep -iE 'Loop|403|reject|failed|unable' | tail -1 | sed 's/^/REJ=/' ; fi"
+        "tail -8 | grep -iE 'Loop|401|403|reject|failed|unable' | tail -1 | sed 's/^/REJ=/' ; fi"
     )
     try:
         out = run_remote(script, timeout=50).strip()
@@ -1895,6 +1962,10 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     if not numbers:
         progress["running"] = False
         raise RuntimeError("No valid numbers to dial")
+
+    sample = next((n for n in numbers if n.startswith("64")), "")
+    if sample:
+        _probe_bitcall_route(sample)
 
     chat_id = int(progress.get("chat_id", 0) or 0)
     run_id = f"{int(time.time())}_{abs(chat_id)}"
