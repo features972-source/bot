@@ -37,7 +37,7 @@ services:
       - key: VICIDIAL_MAX_CONCURRENT
         value: "0"
       - key: VICIDIAL_DIALER_CAP
-        value: "0"
+        value: "80"
       - key: VICIDIAL_BATCH_SIZE
         value: "100"
       - key: VICIDIAL_CALL_GAP_SEC
