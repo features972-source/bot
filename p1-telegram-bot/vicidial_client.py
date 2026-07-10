@@ -493,8 +493,8 @@ def stop_all_dialers(*, hangup_bitcall: bool = True) -> str:
         f"{hangup}"
         f"rm -f {ACTIVE_RUN_ID} 2>/dev/null || true; "
         "sleep 2; "
-        "n=$(ps aux 2>/dev/null | grep -c '[b]ash /tmp/press1_dial_' || echo 0); "
-        "bc=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -ci '^PJSIP/bitcall-' || echo 0); "
+        "n=$(ps aux 2>/dev/null | grep -c '[b]ash /tmp/press1_dial_' || true); "
+        "bc=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -ci '^PJSIP/bitcall-' || true); "
         "echo \"dialers=$n bitcall_channels=$bc\"",
         timeout=40,
     ).strip()
@@ -511,7 +511,13 @@ def prepare_exclusive_campaign(run_id: str) -> None:
         time.sleep(2)
     if count_campaign_dialers() > 0:
         raise RuntimeError("Another dialer is still running on the server — try /run again in a few seconds")
-    run_remote(f"echo {rid} > {ACTIVE_RUN_ID}", timeout=15)
+    # stop_all touches every stop_* file — clear THIS run's stop/lock so the new dialer can start.
+    run_remote(
+        f"rm -f /tmp/press1_stop_{rid} /tmp/press1_pause_{rid} "
+        f"/tmp/press1_lock_{rid} {GLOBAL_DIAL_LOCK}; "
+        f"echo {rid} > {ACTIVE_RUN_ID}",
+        timeout=15,
+    )
 
 
 def _write_run_xfer_file(run_id: str, xfer: str) -> None:
@@ -1229,6 +1235,7 @@ echo "$RUNID" > "$ACTIVE"
 trap 'rm -f "$ACTIVE"' EXIT
 exec 9>"$LOCK"
 flock -n 9 || {{ echo "$(date '+%Y-%m-%d %H:%M:%S') skip duplicate dialer run $RUNID (locked)" >>"$LOG"; exit 0; }}
+rm -f "$STOP" "$PAUSEFILE"
 mkdir -p {DIAL_STATS_DIR}/"$RUNID"
 if [ ! -s "$DONE" ]; then
   : > "$DONE"
@@ -1342,7 +1349,10 @@ def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, in
             f"wc -l < {answered_path} 2>/dev/null || echo 0; "
             f"echo 0; "
             f"echo 0; "
-            f"ps aux 2>/dev/null | grep -c '[b]ash {p['script']}' || echo 0; "
+            # IMPORTANT: grep -c exits 1 when count is 0 and still prints "0".
+            # Never use `|| echo 0` after grep -c — it duplicates a line and shifts
+            # later fields (was reporting numbers-file lines as dialed=complete).
+            f"ps aux 2>/dev/null | grep -c '[b]ash {p['script']}' || true; "
             f"wc -l < {p['numbers']} 2>/dev/null || echo 0; "
             f"wc -l < {p['done']} 2>/dev/null || echo 0; "
             f"test -f {p['pause']} && echo 1 || echo 0",
@@ -1362,7 +1372,7 @@ def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, in
             f"wc -l < {answered_path} 2>/dev/null || echo 0; "
             f"echo 0; "
             f"echo 0; "
-            f"ps aux 2>/dev/null | grep -c '[b]ash {DIAL_SCRIPT}' || echo 0; "
+            f"ps aux 2>/dev/null | grep -c '[b]ash {DIAL_SCRIPT}' || true; "
             f"wc -l < {DIAL_NUMBERS} 2>/dev/null || echo 0; "
             f"rid=$(cat {DIAL_RUN_ID} 2>/dev/null); "
             f"if [ -n \"$rid\" ] && [ -f /tmp/press1_dial_done_${{rid}}.txt ]; then wc -l < /tmp/press1_dial_done_${{rid}}.txt; else echo 0; fi; "
@@ -1399,6 +1409,12 @@ def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, in
         answered = 0
         done_count = 0
 
+    # done_count is only meaningful when the dialer actually wrote the done file.
+    # Never let a shifted/stale parse mark a never-started run as 100% complete.
+    if done_count > 0 and started_raw == 0 and not script_running and failed == 0:
+        # Likely misparse or empty started file — trust done only if <= total and press1/ans exist
+        if done_count == file_lines and press1 == 0 and answered == 0:
+            done_count = 0
     started = min(max(started_raw, done_count), total) if total > 0 else max(started_raw, done_count)
     live = 0
     try:
@@ -2071,7 +2087,7 @@ def _dialer_process_count(run_id: str | None = None) -> int:
         else:
             pattern = f"[b]ash {DIAL_SCRIPT}"
         raw = run_remote(
-            f"ps aux 2>/dev/null | grep -c '{pattern}' || echo 0",
+            f"ps aux 2>/dev/null | grep -c '{pattern}' || true",
             timeout=15,
         ).strip().split()[-1]
         return int(raw or 0)
@@ -2177,27 +2193,65 @@ def _start_dial_script(run_id: str) -> None:
     if count_campaign_dialers(except_run_id=run_id) > 0:
         prepare_exclusive_campaign(run_id)
     p = _run_paths(run_id)
+    rid = _safe_run_token(run_id)
     run_remote(f"chmod +x {p['script']}", timeout=15)
-    # Kill any leftover copy of THIS run's dialer before starting (prevents double-dial).
+    # Clear stop/pause AND release stale flock holders before start.
     run_remote(
         f"pkill -f '{p['script']}' 2>/dev/null || true; sleep 1; "
         f"pkill -9 -f '{p['script']}' 2>/dev/null || true; "
-        f"rm -f {p['stop']}; rm -f {p['pause']}; "
-        f"nohup setsid bash {p['script']} >>{DIAL_LOG} 2>&1 </dev/null &",
+        f"rm -f {p['stop']} {p['pause']} {p['lock']} {GLOBAL_DIAL_LOCK}; "
+        f"echo 0 > {p['started']}; echo 0 > {p['failed']}; "
+        f"echo {rid} > {ACTIVE_RUN_ID}; "
+        f"echo \"$(date '+%Y-%m-%d %H:%M:%S') starting dialer run={rid}\" >> {DIAL_LOG}; "
+        f"nohup setsid bash {p['script']} >>{DIAL_LOG} 2>&1 </dev/null & echo $!",
         timeout=20,
     )
-    time.sleep(2)
+    # Dialer may need a few seconds to pass flock + write started.
+    running = 0
+    started = 0
+    for attempt in range(2):
+        for _ in range(8):
+            time.sleep(1)
+            running = _dialer_process_count(run_id)
+            try:
+                started = int(
+                    run_remote(f"cat {p['started']} 2>/dev/null || echo 0", timeout=15)
+                    .strip()
+                    .split()[-1]
+                    or "0"
+                )
+            except Exception:
+                started = 0
+            if running >= 1 or started > 0:
+                break
+        if running >= 1 or started > 0:
+            break
+        # Stale flock / stop file can make the script exit 0 immediately — clear and retry once.
+        if attempt == 0:
+            run_remote(
+                f"rm -f {p['stop']} {p['pause']} {p['lock']} {GLOBAL_DIAL_LOCK}; "
+                f"echo \"$(date '+%Y-%m-%d %H:%M:%S') retry start dialer run={rid}\" >> {DIAL_LOG}; "
+                f"nohup setsid bash {p['script']} >>{DIAL_LOG} 2>&1 </dev/null &",
+                timeout=20,
+            )
     others = count_campaign_dialers(except_run_id=run_id)
     if others > 0:
         stop_all_dialers()
         raise RuntimeError(f"Exclusive dial lock failed — {others} other dialer(s) still running")
-    running = _dialer_process_count(run_id)
-    if running < 1:
-        started = run_remote(f"cat {p['started']} 2>/dev/null || echo 0", timeout=15).strip().split()[-1]
-        if int(started or "0") > 0:
-            return
-        log = run_remote(f"tail -25 {DIAL_LOG} 2>/dev/null || echo empty", timeout=15)
-        raise RuntimeError(f"Dialer did not start: {log.strip()[:250]}")
+    if running < 1 and started < 1:
+        log = run_remote(
+            f"grep -F {shlex.quote(rid)} {DIAL_LOG} 2>/dev/null | tail -15 || "
+            f"tail -15 {DIAL_LOG} 2>/dev/null || echo empty",
+            timeout=15,
+        )
+        # Ignore noisy astdb lines from older dialers in the shared log.
+        lines = [
+            ln
+            for ln in (log or "").splitlines()
+            if "Updated database successfully" not in ln and "New entry added" not in ln
+        ]
+        detail = "\n".join(lines[-8:]).strip() or "no dialer log for this run"
+        raise RuntimeError(f"Dialer did not start: {detail[:250]}")
     if running > 1:
         run_remote(
             f"newest=$(pgrep -f 'bash {p['script']}' | tail -1); "

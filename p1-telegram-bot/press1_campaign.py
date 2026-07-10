@@ -130,10 +130,14 @@ def predict_eta(
     return eta, forecast
 
 
-def _header(dial_state: str, total: int, finished: bool) -> str:
+def _header(dial_state: str, total: int, finished: bool, *, dialed: int = 0) -> str:
     sep = f" {ui.SEP} "
-    if finished or dial_state in ("finished", "stalled"):
+    if dial_state == "stalled" and dialed <= 0:
+        return f"⚠️ DIALER FAILED{sep}{total} leads"
+    if finished or dial_state == "finished":
         return f"✅ CAMPAIGN COMPLETE{sep}{total} leads"
+    if dial_state == "stalled":
+        return f"⚠️ STALLED{sep}{dialed}/{total} dialed"
     if dial_state == "finishing":
         return f"🟡 FINISHING{sep}calls in flight"
     if dial_state == "paused":
@@ -199,7 +203,7 @@ def format_campaign_body(
         lines.append("")
         lines.append(ui.stat("ETA", eta, icon="⏱️"))
 
-    return ui.card(_header(dial_state, total, finished), lines)
+    return ui.card(_header(dial_state, total, finished, dialed=dialed), lines)
 
 
 def format_dashboard(
