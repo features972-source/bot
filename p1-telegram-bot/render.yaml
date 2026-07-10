@@ -41,11 +41,11 @@ services:
       - key: VICIDIAL_BATCH_SIZE
         value: "100"
       - key: VICIDIAL_CALL_GAP_SEC
-        value: "0.1"
+        value: "0.05"
       - key: VICIDIAL_BATCH_PAUSE_SEC
         value: "0"
       - key: VICIDIAL_CPS
-        value: "10"
+        value: "20"
       - key: PRESS1_DEFAULT_PHONE_CODE
         value: "64"
       - key: VICIDIAL_TEST_NUMBERS
