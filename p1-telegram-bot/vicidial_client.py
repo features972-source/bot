@@ -37,10 +37,13 @@ BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "0"))
 CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.1"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
 CPS = int(os.getenv("VICIDIAL_CPS", "20"))
-# CLI used during high press-1 runs (~39 p1 / 999 dialed)
-DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038969244")) or "442038969244"
+# BitCall-authorized trunk CLI (must be a number on the BitCall account — else shows Private).
+DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038968062")) or "442038968062"
 AU_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_AU_CALLER_ID", DEFAULT_CALLER_ID)) or DEFAULT_CALLER_ID
-NZ_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_NZ_CALLER_ID", DEFAULT_CALLER_ID)) or DEFAULT_CALLER_ID
+# NZ must use the same BitCall-authorized CLI unless BitCall issues a dedicated NZ CLI.
+# A random/unowned NZ CLI (e.g. 64800023425) presents as Private on handsets.
+_NZ_ENV = re.sub(r"\D", "", os.getenv("VICIDIAL_NZ_CALLER_ID", "") or "")
+NZ_CALLER_ID = _NZ_ENV if (_NZ_ENV and _NZ_ENV.startswith("64") and len(_NZ_ENV) >= 10 and os.getenv("PRESS1_ALLOW_NZ_CLI", "").strip() == "1") else DEFAULT_CALLER_ID
 UK_CLI_020 = os.getenv("VICIDIAL_UK_CLI_020", "442038968062,442038969244").strip()
 UK_CLI_080 = os.getenv("VICIDIAL_UK_CLI_080", "").strip()
 UK_CLI_0330 = os.getenv("VICIDIAL_UK_CLI_0330", "443308222183").strip()
@@ -119,15 +122,9 @@ def uk_cli_label(cid: str) -> str:
 
 
 def outbound_caller_id(number: str) -> str:
-    """Return CLI — UK random 020/080/0330; NZ/AU use regional CLI."""
-    digits = re.sub(r"\D", "", number or "")
-    if digits.startswith("64"):
-        return NZ_CALLER_ID or AU_CALLER_ID or DEFAULT_CALLER_ID
-    if digits.startswith("61"):
-        return AU_CALLER_ID or DEFAULT_CALLER_ID
-    if digits.startswith("44"):
-        return random_uk_caller_id()
-    return AU_CALLER_ID or DEFAULT_CALLER_ID
+    """Always use the BitCall-authorized trunk CLI (never a random/unowned number)."""
+    _ = number
+    return DEFAULT_CALLER_ID
 
 DIAL_SCRIPT = "/tmp/press1_dial_run.sh"
 DIAL_NUMBERS = "/tmp/press1_dial_numbers.txt"
@@ -813,6 +810,7 @@ def fix_bitcall_endpoint() -> str:
         f"    'context=from-trunk\\n'\n"
         f"    'disallow=all\\n'\n"
         f"    'allow=ulaw,alaw,telephone-event\\n'\n"
+        f"    f'from_user={bitcall_cid}\\n'\n"
         f"    f'from_domain={{realm}}\\n'\n"
         f"    'outbound_auth=bitcall-auth\\n'\n"
         f"    'aors=bitcall-aor\\n'\n"
@@ -953,10 +951,12 @@ exten => _X.,1,Goto(press1-ivr,${{FILTER(0-9,${{EXTEN}})}},1)
 
 
 def _originate_bitcall_cmd(digits: str, cid: str) -> str:
-    """Direct BitCall→IVR originate (same path as high press-1 campaigns)."""
+    """Direct BitCall→IVR with explicit BitCall-authorized CLI (avoids Private)."""
     cli = re.sub(r"\D", "", cid or "") or DEFAULT_CALLER_ID
+    # Quoted name + <+E164> keeps presentation allowed on many carriers.
     return (
-        f"channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr callerid {cli}"
+        f'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr '
+        f'callerid "{cli}" <+{cli}>'
     )
 
 
@@ -1283,12 +1283,9 @@ while IFS= read -r num || [ -n "$num" ]; do
   if [ -n "$XFER" ]; then
     /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >/dev/null 2>&1
   fi
-  # Proven high-P1 path: dial BitCall straight into press1-ivr (no Local/U() hop).
-  cid="${{AU_CALLER_ID:-{DEFAULT_CALLER_ID}}}"
-  case "$num" in
-    64*) cid="${{NZ_CALLER_ID:-$AU_CALLER_ID}}" ;;
-  esac
-  orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid ${{cid}}" 2>&1)
+  # Always BitCall-authorized CLI — unowned NZ CLIs present as Private on handsets.
+  cid={DEFAULT_CALLER_ID}
+  orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid {DEFAULT_CALLER_ID}" 2>&1)
   PLACED=NO
   if echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
     PLACED=NO

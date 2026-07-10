@@ -47,11 +47,11 @@ services:
       - key: VICIDIAL_CPS
         value: "20"
       - key: VICIDIAL_CALLER_ID
-        value: "442038969244"
+        value: "442038968062"
       - key: VICIDIAL_AU_CALLER_ID
-        value: "442038969244"
+        value: "442038968062"
       - key: VICIDIAL_NZ_CALLER_ID
-        value: "442038969244"
+        value: "442038968062"
       - key: PRESS1_DEFAULT_PHONE_CODE
         value: "64"
       - key: VICIDIAL_TEST_NUMBERS
