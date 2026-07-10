@@ -928,17 +928,27 @@ def _press1_outbound_dialplan(*, default_cid: str, realm: str = BITCALL_SIP_REAL
     """Outbound: use the single BitCall-authorized trunk CLI (no random/forced headers)."""
     cid = re.sub(r"\D", "", default_cid or "") or DEFAULT_CALLER_ID
     _ = realm
+    # Dial U() syntax: U(context^arg1^arg2) → Gosub context,s,1 with ARG1/ARG2.
+    # (Caret args are NOT context^exten^priority — that bug sent every answer to missing s.)
     return f"""[press1-outbound]
 exten => _X.,1,Set(P1LEAD=${{FILTER(0-9,${{EXTEN}})}})
+ same => n,Set(__P1LEAD=${{P1LEAD}})
  same => n,Set(CALLERID(num)={cid})
  same => n,Set(CALLERID(name)={cid})
  same => n,Set(CALLERID(pres)=allowed_not_screened)
  same => n,NoOp(P1 outbound lead=${{P1LEAD}} cli=+{cid})
- same => n,Dial(PJSIP/${{P1LEAD}}@bitcall,120,U(press1-conn^${{P1LEAD}}^1))
+ same => n,Dial(PJSIP/${{P1LEAD}}@bitcall,120,U(press1-conn^${{P1LEAD}}))
  same => n,Hangup()
 
 [press1-conn]
-exten => _X.,1,Goto(press1-ivr,${{EXTEN}},1)
+exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{ARG1}})}})
+ same => n,ExecIf($[${{LEN(${{LEADNUM}})}}<10]?Set(LEADNUM=${{FILTER(0-9,${{__P1LEAD}})}}))
+ same => n,ExecIf($[${{LEN(${{LEADNUM}})}}<10]?Set(LEADNUM=${{FILTER(0-9,${{P1LEAD}})}}))
+ same => n,NoOp(press1-conn answer lead=${{LEADNUM}})
+ same => n,GotoIf($[${{LEN(${{LEADNUM}})}}<10]?press1-ivr,ivr,1)
+ same => n,Goto(press1-ivr,${{LEADNUM}},1)
+
+exten => _X.,1,Goto(press1-ivr,${{FILTER(0-9,${{EXTEN}})}},1)
 """
 
 
