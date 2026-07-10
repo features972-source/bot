@@ -1065,14 +1065,23 @@ while IFS= read -r num || [ -n "$num" ]; do
   BEFORE=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0)
   orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid ${{cid}}" 2>&1)
   PLACED=NO
-  if ! echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
-    for _try in 1 2 3 4; do
-      sleep 1
-      ACTIVE=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep '^PJSIP/bitcall-' | grep -iE '!(Up|Ring|Ringing|Progress|Dialing)!' | head -1)
-      if [ -n "$ACTIVE" ]; then PLACED=YES; break; fi
-      NOW=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0)
-      if [ "$NOW" -gt "$BEFORE" ]; then PLACED=YES; break; fi
-    done
+  if echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
+    PLACED=NO
+  else
+    case "$num" in
+      64*)
+        for _try in 1 2 3 4; do
+          sleep 1
+          ACTIVE=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep '^PJSIP/bitcall-' | grep -iE '!(Up|Ring|Ringing|Progress|Dialing)!' | head -1)
+          if [ -n "$ACTIVE" ]; then PLACED=YES; break; fi
+          NOW=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0)
+          if [ "$NOW" -gt "$BEFORE" ]; then PLACED=YES; break; fi
+        done
+        ;;
+      *)
+        PLACED=YES
+        ;;
+    esac
   fi
   if [ "$PLACED" != "YES" ]; then
     f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
