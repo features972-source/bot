@@ -1761,47 +1761,36 @@ def _hangup_bitcall_test_legs() -> None:
 
 
 def _probe_bitcall_route(digits: str) -> None:
-    """Fail fast when BitCall rejects a destination (common on NZ until route is enabled)."""
+    """Optional NZ route check — never abort a campaign (false negatives were killing UK runs)."""
     if not digits.startswith("64"):
         return
-    cid = outbound_caller_id(digits)
-    orig = _originate_bitcall_cmd(digits, cid)
-    script = (
-        "REG=$(asterisk -rx 'pjsip show registrations' 2>/dev/null | grep -ci 'bitcall.*Registered'); "
-        'if [ "${REG:-0}" -lt 1 ]; then echo FAIL=BitCall not registered; exit 0; fi; '
-        "BEFORE=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0); "
-        f"asterisk -rx {shlex.quote(orig)} >/dev/null 2>&1; "
-        "PLACED=NO; i=0; "
-        "while [ $i -lt 6 ]; do i=$((i+1)); sleep 1; "
-        "ACTIVE=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | "
-        "grep -iE '!(Up|Ring|Ringing|Progress|Dialing)!' | head -1); "
-        'if [ -n "$ACTIVE" ]; then PLACED=YES; break; fi; '
-        "NOW=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0); "
-        'if [ "$NOW" -gt "$BEFORE" ]; then PLACED=YES; break; fi; done; '
-        "echo PLACED=$PLACED; "
-        f'grep "{digits}" /var/log/asterisk/messages 2>/dev/null | tail -5 | grep -i 401 | tail -1 | sed "s/^/REJ=/"'
-    )
-    out = run_remote(script, timeout=25).strip()
-    if "FAIL=BitCall not registered" in out:
-        raise RuntimeError("BitCall trunk is not registered — wait a moment and try again.")
-    if "PLACED=YES" in out:
-        run_remote(
+    # Soft check only: log outcome, do not raise. Real dial failures are counted per-lead.
+    try:
+        cid = outbound_caller_id(digits)
+        orig = _originate_bitcall_cmd(digits, cid)
+        out = run_remote(
+            "BEFORE=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -c '^PJSIP/bitcall-' || true); "
+            f"asterisk -rx {shlex.quote(orig)} >/dev/null 2>&1; sleep 2; "
+            "NOW=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -c '^PJSIP/bitcall-' || true); "
+            'echo BEFORE=$BEFORE NOW=$NOW; '
             "asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | "
             "cut -d'!' -f1 | while read -r ch; do "
             '[ -n "$ch" ] && asterisk -rx "channel request hangup $ch" 2>/dev/null; done',
-            timeout=15,
+            timeout=20,
+        ).strip()
+        run_remote(
+            f"echo \"$(date '+%Y-%m-%d %H:%M:%S') NZ probe soft {digits} {out[:120]}\" >> {DIAL_LOG}",
+            timeout=10,
         )
+    except Exception as e:
+        try:
+            run_remote(
+                f"echo \"$(date '+%Y-%m-%d %H:%M:%S') NZ probe skipped: {e}\" >> {DIAL_LOG}",
+                timeout=10,
+            )
+        except Exception:
+            pass
         return
-    reject = ""
-    for line in out.splitlines():
-        if line.startswith("REJ="):
-            reject = line[4:].strip()
-    hint = (
-        "BitCall is rejecting New Zealand (+64) calls"
-        + (f" ({reject[:80]})" if reject else " (no carrier leg — often 401 until NZ is enabled)")
-        + ". Ask BitCall to enable NZ outbound on your account and set VICIDIAL_NZ_CALLER_ID to an NZ number they provide. UK/AU lists still work."
-    )
-    raise RuntimeError(hint)
 
 
 def _place_call_file(digits: str, cid: str) -> None:
@@ -2013,6 +2002,10 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         prog["press1"] = press1
         prog["answered"] = answered
         if started > 0 or running:
+            prog.pop("error", None)
+        # Drop stale false NZ probe errors (UK lists were aborted/mislabelled by old probe).
+        err = str(prog.get("error", "") or "")
+        if "New Zealand" in err or "NZ_ROUTE" in err:
             prog.pop("error", None)
     except Exception:
         total = int(prog.get("total", 0) or 0)
