@@ -86,7 +86,8 @@ HELP = (
             ui.bullet("/pause", "hold new calls (this chat only)", icon="▪️"),
             ui.bullet("/unpause", "resume this chat's campaign", icon="▪️"),
             ui.bullet("/stop", "end this chat's campaign", icon="▪️"),
-            ui.bullet("/testcall", "ring +447769799593 · /testcall me or your number", icon="▪️"),
+            ui.bullet("/testcall", "ring your /testnumber or /testcall +44…", icon="▪️"),
+            ui.bullet("/testnumber", "set this chat's UK test mobile", icon="▪️"),
             "",
             "⏰ <b>SCHEDULE</b>",
             ui.bullet("/schedule 9am", "run at a set time", icon="▪️"),
@@ -679,6 +680,47 @@ async def cmd_revokekey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(ui.error(e))
 
 
+async def cmd_testnumber(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update, context):
+        await update.message.reply_text(ui.error("Access denied — use /addkey or ask an admin."))
+        return
+    from press1_utils import to_e164
+    import re
+
+    chat_id = update.effective_chat.id
+    if not context.args:
+        cfg = await asyncio.to_thread(vd.get_chat_settings, chat_id)
+        tn = (cfg.get("test_number") or "").strip()
+        if tn:
+            shown = to_e164(tn) or tn
+        else:
+            nums = await asyncio.to_thread(vd.test_numbers, chat_id=chat_id, prefer_owner=True)
+            shown = nums[0] if nums else ""
+        if shown:
+            await update.message.reply_text(
+                ui.card("📱 TEST NUMBER", [ui.bullet(f"+{shown}", "used by /testcall in this chat", icon="☎️")])
+            )
+        else:
+            await update.message.reply_text(
+                ui.error("No test number set. Example: /testnumber 07769799593")
+            )
+        return
+    raw = " ".join(context.args).strip()
+    digits = to_e164(raw) or re.sub(r"\D", "", raw)
+    if len(digits) < vd.MIN_PHONE_DIGITS + 2:
+        await update.message.reply_text(ui.error("Invalid number. Example: /testnumber 07769799593"))
+        return
+    if not digits.startswith("44"):
+        await update.message.reply_text(
+            ui.error("Test number must be UK (+44). Example: /testnumber 07769799593")
+        )
+        return
+    await asyncio.to_thread(vd.save_chat_settings, chat_id, test_number=digits)
+    await update.message.reply_text(
+        ui.card("📱 TEST NUMBER SAVED", [ui.bullet(f"+{digits}", "use /testcall to ring", icon="☎️")])
+    )
+
+
 async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         await update.message.reply_text(ui.error("Access denied — use /addkey or ask an admin."))
@@ -690,7 +732,9 @@ async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         import re
 
         if len(context.args) == 1 and context.args[0].lower() == "me":
-            nums = await asyncio.to_thread(vd.test_numbers, prefer_owner=True)
+            nums = await asyncio.to_thread(
+                vd.test_numbers, chat_id=update.effective_chat.id, prefer_owner=True
+            )
         else:
             parsed: list[str] = []
             for arg in context.args:
@@ -707,9 +751,11 @@ async def cmd_testcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             nums = parsed
     else:
         # Bare /testcall always rings the configured owner test mobile.
-        nums = await asyncio.to_thread(vd.test_numbers, prefer_owner=True)
+        nums = await asyncio.to_thread(
+            vd.test_numbers, chat_id=update.effective_chat.id, prefer_owner=True
+        )
         if not nums:
-            nums = await asyncio.to_thread(vd.test_numbers)
+            nums = await asyncio.to_thread(vd.test_numbers, chat_id=update.effective_chat.id)
         if not nums:
             await update.message.reply_text(
                 ui.error(
@@ -1514,6 +1560,7 @@ async def post_init(app: Application) -> None:
             BotCommand("unpause", "Resume campaign"),
             BotCommand("stop", "Stop campaign"),
             BotCommand("testcall", "Ring test numbers"),
+            BotCommand("testnumber", "Set UK test mobile"),
             BotCommand("settings", "Transfer target & options"),
             BotCommand("leads", "Loaded lead count"),
             BotCommand("clear", "Clear loaded numbers"),
@@ -1581,6 +1628,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("unpause", cmd_unpause))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("testcall", cmd_testcall))
+    app.add_handler(CommandHandler("testnumber", cmd_testnumber))
     app.add_handler(CommandHandler("leads", cmd_leads))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("schedule", cmd_schedule))

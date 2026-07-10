@@ -40,19 +40,69 @@ CPS = int(os.getenv("VICIDIAL_CPS", "10"))
 DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038969244")) or "442038969244"
 AU_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_AU_CALLER_ID", DEFAULT_CALLER_ID)) or DEFAULT_CALLER_ID
 NZ_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_NZ_CALLER_ID", "")) or ""
+UK_CLI_020 = re.sub(r"\D", "", os.getenv("VICIDIAL_UK_CLI_020", "442038969244")) or "442038969244"
+UK_CLI_080 = re.sub(r"\D", "", os.getenv("VICIDIAL_UK_CLI_080", "")) or ""
+UK_CLI_0330 = re.sub(r"\D", "", os.getenv("VICIDIAL_UK_CLI_0330", "")) or ""
+UK_CLI_CYCLE_IDX = "/var/lib/asterisk/press1_uk_cli_idx"
 BITCALL_SIP_USER = os.getenv("BITCALL_SIP_USER", "f-features896").strip()
 BITCALL_SIP_PASSWORD = os.getenv("BITCALL_SIP_PASSWORD", "").strip()
 BITCALL_SIP_REALM = os.getenv("BITCALL_SIP_REALM", "gateway.bitcall.io").strip()
 MIN_PHONE_DIGITS = 9
 
 
+def _uk_cli_pool() -> list[str]:
+    """Ordered UK CLI pool: 020, 0800, 0330 (BitCall-authorized numbers)."""
+    pool: list[str] = []
+    for cid in (UK_CLI_020, UK_CLI_080, UK_CLI_0330):
+        if cid and cid not in pool:
+            pool.append(cid)
+    return pool or [DEFAULT_CALLER_ID]
+
+
+def next_uk_caller_id() -> str:
+    """Pick next UK CLI from the 020/080/0330 rotation (server-side counter)."""
+    pool = _uk_cli_pool()
+    if len(pool) == 1:
+        return pool[0]
+    n = len(pool)
+    script = (
+        f"IDX={UK_CLI_CYCLE_IDX}; "
+        "mkdir -p $(dirname \"$IDX\"); "
+        "exec 6>\"${IDX}.lock\"; flock 6; "
+        "i=$(cat \"$IDX\" 2>/dev/null || echo 0); "
+        f"echo $((i + 1)) > \"$IDX\"; "
+        f"echo $((i % {n})); "
+        "flock -u 6"
+    )
+    try:
+        raw = run_remote(script, timeout=15).strip().splitlines()
+        idx = int((raw[-1] if raw else "0").strip())
+    except Exception:
+        idx = 0
+    return pool[idx % n]
+
+
+def uk_cli_label(cid: str) -> str:
+    """Human label for a UK CLI (020 / 080 / 0330)."""
+    d = re.sub(r"\D", "", cid or "")
+    if d.startswith("4480") or d.startswith("44800") or d.startswith("44808"):
+        return "080"
+    if d.startswith("4433"):
+        return "0330"
+    if d.startswith("4420"):
+        return "020"
+    return d[:6] if d else "?"
+
+
 def outbound_caller_id(number: str) -> str:
-    """Return CLI for call files — NZ/AU/UK based on destination prefix."""
+    """Return CLI for call files — UK cycles 020/080/0330; NZ/AU use regional CLI."""
     digits = re.sub(r"\D", "", number or "")
     if digits.startswith("64"):
         return NZ_CALLER_ID or AU_CALLER_ID or DEFAULT_CALLER_ID
     if digits.startswith("61"):
         return AU_CALLER_ID or DEFAULT_CALLER_ID
+    if digits.startswith("44"):
+        return next_uk_caller_id()
     return AU_CALLER_ID or DEFAULT_CALLER_ID
 
 DIAL_SCRIPT = "/tmp/press1_dial_run.sh"
@@ -222,7 +272,7 @@ def _stats_press1_path(run_id: str) -> str:
 
 
 def _default_chat_settings() -> dict[str, str]:
-    return {"threex_target": DEFAULT_THREECX, "sound_name": SOUND_NAME}
+    return {"threex_target": DEFAULT_THREECX, "sound_name": SOUND_NAME, "test_number": ""}
 
 
 def chat_sound_name(chat_id: int) -> str:
@@ -275,7 +325,8 @@ def get_chat_settings(chat_id: int) -> dict[str, str]:
     if target not in THREECX_PROFILES:
         target = DEFAULT_THREECX
     sound = str(cfg.get("sound_name", SOUND_NAME)).strip() or SOUND_NAME
-    return {"threex_target": target, "sound_name": sound}
+    test_number = str(cfg.get("test_number", "")).strip()
+    return {"threex_target": target, "sound_name": sound, "test_number": test_number}
 
 
 def save_chat_settings(chat_id: int, **fields: str) -> dict[str, str]:
@@ -288,6 +339,8 @@ def save_chat_settings(chat_id: int, **fields: str) -> dict[str, str]:
         current["threex_target"] = pid
     if "sound_name" in fields:
         current["sound_name"] = str(fields["sound_name"]).strip() or SOUND_NAME
+    if "test_number" in fields:
+        current["test_number"] = str(fields["test_number"]).strip()
     store.setdefault("chats", {})[key] = current
     _save_chat_settings_store(store)
     return current
@@ -911,7 +964,13 @@ def _owner_test_digits() -> str:
     return ""
 
 
-def test_numbers(*, prefer_owner: bool = False) -> list[str]:
+def test_numbers(*, prefer_owner: bool = False, chat_id: int | None = None) -> list[str]:
+    if chat_id is not None:
+        tn = (get_chat_settings(chat_id).get("test_number") or "").strip()
+        if tn:
+            e164 = to_e164(tn) or re.sub(r"\D", "", tn)
+            if len(e164) >= MIN_PHONE_DIGITS + 2:
+                return [e164]
     owner = _owner_test_digits()
     if prefer_owner and owner:
         return [owner]
@@ -1003,6 +1062,8 @@ GAP={gap}
 CAP={DIALER_CONCURRENT_CAP}
 AU_CALLER_ID={AU_CALLER_ID}
 NZ_CALLER_ID={NZ_CALLER_ID or AU_CALLER_ID}
+UK_CLI_POOL="{' '.join(_uk_cli_pool())}"
+UK_CLI_IDX={UK_CLI_CYCLE_IDX}
 SPOOLDIR=/var/spool/asterisk/outgoing
 TMPDIR=/var/spool/asterisk/tmp
 wait_if_paused() {{
@@ -1060,6 +1121,20 @@ while IFS= read -r num || [ -n "$num" ]; do
   fi
   cid="${{AU_CALLER_ID:-442038969244}}"
   case "$num" in
+    44*)
+      mkdir -p "$(dirname "$UK_CLI_IDX")"
+      exec 6>"${{UK_CLI_IDX}}.lock"
+      flock 6
+      uki=$(cat "$UK_CLI_IDX" 2>/dev/null || echo 0)
+      set -- $UK_CLI_POOL
+      ukn=$#
+      if [ "$ukn" -gt 0 ]; then
+        ukpick=$((uki % ukn + 1))
+        cid=$(eval echo \\$$ukpick)
+        echo $((uki + 1)) > "$UK_CLI_IDX"
+      fi
+      flock -u 6
+      ;;
     64*) cid="${{NZ_CALLER_ID:-$AU_CALLER_ID}}" ;;
   esac
   BEFORE=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0)
@@ -2050,7 +2125,7 @@ def dial_leads(phones: list[str], progress: dict) -> None:
     launch_dial_campaign(phones, progress)
 
 def test_calls(numbers: list[str] | None = None, chat_id: int | None = None) -> list[str]:
-    nums = numbers or test_numbers()
+    nums = numbers or test_numbers(chat_id=chat_id, prefer_owner=True)
     if not nums:
         raise RuntimeError("No test numbers configured — set VICIDIAL_TEST_NUMBERS on Render")
     placed: list[str] = []
