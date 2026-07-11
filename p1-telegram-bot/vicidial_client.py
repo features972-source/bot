@@ -1270,7 +1270,7 @@ while IFS= read -r num || [ -n "$num" ]; do
   while [ "$CAP" -gt 0 ]; do
     wait_if_paused
     [ -f "$STOP" ] && exit 0
-    live=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -ci 'bitcall')
+    live=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -c '^PJSIP/bitcall-' || true)
     [ "$live" -lt "$CAP" ] && break
     sleep 1
   done
@@ -1872,9 +1872,13 @@ def originate_press1(phone: str, chat_id: int | None = None) -> str:
 
 
 def live_bitcall_channels() -> int:
+    """Count unique BitCall SIP legs only.
+
+    Do NOT grep bare 'bitcall' — Local/* Dial() lines also contain @bitcall and
+    inflate Live now to ~2x (or worse) vs real customer calls.
+    """
     out = run_remote(
-        r"asterisk -rx 'core show channels concise' 2>/dev/null | grep -ci 'bitcall' || "
-        r"asterisk -rx 'core show channels' 2>/dev/null | grep -ci 'PJSIP/bitcall' || echo 0",
+        r"asterisk -rx 'core show channels concise' 2>/dev/null | grep -c '^PJSIP/bitcall-' || echo 0",
         timeout=15,
     ).strip()
     try:
