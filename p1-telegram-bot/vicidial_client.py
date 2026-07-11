@@ -34,12 +34,12 @@ MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "0"))
 DIALER_CONCURRENT_CAP = int(os.getenv("VICIDIAL_DIALER_CAP", "0"))  # 0 = uncapped (matches high press-1 era)
 BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "100"))
 BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "0"))
-# Fast pacing; dial loop also backgrounds AstDB writes so CLI latency doesn't stack on GAP.
-CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.05"))
+# High-conversion pacing (0.05 overloaded the box and stalled dialers).
+CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.1"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
 CPS = int(os.getenv("VICIDIAL_CPS", "20"))
-# Seconds to wait for digit AFTER greeting finishes (Read timeout). Shorter = less BitCall bill on voicemail.
-IVR_DIGIT_TIMEOUT = max(3, int(os.getenv("PRESS1_IVR_DIGIT_TIMEOUT", "8")))
+# Seconds to wait for digit AFTER greeting (high-P1 era used 25; 8 was too short).
+IVR_DIGIT_TIMEOUT = max(3, int(os.getenv("PRESS1_IVR_DIGIT_TIMEOUT", "20")))
 # BitCall-authorized trunk CLI (must be a number on the BitCall account — else shows Private).
 DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038968062")) or "442038968062"
 AU_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_AU_CALLER_ID", DEFAULT_CALLER_ID)) or DEFAULT_CALLER_ID
@@ -812,21 +812,22 @@ def fix_bitcall_endpoint() -> str:
         f"    'transport=transport-udp\\n'\n"
         f"    'context=from-trunk\\n'\n"
         f"    'disallow=all\\n'\n"
-        # Separate allow= lines — comma form is unreliable in PJSIP.
-        # dtmf_mode=auto: RFC4733 when negotiated, else inband (best Press-1 results).
+        # High-P1 era offered telephone-event; keep separate allow= lines for PJSIP.
+        # auto = RFC4733 when negotiated, else inband.
         f"    'allow=ulaw\\n'\n"
         f"    'allow=alaw\\n'\n"
-            f"    f'from_user={bitcall_cid}\\n'\n"
-            f"    f'from_domain={{realm}}\\n'\n"
-            f"    'outbound_auth=bitcall-auth\\n'\n"
-            f"    'aors=bitcall-aor\\n'\n"
-            f"    '{trunk}\\n'\n"
-            f"    'trust_id_outbound=yes\\n'\n"
-            f"    'send_pai=yes\\n'\n"
-            f"    'send_rpid=yes\\n'\n"
-            f"    'callerid_privacy=allowed\\n'\n"
-            f"    f'callerid=+{bitcall_cid} <+{bitcall_cid}>\\n'\n"
-            f"    'dtmf_mode=auto\\n'\n"
+        f"    'allow=telephone-event\\n'\n"
+        f"    f'from_user={bitcall_cid}\\n'\n"
+        f"    f'from_domain={{realm}}\\n'\n"
+        f"    'outbound_auth=bitcall-auth\\n'\n"
+        f"    'aors=bitcall-aor\\n'\n"
+        f"    '{trunk}\\n'\n"
+        f"    'trust_id_outbound=yes\\n'\n"
+        f"    'send_pai=yes\\n'\n"
+        f"    'send_rpid=yes\\n'\n"
+        f"    'callerid_privacy=allowed\\n'\n"
+        f"    f'callerid=+{bitcall_cid} <+{bitcall_cid}>\\n'\n"
+        f"    'dtmf_mode=auto\\n'\n"
         f"    '100rel=no\\n'\n"
         f"    'inband_progress=no\\n'\n"
         f")\n"
@@ -959,10 +960,11 @@ exten => _X.,1,Goto(press1-ivr,${{FILTER(0-9,${{EXTEN}})}},1)
 
 
 def _originate_bitcall_cmd(digits: str, cid: str) -> str:
-    """Originate via press1-outbound so CALLERID(pres)=allowed is set before INVITE."""
-    _ = cid
+    """High-P1 path: dial BitCall straight into press1-ivr (no Local/U() hop)."""
+    cli = re.sub(r"\D", "", cid or "") or DEFAULT_CALLER_ID
     return (
-        f"channel originate Local/{digits}@press1-outbound/n application Wait 3600"
+        f'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr '
+        f'callerid "{cli}" <{cli}>'
     )
 
 
@@ -989,16 +991,16 @@ exten => ivr,1,Answer()
  same => n,Set(P1UID=${{CHANNEL(uniqueid)}})
  same => n,Set(CHANNEL(language)=en)
  same => n,NoOp(IVR lead=${{LEADNUM}})
-{_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=False)}
+{_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
  same => n,Set(__P1RUN=${{P1RUN}})
  same => n,Set(__P1SOUND=${{P1SOUND}})
  same => n,Set(__P1XFER=${{P1XFER}})
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered &' )
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
- same => n,Wait(0.3)
+ same => n,Wait(0.5)
  same => n,Set(P1TRIES=0)
  same => n(ivrloop),Set(P1TRIES=$[${{P1TRIES}}+1])
- same => n,GotoIf($[${{P1TRIES}}>3]?hang,1)
+ same => n,GotoIf($[${{P1TRIES}}>4]?hang,1)
  same => n,Read(P1DIGIT,${{P1SOUND}},1,,,{IVR_DIGIT_TIMEOUT})
  same => n,NoOp(IVR digit=${{P1DIGIT}} try=${{P1TRIES}})
  same => n,GotoIf($["${{P1DIGIT}}" = "1"]?1,1)
@@ -1275,22 +1277,19 @@ while IFS= read -r num || [ -n "$num" ]; do
     sleep 1
   done
   digits=$(echo "$num" | tr -cd '0-9')
-  # AstDB writes in background — sync CLI puts were stacking ~3 round-trips per dial
-  # on a loaded box and capping real dial rate far below GAP.
+  # Sync AstDB BEFORE originate (high-P1 path — background race left xfer/run empty).
   XFER=""
   if [ -f "/tmp/press1_xfer_$RUNID.txt" ]; then
     XFER=$(tr -d '\\r\\n' < "/tmp/press1_xfer_$RUNID.txt")
   fi
-  (
-    /usr/sbin/asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >/dev/null 2>&1
-    /usr/sbin/asterisk -rx "database put press1 lead/${{digits}} ${{num}}" >/dev/null 2>&1
-    if [ -n "$XFER" ]; then
-      /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >/dev/null 2>&1
-    fi
-  ) &
-  # Local→press1-outbound sets CALLERID(pres)=allowed before Dial (prevents From: Anonymous).
+  /usr/sbin/asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >/dev/null 2>&1
+  /usr/sbin/asterisk -rx "database put press1 lead/${{digits}} ${{num}}" >/dev/null 2>&1
+  if [ -n "$XFER" ]; then
+    /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >/dev/null 2>&1
+  fi
+  # Proven high-P1 path: dial BitCall straight into press1-ivr (no Local/U() hop).
   cid={DEFAULT_CALLER_ID}
-  orig_out=$(/usr/sbin/asterisk -rx "channel originate Local/${{num}}@press1-outbound/n application Wait 3600" 2>&1)
+  orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid ${{cid}}" 2>&1)
   PLACED=NO
   if echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
     PLACED=NO
