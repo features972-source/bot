@@ -37,6 +37,8 @@ BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "0"))
 CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.1"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
 CPS = int(os.getenv("VICIDIAL_CPS", "20"))
+# Seconds to wait for digit AFTER greeting finishes (Read timeout). Shorter = less BitCall bill on voicemail.
+IVR_DIGIT_TIMEOUT = max(3, int(os.getenv("PRESS1_IVR_DIGIT_TIMEOUT", "8")))
 # BitCall-authorized trunk CLI (must be a number on the BitCall account — else shows Private).
 DEFAULT_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_CALLER_ID", "442038968062")) or "442038968062"
 AU_CALLER_ID = re.sub(r"\D", "", os.getenv("VICIDIAL_AU_CALLER_ID", DEFAULT_CALLER_ID)) or DEFAULT_CALLER_ID
@@ -818,7 +820,7 @@ def fix_bitcall_endpoint() -> str:
         f"    'trust_id_outbound=yes\\n'\n"
         f"    'send_pai=yes\\n'\n"
         f"    'send_rpid=yes\\n'\n"
-        f"    'callerid_privacy=allowed_not_screened\\n'\n"
+        f"    'callerid_privacy=allowed\\n'\n"
         f"    f'callerid=+{bitcall_cid} <+{bitcall_cid}>\\n'\n"
         f"    'dtmf_mode=rfc4733\\n'\n"
         f"    '100rel=no\\n'\n"
@@ -933,7 +935,9 @@ exten => _X.,1,Set(P1LEAD=${{FILTER(0-9,${{EXTEN}})}})
  same => n,Set(__P1LEAD=${{P1LEAD}})
  same => n,Set(CALLERID(num)={cid})
  same => n,Set(CALLERID(name)={cid})
- same => n,Set(CALLERID(pres)=allowed_not_screened)
+ same => n,Set(CALLERID(pres)=allowed)
+ same => n,Set(CALLERID(num-pres)=allowed)
+ same => n,Set(CALLERID(name-pres)=allowed)
  same => n,NoOp(P1 outbound lead=${{P1LEAD}} cli=+{cid})
  same => n,Dial(PJSIP/${{P1LEAD}}@bitcall,120,U(press1-conn^${{P1LEAD}}))
  same => n,Hangup()
@@ -951,12 +955,10 @@ exten => _X.,1,Goto(press1-ivr,${{FILTER(0-9,${{EXTEN}})}},1)
 
 
 def _originate_bitcall_cmd(digits: str, cid: str) -> str:
-    """Direct BitCall→IVR with explicit BitCall-authorized CLI (avoids Private)."""
-    cli = re.sub(r"\D", "", cid or "") or DEFAULT_CALLER_ID
-    # Quoted name + <+E164> keeps presentation allowed on many carriers.
+    """Originate via press1-outbound so CALLERID(pres)=allowed is set before INVITE."""
+    _ = cid
     return (
-        f'channel originate PJSIP/{digits}@bitcall extension {digits}@press1-ivr '
-        f'callerid "{cli}" <+{cli}>'
+        f"channel originate Local/{digits}@press1-outbound/n application Wait 3600"
     )
 
 
@@ -997,7 +999,7 @@ exten => ivr,1,Answer()
  same => n,Set(P1TRIES=0)
  same => n(ivrloop),Set(P1TRIES=$[${{P1TRIES}}+1])
  same => n,GotoIf($[${{P1TRIES}}>3]?hang,1)
- same => n,Read(P1DIGIT,${{P1SOUND}},1,,,25)
+ same => n,Read(P1DIGIT,${{P1SOUND}},1,,,{IVR_DIGIT_TIMEOUT})
  same => n,NoOp(IVR digit=${{P1DIGIT}} try=${{P1TRIES}})
  same => n,GotoIf($["${{P1DIGIT}}" = "1"]?1,1)
  same => n,GotoIf($[${{LEN(${{P1DIGIT}})}}=0]?ivr,ivrloop)
@@ -1283,9 +1285,9 @@ while IFS= read -r num || [ -n "$num" ]; do
   if [ -n "$XFER" ]; then
     /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >/dev/null 2>&1
   fi
-  # Always BitCall-authorized CLI — unowned NZ CLIs present as Private on handsets.
+  # Local→press1-outbound sets CALLERID(pres)=allowed before Dial (prevents From: Anonymous).
   cid={DEFAULT_CALLER_ID}
-  orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid {DEFAULT_CALLER_ID}" 2>&1)
+  orig_out=$(/usr/sbin/asterisk -rx "channel originate Local/${{num}}@press1-outbound/n application Wait 3600" 2>&1)
   PLACED=NO
   if echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
     PLACED=NO
