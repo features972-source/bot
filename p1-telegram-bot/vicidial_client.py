@@ -812,11 +812,9 @@ def fix_bitcall_endpoint() -> str:
         f"    'transport=transport-udp\\n'\n"
         f"    'context=from-trunk\\n'\n"
         f"    'disallow=all\\n'\n"
-        # High-P1 era offered telephone-event; keep separate allow= lines for PJSIP.
-        # auto = RFC4733 when negotiated, else inband.
+        # High-P1 era: rfc4733 so telephone-event is offered in SDP (WaitExten needs it).
         f"    'allow=ulaw\\n'\n"
         f"    'allow=alaw\\n'\n"
-        f"    'allow=telephone-event\\n'\n"
         f"    f'from_user={bitcall_cid}\\n'\n"
         f"    f'from_domain={{realm}}\\n'\n"
         f"    'outbound_auth=bitcall-auth\\n'\n"
@@ -827,7 +825,7 @@ def fix_bitcall_endpoint() -> str:
         f"    'send_rpid=yes\\n'\n"
         f"    'callerid_privacy=allowed\\n'\n"
         f"    f'callerid=+{bitcall_cid} <+{bitcall_cid}>\\n'\n"
-        f"    'dtmf_mode=auto\\n'\n"
+        f"    'dtmf_mode=rfc4733\\n'\n"
         f"    '100rel=no\\n'\n"
         f"    'inband_progress=no\\n'\n"
         f")\n"
@@ -969,7 +967,11 @@ def _originate_bitcall_cmd(digits: str, cid: str) -> str:
 
 
 def _press1_ivr_dialplan(*, server_ip: str, default_sound: str, default_xfer: str) -> str:
-    """Press-1 IVR: Read() digit capture (proven high-conversion path)."""
+    """High-P1 IVR: Background+WaitExten (proven capture) + AMI DTMF backup.
+
+    Read() was leaving channels on ulaw passthrough so inband DSP heard nothing.
+    Background/WaitExten matches the last known high-conversion stack (8f560db).
+    """
     return f"""[press1-ivr]
 exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
  same => n,Set(__LEADNUM=${{LEADNUM}})
@@ -977,7 +979,6 @@ exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
  same => n,Goto(ivr,1)
 
 exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{LEADNUM}})}})
- same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{ARG1}})}})}})
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{DB(press1/lead)}})}})}})
  same => n,Goto(ivr,1)
 
@@ -998,16 +999,19 @@ exten => ivr,1,Answer()
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered &' )
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
  same => n,Wait(0.5)
+ same => n,Set(TIMEOUT(digit)=8)
+ same => n,Set(TIMEOUT(response)=25)
  same => n,Set(P1TRIES=0)
  same => n(ivrloop),Set(P1TRIES=$[${{P1TRIES}}+1])
  same => n,GotoIf($[${{P1TRIES}}>4]?hang,1)
- same => n,Read(P1DIGIT,${{P1SOUND}},1,,,{IVR_DIGIT_TIMEOUT})
- same => n,NoOp(IVR digit=${{P1DIGIT}} try=${{P1TRIES}})
- same => n,GotoIf($["${{P1DIGIT}}" = "1"]?1,1)
- same => n,GotoIf($[${{LEN(${{P1DIGIT}})}}=0]?ivr,ivrloop)
+ same => n,Background(${{P1SOUND}})
+ same => n,WaitExten(20)
  same => n,Goto(ivr,ivrloop)
 
 exten => hang,1,Hangup()
+
+exten => i,1,Goto(ivr,ivrloop)
+exten => t,1,Goto(ivr,ivrloop)
 
 exten => 1,1,StopPlaytones()
  same => n,NoOp(Press-1 from ${{CALLERID(num)}} lead=${{LEADNUM}})
