@@ -34,7 +34,8 @@ MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "0"))
 DIALER_CONCURRENT_CAP = int(os.getenv("VICIDIAL_DIALER_CAP", "0"))  # 0 = uncapped (matches high press-1 era)
 BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "100"))
 BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "0"))
-CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.1"))
+# Fast pacing; dial loop also backgrounds AstDB writes so CLI latency doesn't stack on GAP.
+CALL_GAP_SEC = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.05"))
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
 CPS = int(os.getenv("VICIDIAL_CPS", "20"))
 # Seconds to wait for digit AFTER greeting finishes (Read timeout). Shorter = less BitCall bill on voicemail.
@@ -811,18 +812,21 @@ def fix_bitcall_endpoint() -> str:
         f"    'transport=transport-udp\\n'\n"
         f"    'context=from-trunk\\n'\n"
         f"    'disallow=all\\n'\n"
-        f"    'allow=ulaw,alaw,telephone-event\\n'\n"
-        f"    f'from_user={bitcall_cid}\\n'\n"
-        f"    f'from_domain={{realm}}\\n'\n"
-        f"    'outbound_auth=bitcall-auth\\n'\n"
-        f"    'aors=bitcall-aor\\n'\n"
-        f"    '{trunk}\\n'\n"
-        f"    'trust_id_outbound=yes\\n'\n"
-        f"    'send_pai=yes\\n'\n"
-        f"    'send_rpid=yes\\n'\n"
-        f"    'callerid_privacy=allowed\\n'\n"
-        f"    f'callerid=+{bitcall_cid} <+{bitcall_cid}>\\n'\n"
-        f"    'dtmf_mode=rfc4733\\n'\n"
+        # Separate allow= lines — comma form is unreliable in PJSIP.
+        # dtmf_mode=auto: RFC4733 when negotiated, else inband (best Press-1 results).
+        f"    'allow=ulaw\\n'\n"
+        f"    'allow=alaw\\n'\n"
+            f"    f'from_user={bitcall_cid}\\n'\n"
+            f"    f'from_domain={{realm}}\\n'\n"
+            f"    'outbound_auth=bitcall-auth\\n'\n"
+            f"    'aors=bitcall-aor\\n'\n"
+            f"    '{trunk}\\n'\n"
+            f"    'trust_id_outbound=yes\\n'\n"
+            f"    'send_pai=yes\\n'\n"
+            f"    'send_rpid=yes\\n'\n"
+            f"    'callerid_privacy=allowed\\n'\n"
+            f"    f'callerid=+{bitcall_cid} <+{bitcall_cid}>\\n'\n"
+            f"    'dtmf_mode=auto\\n'\n"
         f"    '100rel=no\\n'\n"
         f"    'inband_progress=no\\n'\n"
         f")\n"
@@ -968,7 +972,6 @@ def _press1_ivr_dialplan(*, server_ip: str, default_sound: str, default_xfer: st
 exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
  same => n,Set(__LEADNUM=${{LEADNUM}})
  same => n,Set(P1UID=${{CHANNEL(uniqueid)}})
- same => n,Set(GLOBAL(P1LEAD_${{P1UID}})=${{LEADNUM}})
  same => n,Goto(ivr,1)
 
 exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{LEADNUM}})}})
@@ -984,18 +987,15 @@ exten => ivr,1,Answer()
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{PJSIP_HEADER(read,To)}})}})}})
  same => n,Set(__LEADNUM=${{LEADNUM}})
  same => n,Set(P1UID=${{CHANNEL(uniqueid)}})
- same => n,Set(GLOBAL(P1LEAD_${{P1UID}})=${{LEADNUM}})
  same => n,Set(CHANNEL(language)=en)
  same => n,NoOp(IVR lead=${{LEADNUM}})
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=False)}
  same => n,Set(__P1RUN=${{P1RUN}})
  same => n,Set(__P1SOUND=${{P1SOUND}})
  same => n,Set(__P1XFER=${{P1XFER}})
- same => n,System(mkdir -p {DIAL_STATS_DIR}/${{P1RUN}})
- same => n,System(echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered)
+ same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered &' )
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
- same => n,Set(GLOBAL(P1XFER_${{P1UID}})=${{P1XFER}})
- same => n,Wait(0.5)
+ same => n,Wait(0.3)
  same => n,Set(P1TRIES=0)
  same => n(ivrloop),Set(P1TRIES=$[${{P1TRIES}}+1])
  same => n,GotoIf($[${{P1TRIES}}>3]?hang,1)
@@ -1275,16 +1275,19 @@ while IFS= read -r num || [ -n "$num" ]; do
     sleep 1
   done
   digits=$(echo "$num" | tr -cd '0-9')
-  # Sync astdb BEFORE originate so press-1 xfer always has leadxfer/run keys.
+  # AstDB writes in background — sync CLI puts were stacking ~3 round-trips per dial
+  # on a loaded box and capping real dial rate far below GAP.
   XFER=""
   if [ -f "/tmp/press1_xfer_$RUNID.txt" ]; then
     XFER=$(tr -d '\\r\\n' < "/tmp/press1_xfer_$RUNID.txt")
   fi
-  /usr/sbin/asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >/dev/null 2>&1
-  /usr/sbin/asterisk -rx "database put press1 lead/${{digits}} ${{num}}" >/dev/null 2>&1
-  if [ -n "$XFER" ]; then
-    /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >/dev/null 2>&1
-  fi
+  (
+    /usr/sbin/asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >/dev/null 2>&1
+    /usr/sbin/asterisk -rx "database put press1 lead/${{digits}} ${{num}}" >/dev/null 2>&1
+    if [ -n "$XFER" ]; then
+      /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >/dev/null 2>&1
+    fi
+  ) &
   # Local→press1-outbound sets CALLERID(pres)=allowed before Dial (prevents From: Anonymous).
   cid={DEFAULT_CALLER_ID}
   orig_out=$(/usr/sbin/asterisk -rx "channel originate Local/${{num}}@press1-outbound/n application Wait 3600" 2>&1)

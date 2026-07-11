@@ -393,7 +393,8 @@ async def _live_campaign_updater(
             frame += 1
             st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
             err = progress.get("error")
-            text = await _format_live_stats(st, total_leads, progress=progress)
+            live_total = int(st.get("list_size", 0) or 0) or total_leads
+            text = await _format_live_stats(st, live_total, progress=progress)
             if progress.get("stalled"):
                 text += _warn("Dialer stopped early on server — upload a new list and /run")
             if err:
@@ -409,7 +410,7 @@ async def _live_campaign_updater(
             if dial_state in ("finished", "stalled") and hopper == 0:
                 idle_rounds += 1
                 if idle_rounds >= 2:
-                    final = await _format_live_stats(st, total_leads, finished=True, progress=progress)
+                    final = await _format_live_stats(st, live_total, finished=True, progress=progress)
                     err = progress.get("error")
                     if err:
                         final += _warn(err)
@@ -421,7 +422,7 @@ async def _live_campaign_updater(
             elif dial_state == "finishing" and hopper == 0 and live == 0:
                 idle_rounds += 1
                 if idle_rounds >= 3:
-                    final = await _format_live_stats(st, total_leads, finished=True, progress=progress)
+                    final = await _format_live_stats(st, live_total, finished=True, progress=progress)
                     try:
                         await _safe_edit(msg, final)
                     except BadRequest:
@@ -430,7 +431,7 @@ async def _live_campaign_updater(
             elif dial_state == "stalled" and hopper > 0 and dialed > 0:
                 idle_rounds += 1
                 if idle_rounds >= 4:
-                    final = await _format_live_stats(st, total_leads, finished=True, progress=progress)
+                    final = await _format_live_stats(st, live_total, finished=True, progress=progress)
                     final += _warn("Dialer stopped early on server — upload a new list and /run")
                     try:
                         await _safe_edit(msg, final)
@@ -438,7 +439,7 @@ async def _live_campaign_updater(
                         pass
                     break
             elif not active and dialed == 0 and idle_rounds >= 6:
-                final = await _format_live_stats(st, total_leads, finished=True, progress=progress)
+                final = await _format_live_stats(st, live_total, finished=True, progress=progress)
                 err = progress.get("error") or "Dialer never started — try /run again"
                 final += _warn(err)
                 try:
@@ -1393,10 +1394,14 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         content.decode("utf-8-sig", errors="replace")
     )
     s = session_for(update, context)
+    prev = len(s.numbers)
     s.numbers = list(dict.fromkeys(s.numbers + nums))
     dest.unlink(missing_ok=True)
+    extra = ""
+    if prev > 0:
+        extra = f"\n\n⚠️ You still had {prev} leads loaded — new file was <b>added</b> (not replaced). Use /clear first if you only want this file."
     await update.message.reply_text(
-        f"📥 Loaded {len(nums)} leads ({len(s.numbers)} total). /run to dial."
+        f"📥 Loaded {len(nums)} leads ({len(s.numbers)} total). /run to dial.{extra}"
     )
 
 
@@ -1410,9 +1415,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not nums:
         return
     s = session_for(update, context)
+    prev = len(s.numbers)
     s.numbers = list(dict.fromkeys(s.numbers + nums))
+    extra = ""
+    if prev > 0:
+        extra = f"\n\n⚠️ You still had {prev} leads loaded — pasted numbers were <b>added</b>. Use /clear first for a fresh list only."
     await update.message.reply_text(
-        f"📥 Added {len(nums)} leads ({len(s.numbers)} total). /run to dial."
+        f"📥 Added {len(nums)} leads ({len(s.numbers)} total). /run to dial.{extra}"
     )
 
 
