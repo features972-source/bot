@@ -70,3 +70,7 @@ services:
         sync: false
       - key: BITCALL_SIP_REALM
         value: gateway.bitcall.io
+      - key: DASH_API_SECRET
+        sync: false
+      - key: DASH_SUBSCRIPTION_KEYS
+        sync: false

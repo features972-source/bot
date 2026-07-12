@@ -23,7 +23,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-BUILD = "press1-bg-waitexten-v71"
+BUILD = "press1-ready-v18"
 WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "telegram/webhook").lstrip("/")
 PUBLIC_URL = (
     os.getenv("TELEGRAM_WEBHOOK_URL_BASE")
@@ -92,6 +92,10 @@ def _run_webhook() -> None:
     asyncio.run_coroutine_threadsafe(boot(), loop).result()
 
     flask_app = Flask(__name__)
+
+    from dash_api import register_dash_routes
+
+    register_dash_routes(flask_app)
 
     @flask_app.get("/health")
     def health():
