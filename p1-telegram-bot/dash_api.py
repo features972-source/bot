@@ -177,6 +177,27 @@ def api_health():
         return jsonify({"ok": False, "error": str(exc)}), 503
 
 
+@bp.get("/api/settings")
+@auth_required
+def api_get_settings():
+    tenant = request.dash_tenant
+    summary = vd.settings_summary(tenant)
+    cfg = vd.get_chat_settings(tenant)
+    tn = str(cfg.get("test_number") or "").strip()
+    return jsonify(
+        {
+            "ok": True,
+            "settings": {
+                **summary,
+                "test_number": tn,
+                "test_number_display": f"+{tn}" if tn else "",
+                "threex_target": cfg.get("threex_target", summary.get("threex_target", "")),
+                "transfer_label": ps.transfer_display(ps.profile(cfg["threex_target"])),
+            },
+        }
+    )
+
+
 @bp.post("/api/settings")
 @auth_required
 def api_settings():
@@ -186,17 +207,26 @@ def api_settings():
         saved = _apply_transfer(tenant, body)
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
+    if "test_number" in body:
+        raw = str(body.get("test_number") or "").strip()
+        digits = __import__("re").sub(r"\D", "", raw)
+        if raw and len(digits) < vd.MIN_PHONE_DIGITS + 2:
+            return jsonify({"ok": False, "error": "Invalid test number"}), 400
+        vd.save_chat_settings(tenant, test_number=digits)
     settings = vd.get_chat_settings(tenant)
     profile = ps.profile(settings["threex_target"])
+    summary = vd.settings_summary(tenant)
     return jsonify(
         {
             "ok": True,
             "settings": {
+                **summary,
                 "threex_target": settings["threex_target"],
                 "transfer_label": ps.transfer_display(profile),
                 "sound_name": settings["sound_name"],
+                "test_number": settings.get("test_number", ""),
             },
-            "saved": bool(saved),
+            "saved": bool(saved) or "test_number" in body,
         }
     )
 
@@ -330,14 +360,155 @@ def api_testcall():
     tenant = request.dash_tenant
     body = request.get_json(force=True, silent=True) or {}
     number = str(body.get("number") or "").strip()
+    numbers = body.get("numbers") or []
     try:
-        if number:
+        if numbers:
+            placed = vd.test_calls([str(n) for n in numbers], chat_id=tenant)
+        elif number:
             placed = vd.test_calls([number], chat_id=tenant)
         else:
             placed = vd.test_calls(chat_id=tenant)
         return jsonify({"ok": True, "placed": placed})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+@bp.post("/api/schedule")
+@auth_required
+def api_schedule():
+    import press1_schedule as sched
+    from datetime import datetime
+
+    body = request.get_json(force=True, silent=True) or {}
+    numbers = body.get("numbers") or []
+    run_at_raw = str(body.get("run_at") or "").strip()
+    if not numbers:
+        return jsonify({"ok": False, "error": "No numbers loaded"}), 400
+    if not run_at_raw:
+        return jsonify({"ok": False, "error": "run_at required (ISO datetime)"}), 400
+    tenant = request.dash_tenant
+    try:
+        run_at = datetime.fromisoformat(run_at_raw.replace("Z", "+00:00"))
+        if run_at.tzinfo is None:
+            run_at = run_at.replace(tzinfo=sched.TZ)
+        entry = sched.add_schedule(user_id=tenant, chat_id=tenant, numbers=numbers, run_at=run_at)
+        data = sched.load_schedules()
+        for item in data.get("schedules", []):
+            if item.get("id") == entry.get("id"):
+                item["source"] = "dashboard"
+                break
+        sched.save_schedules(data)
+        return jsonify({"ok": True, "schedule": entry})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+@bp.get("/api/schedules")
+@auth_required
+def api_schedules():
+    import press1_schedule as sched
+
+    tenant = request.dash_tenant
+    items = [s for s in sched.list_schedules(tenant) if int(s.get("chat_id", 0)) == tenant]
+    return jsonify({"ok": True, "schedules": items})
+
+
+@bp.post("/api/schedule/cancel")
+@auth_required
+def api_schedule_cancel():
+    import press1_schedule as sched
+
+    body = request.get_json(force=True, silent=True) or {}
+    sid = str(body.get("id") or "").strip()
+    if not sid:
+        return jsonify({"ok": False, "error": "Schedule id required"}), 400
+    tenant = request.dash_tenant
+    try:
+        sched.remove_schedule(sid, tenant)
+        return jsonify({"ok": True, "id": sid})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+@bp.post("/api/audio")
+@auth_required
+def api_audio():
+    from pathlib import Path
+    import tempfile
+
+    from press1_utils import convert_audio_for_asterisk
+
+    tenant = request.dash_tenant
+    upload = request.files.get("audio")
+    if not upload or not upload.filename:
+        return jsonify({"ok": False, "error": "No audio file"}), 400
+    name = upload.filename.lower()
+    if not any(name.endswith(ext) for ext in (".mp3", ".wav", ".m4a", ".ogg", ".opus", ".sln")):
+        return jsonify({"ok": False, "error": "Unsupported format — use MP3, WAV, M4A, or OGG"}), 400
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / upload.filename
+            upload.save(dest)
+            sound_name = vd.chat_sound_name(tenant)
+            files = convert_audio_for_asterisk(dest, Path(tmp), sound_name)
+            deployed = vd.deploy_chat_audio(tenant, files, None)
+        return jsonify({"ok": True, "sound_name": deployed})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+@bp.post("/api/repair")
+@auth_required
+def api_repair():
+    try:
+        result = vd.repair_press1_server()
+        return jsonify({"ok": True, "result": result})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+def launch_dashboard_campaign(tenant: int, numbers: list[str]) -> dict[str, Any]:
+    """Used by scheduled dashboard campaigns."""
+    prog = _progress_for(tenant)
+    try:
+        st = vd.get_dial_stats(prog.get("run_since"), prog)
+        if st.get("dial_state") in ("running", "paused"):
+            raise RuntimeError("Campaign already running")
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+    try:
+        run_since = vd.server_now()
+    except Exception:
+        run_since = ""
+    prog.update(
+        {
+            "started": 0,
+            "dialed": 0,
+            "failed": 0,
+            "press1": 0,
+            "answered": 0,
+            "live": 0,
+            "total": len(numbers),
+            "running": True,
+            "stop": False,
+            "chat_id": tenant,
+            "run_id": "",
+            "run_since": run_since,
+            "error": None,
+        }
+    )
+
+    def _run() -> None:
+        try:
+            vd.launch_dial_campaign(numbers, prog)
+        except Exception as exc:
+            prog["error"] = str(exc)
+            prog["running"] = False
+
+    threading.Thread(target=_run, daemon=True, name=f"dash-sched-{tenant}").start()
+    return prog
 
 
 def register_dash_routes(app) -> None:

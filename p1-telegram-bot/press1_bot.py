@@ -1120,7 +1120,17 @@ async def _schedule_loop(app: Application) -> None:
                 uid = int(job.get("user_id", 0) or 0)
                 chat_id = int(job.get("chat_id", uid) or uid)
                 numbers = list(job.get("numbers") or [])
-                if not access.is_allowed(uid) or not numbers:
+                if not numbers:
+                    continue
+                if job.get("source") == "dashboard":
+                    try:
+                        from dash_api import launch_dashboard_campaign
+
+                        await asyncio.to_thread(launch_dashboard_campaign, chat_id, numbers)
+                    except Exception as e:
+                        print(f"[press1] dashboard schedule failed: {e}")
+                    continue
+                if not access.is_allowed(uid):
                     continue
                 run_at = datetime.fromtimestamp(
                     float(job.get("run_at", 0)), tz=schedule.TZ
