@@ -76,23 +76,46 @@ def _progress_for(tenant: int) -> dict[str, Any]:
         return _progress[tenant]
 
 
-def _campaign_view(st: dict[str, str], prog: dict[str, Any]) -> dict[str, Any]:
+def _campaign_view(st: dict[str, str], prog: dict[str, Any], tenant: int | None = None) -> dict[str, Any]:
     dial_state = str(st.get("dial_state") or ("running" if prog.get("running") else "idle"))
-    running = dial_state in ("running", "paused")
+    running = dial_state in ("running", "paused", "stalled")
+    started = int(st.get("dialed") or prog.get("started") or 0)
+    answered = int(st.get("answered") or prog.get("answered") or 0)
+    press1 = int(st.get("press1") or prog.get("press1") or 0)
+    total = int(st.get("list_size") or prog.get("total") or 0)
+    failed = int(st.get("failed") or prog.get("failed") or 0)
+    live = int(st.get("live") or 0)
+    hopper = int(st.get("hopper") or max(0, total - started - failed))
+
+    transfer_label = str(prog.get("transfer_label") or "")
+    if not transfer_label and tenant is not None:
+        try:
+            settings = vd.get_chat_settings(tenant)
+            transfer_label = ps.transfer_display(ps.profile(settings["threex_target"]))
+        except Exception:
+            pass
+
+    conv = round(press1 / started * 100, 1) if started > 0 else 0.0
+    ans_rate = round(answered / started * 100, 1) if started > 0 else 0.0
+    pct_done = round(started / total * 100, 1) if total > 0 else 0.0
+
     return {
         "running": running,
         "paused": dial_state == "paused",
-        "started": int(st.get("dialed") or prog.get("started") or 0),
-        "answered": int(st.get("answered") or prog.get("answered") or 0),
-        "press1": int(st.get("press1") or prog.get("press1") or 0),
-        "live": int(st.get("live") or 0),
-        "failed": int(st.get("failed") or prog.get("failed") or 0),
-        "total": int(st.get("list_size") or prog.get("total") or 0),
-        "hopper": int(st.get("hopper") or 0),
+        "started": started,
+        "answered": answered,
+        "press1": press1,
+        "live": live,
+        "failed": failed,
+        "total": total,
+        "hopper": hopper,
         "run_id": str(st.get("run_id") or prog.get("run_id") or ""),
         "dial_state": dial_state,
-        "transfer_label": str(prog.get("transfer_label") or ""),
+        "transfer_label": transfer_label,
         "error": prog.get("error"),
+        "conversion_pct": conv,
+        "answer_rate": ans_rate,
+        "pct_done": pct_done,
     }
 
 
@@ -113,8 +136,8 @@ def api_stats():
     try:
         st = vd.get_dial_stats(since, prog)
     except Exception as exc:
-        return jsonify({"ok": True, "campaign": _campaign_view({}, prog), "warning": str(exc)})
-    return jsonify({"ok": True, "campaign": _campaign_view(st, prog)})
+        return jsonify({"ok": True, "campaign": _campaign_view({}, prog, tenant), "warning": str(exc)})
+    return jsonify({"ok": True, "campaign": _campaign_view(st, prog, tenant)})
 
 
 @bp.get("/api/profiles")
@@ -237,7 +260,7 @@ def api_start():
         st = vd.get_dial_stats(run_since, prog)
     except Exception:
         st = {}
-    return jsonify({"ok": True, "campaign": _campaign_view(st, prog)})
+    return jsonify({"ok": True, "campaign": _campaign_view(st, prog, tenant)})
 
 
 @bp.post("/api/campaign/stop")
@@ -257,7 +280,7 @@ def api_stop():
         pass
     prog["running"] = False
     prog["stop"] = True
-    return jsonify({"ok": True, "campaign": _campaign_view({}, prog)})
+    return jsonify({"ok": True, "campaign": _campaign_view({}, prog, tenant)})
 
 
 @bp.post("/api/campaign/pause")
@@ -271,7 +294,7 @@ def api_pause():
     st = vd.pause_dial_campaign(run_id)
     prog["paused"] = True
     prog["running"] = True
-    return jsonify({"ok": True, "status": st, "campaign": _campaign_view(st, prog)})
+    return jsonify({"ok": True, "status": st, "campaign": _campaign_view(st, prog, tenant)})
 
 
 @bp.post("/api/campaign/unpause")
@@ -285,7 +308,7 @@ def api_unpause():
     st = vd.unpause_dial_campaign(run_id)
     prog["paused"] = False
     prog["running"] = True
-    return jsonify({"ok": True, "status": st, "campaign": _campaign_view(st, prog)})
+    return jsonify({"ok": True, "status": st, "campaign": _campaign_view(st, prog, tenant)})
 
 
 @bp.get("/api/dtmf")
