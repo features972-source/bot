@@ -100,15 +100,17 @@ HELP = (
             ui.bullet("/settings", "transfer target for this chat", icon="▪️"),
             ui.bullet("/leads", "loaded lead count", icon="▪️"),
             ui.bullet("/clear", "clear loaded numbers", icon="▪️"),
+            ui.bullet("/clearleads", "same as /clear", icon="▪️"),
             "",
             "🔐 <b>ACCESS</b> (owner only)",
             ui.bullet("/addkey @user 24h", "grant temporary access", icon="▪️"),
             ui.bullet("/listkeys", "active access keys", icon="▪️"),
             ui.bullet("/revokekey @user", "revoke access", icon="▪️"),
+            ui.bullet("/repair", "re-sync dialplan + DTMF on dial server (owner)", icon="▪️"),
         ],
         expandable=True,
     )
-    + "\n🔔 <i>Each group chat runs its own campaign. /pause and /unpause only affect that chat.</i>"
+    + "\n🔔 <i>/run is exclusive on the dial server — starting a campaign stops any other active one. /pause and /unpause only affect this chat.</i>"
     + "\n🔔 <i>Every key a caller presses is streamed here live.</i>"
 )
 
@@ -677,6 +679,20 @@ async def cmd_revokekey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             extra_users=extra,
         )
         await update.message.reply_text(f"✅ Revoked access for {ui.b(label)}.")
+    except Exception as e:
+        await update.message.reply_text(ui.error(e))
+
+
+async def cmd_repair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id if update.effective_user else 0
+    if not access.is_owner(uid):
+        await update.message.reply_text("🔒 Only the owner can run /repair.")
+        return
+    await update.message.reply_text("🛠 Re-syncing dialplan, BitCall, DTMF listeners…")
+    try:
+        result = await asyncio.to_thread(vd.repair_press1_server)
+        lines = [f"• {k}: {str(v)[:120]}" for k, v in result.items()]
+        await update.message.reply_text("✅ Stack repaired:\n" + "\n".join(lines))
     except Exception as e:
         await update.message.reply_text(ui.error(e))
 
@@ -1527,17 +1543,19 @@ async def _webhook_watchdog(app: Application) -> None:
 
 
 async def _dtmf_watchdog_loop(app: Application) -> None:
-    """Restart press-1 DTMF listener if it dies on the dial server."""
+    """Restart Press-1 AMI + audio DTMF listeners if either dies on the dial server."""
     while True:
         try:
             await asyncio.sleep(300)
             status = await asyncio.to_thread(
                 vd.run_remote,
-                "systemctl is-active press1-dtmf 2>/dev/null || echo inactive",
+                "systemctl is-active press1-dtmf 2>/dev/null; "
+                "systemctl is-active press1-audio-dtmf 2>/dev/null",
                 15,
             )
-            if "active" not in status.strip().lower():
-                print("[press1] DTMF listener down — restarting")
+            lines = [ln.strip().lower() for ln in status.splitlines() if ln.strip()]
+            if lines.count("active") < 2:
+                print(f"[press1] DTMF listener(s) down ({lines!r}) — restarting")
                 out = await asyncio.to_thread(vd.ensure_dtmf_listener)
                 print(f"[press1] DTMF restart: {out[:200]}")
         except Exception as e:
@@ -1573,11 +1591,13 @@ async def post_init(app: Application) -> None:
             BotCommand("settings", "Transfer target & options"),
             BotCommand("leads", "Loaded lead count"),
             BotCommand("clear", "Clear loaded numbers"),
+            BotCommand("clearleads", "Clear loaded numbers"),
             BotCommand("schedule", "Schedule a campaign"),
             BotCommand("schedules", "List scheduled runs"),
             BotCommand("addkey", "Grant temporary access"),
             BotCommand("listkeys", "List access keys"),
             BotCommand("revokekey", "Revoke access"),
+            BotCommand("repair", "Re-sync dial server stack"),
         ]
     )
     try:
@@ -1640,6 +1660,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("testnumber", cmd_testnumber))
     app.add_handler(CommandHandler("leads", cmd_leads))
     app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("clearleads", cmd_clear))
     app.add_handler(CommandHandler("schedule", cmd_schedule))
     app.add_handler(CommandHandler("schedules", cmd_schedules))
     app.add_handler(CommandHandler("unschedule", cmd_unschedule))
@@ -1647,6 +1668,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("addkey", cmd_addkey))
     app.add_handler(CommandHandler("listkeys", cmd_listkeys))
     app.add_handler(CommandHandler("revokekey", cmd_revokekey))
+    app.add_handler(CommandHandler("repair", cmd_repair))
     app.add_handler(CommandHandler("audio", cmd_audio))
     app.add_handler(CommandHandler("setaudio", cmd_audio))
     app.add_handler(CallbackQueryHandler(on_threex_choice, pattern=r"^p1_3cx:"))
