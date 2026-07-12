@@ -773,6 +773,7 @@ def fix_bitcall_endpoint() -> str:
         f"password = creds.get('password') or g(old_auth, 'password', '')\n"
         f"if not password:\n"
         f"    raise SystemExit('no bitcall password — set BITCALL_SIP_PASSWORD')\n"
+        # No fixed realm — BitCall 401 challenge realm must be used or REGISTER stays Rejected.
         f"auth = (\n"
         f"    '[bitcall-auth]\\n'\n"
         f"    'type=auth\\n'\n"
@@ -812,7 +813,6 @@ def fix_bitcall_endpoint() -> str:
         f"    'transport=transport-udp\\n'\n"
         f"    'context=from-trunk\\n'\n"
         f"    'disallow=all\\n'\n"
-        # High-P1 era: rfc4733 so telephone-event is offered in SDP (WaitExten needs it).
         f"    'allow=ulaw\\n'\n"
         f"    'allow=alaw\\n'\n"
         f"    f'from_user={bitcall_cid}\\n'\n"
@@ -825,7 +825,8 @@ def fix_bitcall_endpoint() -> str:
         f"    'send_rpid=yes\\n'\n"
         f"    'callerid_privacy=allowed\\n'\n"
         f"    f'callerid=+{bitcall_cid} <+{bitcall_cid}>\\n'\n"
-        f"    'dtmf_mode=rfc4733\\n'\n"
+        # inband: keypad tones are in audio; rfc4733 was ignoring them on this trunk.
+        f"    'dtmf_mode=inband\\n'\n"
         f"    '100rel=no\\n'\n"
         f"    'inband_progress=no\\n'\n"
         f")\n"
@@ -853,6 +854,34 @@ def fix_bitcall_endpoint() -> str:
         if verify not in ("1",):
             raise RuntimeError(f"3CX endpoint missing after BitCall rebuild: {ep!r}")
     return out
+
+
+def ensure_bitcall_inband_dtmf() -> str:
+    """Light patch: lock BitCall to inband DTMF without full PJSIP rebuild."""
+    return run_remote(
+        r"""
+python3 - <<'PY'
+from pathlib import Path
+import re
+p = Path('/etc/asterisk/pjsip.conf')
+t = p.read_text(errors='replace')
+m = re.search(r'(?ms)^\[bitcall\]\n(.*?)(?=^\[|\Z)', t)
+if not m:
+    raise SystemExit('no bitcall endpoint')
+body = re.sub(r'(?m)^dtmf_mode=.*$', 'dtmf_mode=inband', m.group(1))
+if 'dtmf_mode=' not in body:
+    body = body.rstrip() + '\ndtmf_mode=inband\n'
+t = t[: m.start(1)] + body + t[m.end(1) :]
+t = re.sub(r'(?m)^allow=telephone-event\s*\n', '', t)
+p.write_text(t)
+print('dtmf_mode=inband')
+PY
+asterisk -rx 'pjsip reload' 2>&1 | tail -1
+asterisk -rx 'pjsip show endpoint bitcall' 2>/dev/null | grep -i dtmf_mode || true
+rm -f /var/lib/asterisk/press1_campaign_ready 2>/dev/null || true
+""",
+        timeout=45,
+    ).strip()
 
 
 def repair_press1_server(chat_id: int | None = None, *, stop_stale: bool = False) -> dict[str, str]:
@@ -896,6 +925,33 @@ def bootstrap_press1_stack() -> dict[str, str]:
     return profile(get_threex_target())
 
 
+def ensure_press1_ready(*, force_dtmf: bool = False) -> dict[str, str]:
+    """Light pre-flight before /run or /testcall — dialplan, 3CX, DTMF listeners.
+
+    Does not rebuild BitCall PJSIP (that thrashes registration). Full repair stays
+    on boot /repair.
+    """
+    out: dict[str, str] = {}
+    out["endpoints"] = ensure_threex_endpoints_alive()
+    out["dialplan"] = ensure_press1_dialplan()
+    try:
+        out["bitcall_dtmf"] = ensure_bitcall_inband_dtmf()
+    except Exception as e:
+        out["bitcall_dtmf"] = f"error: {e}"
+    status = run_remote(
+        "systemctl is-active press1-dtmf 2>/dev/null; "
+        "systemctl is-active press1-audio-dtmf 2>/dev/null",
+        timeout=15,
+    ).strip().lower()
+    lines = [ln.strip() for ln in status.splitlines() if ln.strip()]
+    both_ok = lines.count("active") >= 2
+    if force_dtmf or not both_ok:
+        out["dtmf"] = ensure_dtmf_listener()
+    else:
+        out["dtmf"] = "active"
+    return out
+
+
 def _dialplan_resolve_leadnum() -> str:
     """Recover LEADNUM when channel vars are missing (concurrent campaigns)."""
     return """ same => n,Set(LEADNUM=${FILTER(0-9,${LEADNUM})})
@@ -909,7 +965,7 @@ def _dialplan_resolve_leadnum() -> str:
 
 
 def _dialplan_resolve_xfer(*, default_sound: str, default_xfer: str, allow_default: bool) -> str:
-    """Resolve P1RUN/P1XFER from leadxfer then per-run cfg; optional Swapofica fallback."""
+    """Resolve P1RUN/P1XFER from leadxfer then per-run cfg; optional default_xfer fallback."""
     xfer_fallback = (
         f'\n same => n,ExecIf($["${{LEN(${{P1XFER}})}}" = "0"]?Set(P1XFER={default_xfer}))'
         if allow_default
@@ -967,15 +1023,16 @@ def _originate_bitcall_cmd(digits: str, cid: str) -> str:
 
 
 def _press1_ivr_dialplan(*, server_ip: str, default_sound: str, default_xfer: str) -> str:
-    """High-P1 IVR: Background+WaitExten (proven capture) + AMI DTMF backup.
+    """Press-1 IVR: Background + Read with inband DTMF (BitCall keypad is audio).
 
-    Read() was leaving channels on ulaw passthrough so inband DSP heard nothing.
-    Background/WaitExten matches the last known high-conversion stack (8f560db).
+    rfc4733 was ignoring real presses when telephone-event was negotiated but empty.
+    Audio Goertzel remains backup during digit-wait MixMonitor.
     """
     return f"""[press1-ivr]
 exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
  same => n,Set(__LEADNUM=${{LEADNUM}})
  same => n,Set(P1UID=${{CHANNEL(uniqueid)}})
+ same => n,Set(GLOBAL(P1LEAD_${{P1UID}})=${{LEADNUM}})
  same => n,Goto(ivr,1)
 
 exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{LEADNUM}})}})
@@ -990,6 +1047,7 @@ exten => ivr,1,Answer()
  same => n,Set(LEADNUM=${{IF($[${{LEN(${{LEADNUM}})}}>=10]?${{LEADNUM}}:${{FILTER(0-9,${{PJSIP_HEADER(read,To)}})}})}})
  same => n,Set(__LEADNUM=${{LEADNUM}})
  same => n,Set(P1UID=${{CHANNEL(uniqueid)}})
+ same => n,Set(GLOBAL(P1LEAD_${{P1UID}})=${{LEADNUM}})
  same => n,Set(CHANNEL(language)=en)
  same => n,NoOp(IVR lead=${{LEADNUM}})
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
@@ -998,28 +1056,36 @@ exten => ivr,1,Answer()
  same => n,Set(__P1XFER=${{P1XFER}})
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered &' )
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
- same => n,Wait(0.5)
- same => n,Set(TIMEOUT(digit)=8)
- same => n,Set(TIMEOUT(response)=25)
+ same => n,Set(GLOBAL(P1XFER_${{P1UID}})=${{P1XFER}})
+ same => n,MixMonitor(/var/spool/asterisk/monitor/p1digit-${{P1UID}}.sln,r(/var/spool/asterisk/monitor/p1digit-${{P1UID}}-in.sln))
+ same => n,Set(PJSIP_DTMF_MODE()=inband)
+ same => n,Set(JITTERBUFFER(adaptive)=default)
+ same => n,Set(CHANNEL(readformat)=slin)
+ same => n,Set(CHANNEL(writeformat)=slin)
+ same => n,Wait(0.3)
  same => n,Set(P1TRIES=0)
  same => n(ivrloop),Set(P1TRIES=$[${{P1TRIES}}+1])
- same => n,GotoIf($[${{P1TRIES}}>4]?hang,1)
+ same => n,GotoIf($[${{P1TRIES}}>2]?hang,1)
  same => n,Background(${{P1SOUND}})
- same => n,WaitExten(20)
+ same => n,Playback(beep)
+ same => n,Read(P1DIGIT,,1,,,{IVR_DIGIT_TIMEOUT})
+ same => n,NoOp(IVR digit=${{P1DIGIT}} try=${{P1TRIES}})
+ same => n,System(/bin/sh -c 'echo ${{EPOCH}} digit=${{P1DIGIT}} try=${{P1TRIES}} lead=${{LEADNUM}} >> /var/log/astguiclient/press1_ivr_digits.log &' )
+ same => n,GotoIf($["${{P1DIGIT}}" = "1"]?1,1)
+ same => n,GotoIf($[${{LEN(${{P1DIGIT}})}}=0]?ivr,ivrloop)
  same => n,Goto(ivr,ivrloop)
 
 exten => hang,1,Hangup()
 
-exten => i,1,Goto(ivr,ivrloop)
-exten => t,1,Goto(ivr,ivrloop)
-
-exten => 1,1,StopPlaytones()
+exten => 1,1,StopMixMonitor()
+ same => n,StopPlaytones()
  same => n,NoOp(Press-1 from ${{CALLERID(num)}} lead=${{LEADNUM}})
 {_dialplan_resolve_leadnum()}
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
  same => n,Goto(xfer,1)
 
-exten => xfer,1,NoOp(Press1 xfer lead ${{LEADNUM}} to ${{P1XFER}})
+exten => xfer,1,StopMixMonitor()
+ same => n,NoOp(Press1 xfer lead ${{LEADNUM}} to ${{P1XFER}})
 {_dialplan_resolve_leadnum()}
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
  same => n,StopPlaytones()
@@ -1048,6 +1114,9 @@ exten => xferdial,1,StopPlaytones()
  same => n,Dial(${{P1XFER}},120,b(set-3cx-cli^s^1(${{LEADNUM}}))Tr)
  same => n,Hangup()
 
+exten => t,1,Goto(ivr,ivrloop)
+exten => i,1,Goto(ivr,ivrloop)
+
 [set-3cx-cli]
 exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{ARG1}})}})
  same => n,GotoIf($[${{LEN(${{LEADNUM}})}}<10]?done,1)
@@ -1057,9 +1126,6 @@ exten => s,1,Set(LEADNUM=${{FILTER(0-9,${{ARG1}})}})
  same => n,Set(PJSIP_HEADER(remove,Privacy)=)
  same => n,Set(PJSIP_HEADER(add,P-Asserted-Identity)=<sip:+${{LEADNUM}}@{server_ip}>)
  same => n(done),Return()
-
-exten => t,1,Hangup()
-exten => i,1,Hangup()
 """
 
 
@@ -1097,7 +1163,7 @@ def ensure_press1_dialplan() -> str:
         f"PY\n"
         f"asterisk -rx 'dialplan reload' >/dev/null; "
         f"asterisk -rx 'dialplan show press1-outbound' 2>&1 | grep Dial | head -2; "
-        f"asterisk -rx 'dialplan show set-bitcall-cli' 2>&1 | head -2",
+        f"asterisk -rx 'dialplan show press1-ivr' 2>&1 | grep -E 'Background|Read' | head -4",
         timeout=60,
     )
     return out.strip()
@@ -1614,10 +1680,18 @@ def fetch_dtmf_events(line_offset: int = 0) -> tuple[list[dict[str, str]], int]:
 
 
 def ensure_dtmf_listener() -> str:
-    """Deploy AMI listener that captures DTMF and triggers press-1 xfer."""
+    """Deploy AMI DTMF listener + acoustic DTMF backup.
+
+    Dialplan MixMonitor starts at IVR answer (RX-only) so presses during the
+    greeting are visible. The audio watcher skips silent RX and the first ~2s
+    of Background to avoid greeting-echo false transfers.
+    """
     listener = Path(__file__).with_name("AST_press1_dtmf.pl")
+    audio = Path(__file__).with_name("press1_audio_dtmf.py")
     if not listener.is_file():
         raise RuntimeError("AST_press1_dtmf.pl missing next to vicidial_client.py")
+    if not audio.is_file():
+        raise RuntimeError("press1_audio_dtmf.py missing next to vicidial_client.py")
     unit = """[Unit]
 Description=P1 Press-1 DTMF AMI listener
 After=network.target asterisk.service
@@ -1634,32 +1708,62 @@ StandardError=append:/var/log/astguiclient/press1_dtmf.log
 [Install]
 WantedBy=multi-user.target
 """
+    audio_unit = """[Unit]
+Description=P1 Press-1 gated audio DTMF backup
+After=network.target asterisk.service
+Wants=asterisk.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/share/astguiclient/press1_audio_dtmf.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/astguiclient/press1_audio_dtmf.log
+StandardError=append:/var/log/astguiclient/press1_audio_dtmf.log
+
+[Install]
+WantedBy=multi-user.target
+"""
     remote_pl = "/usr/share/astguiclient/AST_press1_dtmf.pl"
+    remote_audio = "/usr/share/astguiclient/press1_audio_dtmf.py"
     remote_unit = "/etc/systemd/system/press1-dtmf.service"
+    remote_audio_unit = "/etc/systemd/system/press1-audio-dtmf.service"
     with ssh_connect() as client:
         sftp = client.open_sftp()
         run_remote(
             "mkdir -p /usr/share/astguiclient /var/log/astguiclient "
+            "/var/spool/asterisk/monitor "
             f"$(dirname {DTMF_EVENTS_FILE})",
             timeout=20,
         )
         sftp.put(str(listener), remote_pl)
+        sftp.put(str(audio), remote_audio)
         with sftp.file(remote_unit, "w") as fh:
             fh.write(unit)
+        with sftp.file(remote_audio_unit, "w") as fh:
+            fh.write(audio_unit)
         sftp.close()
-    run_remote(f"chmod 755 {remote_pl}; touch {DTMF_EVENTS_FILE}", timeout=15)
+    run_remote(
+        f"chmod 755 {remote_pl} {remote_audio}; touch {DTMF_EVENTS_FILE}",
+        timeout=15,
+    )
     return run_remote(
         "systemctl daemon-reload; "
         "systemctl stop press1dtmf-new 2>/dev/null || true; "
         "systemctl stop press1-dtmf 2>/dev/null || true; "
-        "pkill -f '[A]ST_press1_dtmf.pl' 2>/dev/null || true; sleep 1; "
-        "systemctl enable press1-dtmf 2>/dev/null || true; "
+        "pkill -f '[A]ST_press1_dtmf.pl' 2>/dev/null || true; "
+        "systemctl stop press1-audio-dtmf 2>/dev/null || true; "
+        "pkill -f '[p]ress1_audio_dtmf.py' 2>/dev/null || true; sleep 1; "
+        "systemctl enable press1-dtmf press1-audio-dtmf 2>/dev/null || true; "
         "systemctl restart press1-dtmf; "
+        "systemctl restart press1-audio-dtmf; "
         "sleep 2; "
         "systemctl is-active press1-dtmf; "
-        "pgrep -af '[A]ST_press1_dtmf' | head -2",
+        "systemctl is-active press1-audio-dtmf; "
+        "pgrep -af '[A]ST_press1_dtmf|[p]ress1_audio_dtmf' | head -4",
         timeout=90,
     ).strip()
+
 
 
 def server_now() -> str:
@@ -1828,8 +1932,11 @@ def _place_call_file(digits: str, cid: str) -> None:
     )
     try:
         out = run_remote(script, timeout=75).strip()
-    except Exception:
-        return
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not verify test call placement on the dial server ({e}). "
+            "Try again in a moment."
+        ) from e
     if "FAIL=BitCall not registered" in out:
         raise RuntimeError("BitCall trunk is not registered — wait a moment and try again.")
     if "DELIVERED=YES" in out:
@@ -1872,7 +1979,13 @@ def originate_press1(phone: str, chat_id: int | None = None) -> str:
         _put_press1_db_entries({"lead": digits, f"lead/{digits}": digits})
     cid = outbound_caller_id(digits)
     if not cid:
-        raise RuntimeError("No outbound caller ID configured (VICIDIAL_AU_CALLER_ID)")
+        raise RuntimeError("No outbound caller ID configured (VICIDIAL_CALLER_ID)")
+    try:
+        ensure_press1_ready(force_dtmf=True)
+    except Exception as e:
+        raise RuntimeError(
+            f"Press-1 stack not ready ({e}). Try /repair or wait for boot sync."
+        ) from e
     _place_call_file(digits, cid)
     return digits
 
@@ -2262,7 +2375,7 @@ def _start_dial_script(run_id: str) -> None:
 def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     """Upload list + start server-side dialer (handles 1k+ leads; bot only monitors)."""
     chat_id = int(progress.get("chat_id", 0) or 0)
-    ensure_threex_endpoints_alive()
+    ensure_press1_ready(force_dtmf=True)
     seen: set[str] = set()
     numbers: list[str] = []
     for phone in phones:

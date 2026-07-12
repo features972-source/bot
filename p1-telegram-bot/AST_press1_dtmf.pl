@@ -9,6 +9,7 @@ my $user = 'cron';
 my $pass = '1234';
 my $log  = '/var/log/astguiclient/press1_dtmf.log';
 my $out  = '/var/lib/asterisk/press1_dtmf_events.jsonl';
+
 sub logmsg {
     my ($m) = @_;
     open my $fh, '>>', $log or return;
@@ -50,7 +51,6 @@ my %lead_cache;
 my %chan_app;
 my %chan_ctx;
 my %chan_ext;
-my %chan_pri;
 
 sub xfer_allowed {
     my ($chan) = @_;
@@ -58,21 +58,21 @@ sub xfer_allowed {
     my $ctx = lc($chan_ctx{$chan} // '');
     my $ext = lc($chan_ext{$chan} // '');
 
-    # Never yank a live transfer off the 3CX Dial()
+    # Never yank an active 3CX transfer
     return 0 if $app =~ /^(?:dial|bridge|queue)$/;
     return 0 if $ext =~ /^(?:xfer|xferdial|hang)$/;
 
-    # Prefer known IVR gather apps (Read / Background / WaitExten / Playback)
-    return 1 if $app =~ /^(?:background|waitexten|read|playback|wait)$/;
+    # Normal IVR apps (including Playback — press during greeting)
+    return 1 if $app =~ /^(?:background|waitexten|read|playback|wait|mixmonitor|noop|set|answer)$/;
 
-    # Asterisk often omits Application on DTMF — allow when still in press1-ivr
+    # Still in press1-ivr context
     if ($ctx =~ /press1-ivr/) {
-        return 1 if $ext =~ /^(?:ivr|s|1)$/ || $ext eq '';
-        return 1 if $ext =~ /^\d{8,}$/;
+        return 0 if $ext =~ /^(?:xfer|xferdial|hang)$/;
+        return 1;
     }
 
-    # High-conversion fallback: unknown app/ctx still transfer (xfer dialplan
-    # re-resolves P1XFER with defaults). Only skip if we know we're dialing.
+    # Asterisk often sends DTMF with EMPTY app/ctx on BitCall PJSIP.
+    # Historically every successful capture looked like app= ctx= — must allow.
     return 1 if $app eq '' && $ctx eq '';
     return 0;
 }
@@ -90,24 +90,34 @@ sub try_xfer_on_one {
     }
 
     $recent_xfer{$chan} = $now;
-    logmsg("DTMF 1 on $chan (app=$app ctx=$ctx ext=$ext) -> press1-ivr,xfer,1");
-    ami_send(
-        $sock, 'Redirect',
-        Channel  => $chan,
-        Context  => 'press1-ivr',
-        Exten    => 'xfer',
-        Priority => '1',
-    );
-    logmsg("Redirect sent for $chan");
+    logmsg("DTMF 1 on $chan (app=$app ctx=$ctx ext=$ext) -> press1-ivr,1,1");
+    my $safe = $chan;
+    $safe =~ s/'//g;
+    # Jump to extension 1 (resolves lead/xfer) not raw xfer — matches dialplan
+    my $cli = `/usr/sbin/asterisk -rx 'channel redirect $safe press1-ivr,1,1' 2>&1`;
+    chomp($cli);
+    logmsg("CLI redirect for $chan: $cli");
+    if ($cli !~ /successfully redirected/i) {
+        ami_send(
+            $sock, 'Redirect',
+            Channel  => $chan,
+            Context  => 'press1-ivr',
+            Exten    => '1',
+            Priority => '1',
+        );
+        logmsg("AMI Redirect fallback sent for $chan");
+    }
 }
 
 while (1) {
-    my $sock = IO::Socket::INET->new(PeerAddr => $host, PeerPort => $port, Proto => 'tcp', Timeout => 10);
+    my $sock = IO::Socket::INET->new(
+        PeerAddr => $host, PeerPort => $port, Proto => 'tcp', Timeout => 10
+    );
     unless ($sock) { logmsg("AMI connect failed: $!"); sleep 5; next; }
-    ami_send($sock, 'Login', Username => $user, Secret => $pass, Events => 'call,dtmf');
+    ami_send($sock, 'Login', Username => $user, Secret => $pass, Events => 'on');
     my $buf = '';
     my $li  = 0;
-    logmsg("AMI connected (call+dtmf)");
+    logmsg("AMI connected (events=on)");
     while (my $line = <$sock>) {
         $buf .= $line;
         next unless $buf =~ /\r\n\r\n$/;
@@ -128,20 +138,13 @@ while (1) {
         next unless outbound_bitcall($chan);
 
         if ($evn eq 'Newexten') {
-            if (defined $ev{Application} && length $ev{Application}) {
-                $chan_app{$chan} = $ev{Application};
-            }
-            if (defined $ev{Context} && length $ev{Context}) {
-                $chan_ctx{$chan} = $ev{Context};
-            }
+            $chan_app{$chan} = $ev{Application} if defined $ev{Application} && length $ev{Application};
+            $chan_ctx{$chan} = $ev{Context} if defined $ev{Context} && length $ev{Context};
             if (defined $ev{Extension} && length $ev{Extension}) {
                 $chan_ext{$chan} = $ev{Extension};
                 my $digits = $ev{Extension};
                 $digits =~ s/\D//g;
                 $lead_cache{$chan} = $digits if length($digits) >= 10;
-            }
-            if (defined $ev{Priority} && length $ev{Priority}) {
-                $chan_pri{$chan} = $ev{Priority};
             }
             next;
         }
@@ -155,25 +158,29 @@ while (1) {
             my $lead = $lead_cache{$chan} // '';
             $lead =~ s/\D//g if $lead;
             $digits{$chan} //= '';
-            $digits{$chan} .= $digit unless $digits{$chan} =~ /$digit$/;
+            my $prev = $digits{$chan};
+            $digits{$chan} .= $digit
+              unless length($prev) && substr($prev, -length($digit)) eq $digit;
             emit_event(
-                t    => int(time()),
-                e    => 'digit',
-                c    => $chan,
-                lead => $lead,
-                d    => $digit,
-                seq  => $digits{$chan},
-                app  => ($chan_app{$chan} // ''),
-                ctx  => ($chan_ctx{$chan} // ''),
+                t => int(time()), e => 'digit', c => $chan, lead => $lead,
+                d => $digit, seq => $digits{$chan},
+                app => ($chan_app{$chan} // ''), ctx => ($chan_ctx{$chan} // ''),
             );
-            logmsg("captured $digit on $chan lead=$lead seq=$digits{$chan} app=" . ($chan_app{$chan} // '') . " ctx=" . ($chan_ctx{$chan} // ''));
+            logmsg(
+                "captured $digit on $chan lead=$lead seq=$digits{$chan} app="
+                . ($chan_app{$chan} // '') . " ctx=" . ($chan_ctx{$chan} // '')
+            );
             next;
         }
 
         if ($evn eq 'DTMFBegin') {
             my $digit = $ev{Digit} // '';
             next unless $digit eq '1';
-            logmsg("DTMFBegin 1 on $chan app=" . ($chan_app{$chan} // '') . " ctx=" . ($chan_ctx{$chan} // '') . " (waiting for End)");
+            logmsg(
+                "DTMFBegin 1 on $chan app=" . ($chan_app{$chan} // '')
+                . " ctx=" . ($chan_ctx{$chan} // '') . " -> redirect"
+            );
+            try_xfer_on_one($sock, $chan);
             next;
         }
 
@@ -182,13 +189,7 @@ while (1) {
             $lead =~ s/\D//g if defined $lead;
             my $seq = $digits{$chan} // '';
             if (length $seq) {
-                emit_event(
-                    t      => int(time()),
-                    e      => 'summary',
-                    c      => $chan,
-                    lead   => ($lead // ''),
-                    digits => $seq,
-                );
+                emit_event(t => int(time()), e => 'summary', c => $chan, lead => ($lead // ''), digits => $seq);
                 logmsg("summary $chan lead=$lead digits=$seq");
             }
             delete $digits{$chan};
@@ -197,7 +198,6 @@ while (1) {
             delete $chan_app{$chan};
             delete $chan_ctx{$chan};
             delete $chan_ext{$chan};
-            delete $chan_pri{$chan};
         }
     }
     logmsg("AMI disconnected");
