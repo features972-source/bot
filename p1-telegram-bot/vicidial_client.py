@@ -825,8 +825,8 @@ def fix_bitcall_endpoint() -> str:
         f"    'send_rpid=yes\\n'\n"
         f"    'callerid_privacy=allowed\\n'\n"
         f"    f'callerid=+{bitcall_cid} <+{bitcall_cid}>\\n'\n"
-        # inband: keypad tones are in audio; rfc4733 was ignoring them on this trunk.
-        f"    'dtmf_mode=inband\\n'\n"
+        # auto: RFC2833 for mobiles + inband fallback for BitCall audio tones.
+        f"    'dtmf_mode=auto\\n'\n"
         f"    '100rel=no\\n'\n"
         f"    'inband_progress=no\\n'\n"
         f")\n"
@@ -856,8 +856,8 @@ def fix_bitcall_endpoint() -> str:
     return out
 
 
-def ensure_bitcall_inband_dtmf() -> str:
-    """Light patch: lock BitCall to inband DTMF without full PJSIP rebuild."""
+def ensure_bitcall_dtmf_auto() -> str:
+    """Light patch: BitCall DTMF auto (RFC2833 + inband) without full PJSIP rebuild."""
     return run_remote(
         r"""
 python3 - <<'PY'
@@ -868,13 +868,12 @@ t = p.read_text(errors='replace')
 m = re.search(r'(?ms)^\[bitcall\]\n(.*?)(?=^\[|\Z)', t)
 if not m:
     raise SystemExit('no bitcall endpoint')
-body = re.sub(r'(?m)^dtmf_mode=.*$', 'dtmf_mode=inband', m.group(1))
+body = re.sub(r'(?m)^dtmf_mode=.*$', 'dtmf_mode=auto', m.group(1))
 if 'dtmf_mode=' not in body:
-    body = body.rstrip() + '\ndtmf_mode=inband\n'
+    body = body.rstrip() + '\ndtmf_mode=auto\n'
 t = t[: m.start(1)] + body + t[m.end(1) :]
-t = re.sub(r'(?m)^allow=telephone-event\s*\n', '', t)
 p.write_text(t)
-print('dtmf_mode=inband')
+print('dtmf_mode=auto')
 PY
 asterisk -rx 'pjsip reload' 2>&1 | tail -1
 asterisk -rx 'pjsip show endpoint bitcall' 2>/dev/null | grep -i dtmf_mode || true
@@ -882,6 +881,10 @@ rm -f /var/lib/asterisk/press1_campaign_ready 2>/dev/null || true
 """,
         timeout=45,
     ).strip()
+
+
+# Back-compat alias for older deploy scripts.
+ensure_bitcall_inband_dtmf = ensure_bitcall_dtmf_auto
 
 
 def repair_press1_server(chat_id: int | None = None, *, stop_stale: bool = False) -> dict[str, str]:
@@ -907,6 +910,10 @@ def repair_press1_server(chat_id: int | None = None, *, stop_stale: bool = False
         result["dtmf"] = ensure_dtmf_listener()
     except Exception as e:
         result["dtmf"] = f"error: {e}"
+    try:
+        result["bitcall_dtmf"] = ensure_bitcall_dtmf_auto()
+    except Exception as e:
+        result["bitcall_dtmf"] = f"error: {e}"
     try:
         result["xfer_sync"] = f"synced {sync_all_chat_xfer_configs()} chats"
     except Exception as e:
@@ -935,7 +942,7 @@ def ensure_press1_ready(*, force_dtmf: bool = False) -> dict[str, str]:
     out["endpoints"] = ensure_threex_endpoints_alive()
     out["dialplan"] = ensure_press1_dialplan()
     try:
-        out["bitcall_dtmf"] = ensure_bitcall_inband_dtmf()
+        out["bitcall_dtmf"] = ensure_bitcall_dtmf_auto()
     except Exception as e:
         out["bitcall_dtmf"] = f"error: {e}"
     status = run_remote(
@@ -1023,10 +1030,10 @@ def _originate_bitcall_cmd(digits: str, cid: str) -> str:
 
 
 def _press1_ivr_dialplan(*, server_ip: str, default_sound: str, default_xfer: str) -> str:
-    """Press-1 IVR: Background + Read with inband DTMF (BitCall keypad is audio).
+    """Press-1 IVR: Read() plays message + listens for digit 1 (RFC2833 + inband).
 
-    rfc4733 was ignoring real presses when telephone-event was negotiated but empty.
-    Audio Goertzel remains backup during digit-wait MixMonitor.
+    Read(filename) captures DTMF during playback — Background+empty Read only heard
+    digits after the message ended. AMI + audio Goertzel remain instant backups.
     """
     return f"""[press1-ivr]
 exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
@@ -1058,7 +1065,7 @@ exten => ivr,1,Answer()
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
  same => n,Set(GLOBAL(P1XFER_${{P1UID}})=${{P1XFER}})
  same => n,MixMonitor(/var/spool/asterisk/monitor/p1digit-${{P1UID}}.sln,r(/var/spool/asterisk/monitor/p1digit-${{P1UID}}-in.sln))
- same => n,Set(PJSIP_DTMF_MODE()=inband)
+ same => n,Set(PJSIP_DTMF_MODE()=auto)
  same => n,Set(JITTERBUFFER(adaptive)=default)
  same => n,Set(CHANNEL(readformat)=slin)
  same => n,Set(CHANNEL(writeformat)=slin)
@@ -1066,9 +1073,7 @@ exten => ivr,1,Answer()
  same => n,Set(P1TRIES=0)
  same => n(ivrloop),Set(P1TRIES=$[${{P1TRIES}}+1])
  same => n,GotoIf($[${{P1TRIES}}>2]?hang,1)
- same => n,Background(${{P1SOUND}})
- same => n,Playback(beep)
- same => n,Read(P1DIGIT,,1,,,{IVR_DIGIT_TIMEOUT})
+ same => n,Read(P1DIGIT,${{P1SOUND}}&beep,1,,,{IVR_DIGIT_TIMEOUT})
  same => n,NoOp(IVR digit=${{P1DIGIT}} try=${{P1TRIES}})
  same => n,System(/bin/sh -c 'echo ${{EPOCH}} digit=${{P1DIGIT}} try=${{P1TRIES}} lead=${{LEADNUM}} >> /var/log/astguiclient/press1_ivr_digits.log &' )
  same => n,GotoIf($["${{P1DIGIT}}" = "1"]?1,1)
@@ -1680,11 +1685,10 @@ def fetch_dtmf_events(line_offset: int = 0) -> tuple[list[dict[str, str]], int]:
 
 
 def ensure_dtmf_listener() -> str:
-    """Deploy AMI DTMF listener + acoustic DTMF backup.
+    """Deploy AMI DTMF listener + acoustic inband backup.
 
-    Dialplan MixMonitor starts at IVR answer (RX-only) so presses during the
-    greeting are visible. The audio watcher skips silent RX and the first ~2s
-    of Background to avoid greeting-echo false transfers.
+    AMI (auto DTMF) handles RFC2833 during Background/Read/Playback. Audio backup
+    only scans Read/WaitExten/Playback for true inband tones BitCall may send.
     """
     listener = Path(__file__).with_name("AST_press1_dtmf.pl")
     audio = Path(__file__).with_name("press1_audio_dtmf.py")
@@ -1826,12 +1830,18 @@ def deploy_chat_audio(chat_id: int, files: dict[str, Path], run_id: str | None =
     """Upload IVR audio for one chat and persist its sound name."""
     sound_name = chat_sound_name(chat_id)
     deploy_audio(files, sound_name)
-    save_chat_settings(chat_id, sound_name=sound_name)
-    apply_run_config(chat_cfg_run_id(chat_id), chat_id)
-    if run_id:
-        rid = _safe_run_token(run_id)
-        if rid != chat_cfg_run_id(chat_id):
-            apply_run_config(rid, chat_id)
+    try:
+        save_chat_settings(chat_id, sound_name=sound_name)
+    except Exception:
+        pass
+    try:
+        apply_run_config(chat_cfg_run_id(chat_id), chat_id)
+        if run_id:
+            rid = _safe_run_token(run_id)
+            if rid != chat_cfg_run_id(chat_id):
+                apply_run_config(rid, chat_id)
+    except Exception:
+        pass
     return sound_name
 
 

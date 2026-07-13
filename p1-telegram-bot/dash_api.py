@@ -184,6 +184,10 @@ def api_get_settings():
     summary = vd.settings_summary(tenant)
     cfg = vd.get_chat_settings(tenant)
     tn = str(cfg.get("test_number") or "").strip()
+    if not tn:
+        owner = vd._owner_test_digits()
+        if owner:
+            tn = owner
     return jsonify(
         {
             "ok": True,
@@ -362,10 +366,25 @@ def api_testcall():
     number = str(body.get("number") or "").strip()
     numbers = body.get("numbers") or []
     try:
+        from press1_utils import to_e164
+        import re
+
+        def _norm(n: str) -> str:
+            d = to_e164(n) or re.sub(r"\D", "", n)
+            return d if len(d) >= vd.MIN_PHONE_DIGITS + 2 else ""
+
         if numbers:
-            placed = vd.test_calls([str(n) for n in numbers], chat_id=tenant)
+            norm = [_norm(str(n)) for n in numbers]
+            norm = [n for n in norm if n]
+            if not norm:
+                return jsonify({"ok": False, "error": "Invalid test number(s)"}), 400
+            placed = vd.test_calls(norm, chat_id=tenant)
         elif number:
-            placed = vd.test_calls([number], chat_id=tenant)
+            digits = _norm(number)
+            if not digits:
+                return jsonify({"ok": False, "error": "Invalid test number"}), 400
+            vd.save_chat_settings(tenant, test_number=digits)
+            placed = vd.test_calls([digits], chat_id=tenant)
         else:
             placed = vd.test_calls(chat_id=tenant)
         return jsonify({"ok": True, "placed": placed})
@@ -443,7 +462,7 @@ def api_audio():
     if not upload or not upload.filename:
         return jsonify({"ok": False, "error": "No audio file"}), 400
     name = upload.filename.lower()
-    if not any(name.endswith(ext) for ext in (".mp3", ".wav", ".m4a", ".ogg", ".opus", ".sln")):
+    if not any(name.endswith(ext) for ext in (".mp3", ".wav", ".m4a", ".ogg", ".opus", ".sln", ".mpeg", ".mpga")):
         return jsonify({"ok": False, "error": "Unsupported format — use MP3, WAV, M4A, or OGG"}), 400
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -453,8 +472,10 @@ def api_audio():
             files = convert_audio_for_asterisk(dest, Path(tmp), sound_name)
             deployed = vd.deploy_chat_audio(tenant, files, None)
         return jsonify({"ok": True, "sound_name": deployed})
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": "ffmpeg not available on dialer — contact support"}), 503
     except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": False, "error": str(exc) or "Audio processing failed"}), 400
 
 
 @bp.post("/api/repair")

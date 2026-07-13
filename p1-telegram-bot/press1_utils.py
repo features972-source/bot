@@ -146,21 +146,30 @@ def convert_audio_for_asterisk(src: Path, dest_dir: Path, stem: str) -> dict[str
     """Convert to 8 kHz telephony formats — band-limited, no dynamic processing (avoids crackle)."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     wav = dest_dir / f"{stem}.wav"
-    # Single resample + phone band; skip dynaudnorm/limiter (they cause pumping/crackle on IVR).
-    af = "aresample=8000:resampler=soxr:precision=28,highpass=f=200,lowpass=f=3400"
-    proc = subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", str(src),
-            "-af", af,
-            "-ar", "8000", "-ac", "1",
-            "-sample_fmt", "s16", "-acodec", "pcm_s16le",
-            str(wav),
-        ],
-        capture_output=True,
-        text=True,
+    # Try soxr first; fall back for slim ffmpeg builds on Render.
+    filter_chain = (
+        "aresample=8000:resampler=soxr:precision=28,highpass=f=200,lowpass=f=3400",
+        "aresample=8000,highpass=f=200,lowpass=f=3400",
+        "aresample=8000",
     )
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or "ffmpeg WAV conversion failed")
+    last_err = ""
+    for af in filter_chain:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(src),
+                "-af", af,
+                "-ar", "8000", "-ac", "1",
+                "-sample_fmt", "s16", "-acodec", "pcm_s16le",
+                str(wav),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0:
+            break
+        last_err = (proc.stderr or proc.stdout or "").strip()
+    else:
+        raise RuntimeError(last_err or "ffmpeg WAV conversion failed")
 
     outputs: dict[str, Path] = {"wav": wav}
     for ext, codec_args in (
