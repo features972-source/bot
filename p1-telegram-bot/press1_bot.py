@@ -462,7 +462,7 @@ async def _live_campaign_updater(
                 pass
             break
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=6.0)
+            await asyncio.wait_for(stop_event.wait(), timeout=1.2 if dial_state in ("running", "paused") else 6.0)
             break
         except asyncio.TimeoutError:
             pass
@@ -1499,7 +1499,7 @@ async def _dtmf_notify_loop(app: Application) -> None:
                         print(f"[press1] dtmf send to {chat_id}: {e}")
         except Exception as e:
             print(f"[press1] dtmf notify: {e}")
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.8)
 
 
 async def _dedup_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

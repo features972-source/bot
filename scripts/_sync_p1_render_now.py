@@ -17,7 +17,26 @@ SSH_FILE = ROOT / "p1-telegram-bot" / "RENDER_SSH_KEY_ONE_LINE.txt"
 BITCALL_FILE = ROOT / "p1-telegram-bot" / ".bitcall_pw"
 P1_SERVICE_ID = "srv-d993f69o3t8c73eq4sog"
 DASH_SECRET = "dolphin-p1-x7k9m2q4w8"
-DASH_KEYS = "DS-DEMO-2026-KEY1,DS-ADMIN-2026-R8K4N2"
+DASH_KEYS_FALLBACK = "DS-DEMO-2026-KEY1,DS-ADMIN-2026-R8K4N2"
+DASH_KEYS_FILE = Path(
+    os.getenv(
+        "DASH_KEYS_FILE",
+        r"C:\Users\User\Projects\dolphinshop\app\data\keys.json",
+    )
+)
+
+
+def load_dash_keys() -> str:
+    """All subscription keys from dolphinshop — every site login can use the dialer API."""
+    if DASH_KEYS_FILE.is_file():
+        try:
+            data = json.loads(DASH_KEYS_FILE.read_text(encoding="utf-8"))
+            keys = sorted(k.strip().upper() for k in data if isinstance(k, str) and k.strip())
+            if keys:
+                return ",".join(keys)
+        except Exception as exc:
+            print(f"Warning: could not read {DASH_KEYS_FILE}: {exc}")
+    return DASH_KEYS_FALLBACK
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -97,7 +116,7 @@ def main() -> int:
         {"key": "BITCALL_SIP_USER", "value": "f-features896"},
         {"key": "BITCALL_SIP_REALM", "value": "gateway.bitcall.io"},
         {"key": "DASH_API_SECRET", "value": DASH_SECRET},
-        {"key": "DASH_SUBSCRIPTION_KEYS", "value": DASH_KEYS},
+        {"key": "DASH_SUBSCRIPTION_KEYS", "value": load_dash_keys()},
     ]
     if local.get("TELEGRAM_ALLOWED_IDS"):
         env_vars.append({"key": "TELEGRAM_ALLOWED_IDS", "value": local["TELEGRAM_ALLOWED_IDS"]})
