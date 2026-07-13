@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 python:3.12-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -12,17 +12,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY press1_cloud.py \
-     press1_bot.py \
-     dash_api.py \
-     vicidial_client.py \
-     press1_utils.py \
-     press1_settings.py \
-     press1_access.py \
-     press1_campaign.py \
-     press1_schedule.py \
-     press1_ui.py \
-     ./
+COPY press1_cloud.py press1_bot.py dash_api.py vicidial_client.py \
+     press1_utils.py press1_settings.py press1_access.py press1_campaign.py \
+     press1_schedule.py press1_ui.py ./
 
 EXPOSE 10000
 

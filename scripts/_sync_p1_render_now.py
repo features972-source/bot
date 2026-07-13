@@ -114,7 +114,8 @@ def main() -> int:
             "rootDir": "p1-telegram-bot",
             "healthCheckPath": "/health",
             "envSpecificDetails": {
-                "dockerfilePath": "./Dockerfile",
+                "dockerfilePath": "Dockerfile",
+                "dockerCommand": "",
             },
         }
     }

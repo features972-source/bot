@@ -1,0 +1,2 @@
+p1-telegram-bot/Dockerfile text eol=lf
+p1-telegram-bot/.dockerignore text eol=lf
