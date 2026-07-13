@@ -7,9 +7,11 @@
 services:
   - type: web
     name: p1-telegram-bot
-    runtime: docker
+    runtime: python
     plan: starter
     rootDir: p1-telegram-bot
+    buildCommand: bash build.sh
+    startCommand: PATH=$PWD/bin:$PATH python -u press1_cloud.py
     healthCheckPath: /health
     autoDeployTrigger: commit
     buildFilter:
@@ -73,4 +75,4 @@ services:
       - key: DASH_API_SECRET
         value: dolphin-p1-x7k9m2q4w8
       - key: DASH_SUBSCRIPTION_KEYS
-        value: DS-DEMO-2026-KEY1
+        value: DS-DEMO-2026-KEY1,DS-ADMIN-2026-R8K4N2

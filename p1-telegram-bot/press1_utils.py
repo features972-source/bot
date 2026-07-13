@@ -6,11 +6,22 @@ import csv
 import io
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
 MIN_PHONE_DIGITS = 9
 DEFAULT_PHONE_CODE = (os.getenv("PRESS1_DEFAULT_PHONE_CODE", "44").strip() or "44")
+
+
+def _ffmpeg_bin() -> str:
+    custom = os.getenv("FFMPEG_PATH", "").strip()
+    if custom and Path(custom).is_file():
+        return custom
+    local = Path(__file__).resolve().parent / "bin" / "ffmpeg"
+    if local.is_file():
+        return str(local)
+    return shutil.which("ffmpeg") or "ffmpeg"
 
 # NZ local prefixes (leading 0): mobile 020-029, geographic, toll-free.
 _NZ_LOCAL_RE = re.compile(
@@ -153,10 +164,11 @@ def convert_audio_for_asterisk(src: Path, dest_dir: Path, stem: str) -> dict[str
         "aresample=8000",
     )
     last_err = ""
+    ffmpeg = _ffmpeg_bin()
     for af in filter_chain:
         proc = subprocess.run(
             [
-                "ffmpeg", "-y", "-i", str(src),
+                ffmpeg, "-y", "-i", str(src),
                 "-af", af,
                 "-ar", "8000", "-ac", "1",
                 "-sample_fmt", "s16", "-acodec", "pcm_s16le",
@@ -179,7 +191,7 @@ def convert_audio_for_asterisk(src: Path, dest_dir: Path, stem: str) -> dict[str
     ):
         dest = dest_dir / f"{stem}.{ext}"
         proc = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(wav), "-ar", "8000", "-ac", "1"] + codec_args + [str(dest)],
+            [ffmpeg, "-y", "-i", str(wav), "-ar", "8000", "-ac", "1"] + codec_args + [str(dest)],
             capture_output=True,
             text=True,
         )

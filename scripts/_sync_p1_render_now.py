@@ -112,17 +112,16 @@ def main() -> int:
     patch = {
         "rootDir": "p1-telegram-bot",
         "serviceDetails": {
-            "env": "docker",
+            "env": "python",
             "healthCheckPath": "/health",
             "envSpecificDetails": {
-                "dockerfilePath": "Dockerfile",
-                "dockerContext": ".",
-                "dockerCommand": "python -u press1_cloud.py",
+                "buildCommand": "bash build.sh",
+                "startCommand": "PATH=$PWD/bin:$PATH python -u press1_cloud.py",
             },
         },
     }
     api(api_key, "PATCH", f"https://api.render.com/v1/services/{P1_SERVICE_ID}", patch)
-    print("Patched rootDir=p1-telegram-bot (top-level)")
+    print("Patched python runtime + rootDir=p1-telegram-bot")
 
     print("Triggering deploy ...")
     dep = api(api_key, "POST", f"https://api.render.com/v1/services/{P1_SERVICE_ID}/deploys", {"clearCache": "do_not_clear"})
