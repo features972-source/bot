@@ -1416,7 +1416,8 @@ def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, in
             f"ps aux 2>/dev/null | grep -c '[b]ash {p['script']}' || true; "
             f"wc -l < {p['numbers']} 2>/dev/null || echo 0; "
             f"wc -l < {p['done']} 2>/dev/null || echo 0; "
-            f"test -f {p['pause']} && echo 1 || echo 0",
+            f"test -f {p['pause']} && echo 1 || echo 0; "
+            f"asterisk -rx 'core show channels concise' 2>/dev/null | grep -c '^PJSIP/bitcall-' || true",
             timeout=25,
         ).strip().splitlines()
         server_run_id = expected_run_id
@@ -1437,13 +1438,14 @@ def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, in
             f"wc -l < {DIAL_NUMBERS} 2>/dev/null || echo 0; "
             f"rid=$(cat {DIAL_RUN_ID} 2>/dev/null); "
             f"if [ -n \"$rid\" ] && [ -f /tmp/press1_dial_done_${{rid}}.txt ]; then wc -l < /tmp/press1_dial_done_${{rid}}.txt; else echo 0; fi; "
-            f"test -f {DIAL_PAUSE} && echo 1 || echo 0",
+            f"test -f {DIAL_PAUSE} && echo 1 || echo 0; "
+            f"asterisk -rx 'core show channels concise' 2>/dev/null | grep -c '^PJSIP/bitcall-' || true",
             timeout=25,
         ).strip().splitlines()
     vals: list[str] = []
-    for ln in raw[:12]:
+    for ln in raw[:13]:
         vals.append((ln.strip().split() or ["0"])[-1])
-    while len(vals) < 12:
+    while len(vals) < 13:
         vals.append("0")
     if not expected_run_id:
         server_run_id = vals[3].strip()
@@ -1477,11 +1479,10 @@ def _fetch_server_dial_state(expected_run_id: str | None = None) -> dict[str, in
         if done_count == file_lines and press1 == 0 and answered == 0:
             done_count = 0
     started = min(max(started_raw, done_count), total) if total > 0 else max(started_raw, done_count)
-    live = 0
     try:
-        live = live_bitcall_channels()
-    except Exception:
-        pass
+        live = int(vals[12] or 0)
+    except ValueError:
+        live = 0
     return {
         "total": total,
         "started": started,
