@@ -111,18 +111,16 @@ def main() -> int:
 
     patch = {
         "serviceDetails": {
-            "rootDir": "p1-telegram-bot",
             "healthCheckPath": "/health",
             "envSpecificDetails": {
                 "dockerfilePath": "Dockerfile",
+                "dockerContext": "p1-telegram-bot",
                 "dockerCommand": "",
             },
         }
     }
-    try:
-        api(api_key, "PATCH", f"https://api.render.com/v1/services/{P1_SERVICE_ID}", patch)
-    except urllib.error.HTTPError as e:
-        print(f"PATCH note: {e.code} (continuing)")
+    api(api_key, "PATCH", f"https://api.render.com/v1/services/{P1_SERVICE_ID}", patch)
+    print("Patched dockerContext=p1-telegram-bot")
 
     print("Triggering deploy ...")
     dep = api(api_key, "POST", f"https://api.render.com/v1/services/{P1_SERVICE_ID}/deploys", {"clearCache": "do_not_clear"})
