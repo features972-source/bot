@@ -1,0 +1,26 @@
+# @dolphinsiptrunkbot (Sales) — separate Render service from p1-bot.
+services:
+  - type: web
+    name: sales-bot
+    runtime: python
+    plan: starter
+    rootDir: sales-telegram-bot
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: DB_PATH
+        value: /data/reminders.db
+      - key: TZ
+        value: Europe/London
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ALLOWED_USER_IDS
+        sync: false
+    disk:
+      name: sales-bot-data
+      mountPath: /data
+      sizeGB: 1
