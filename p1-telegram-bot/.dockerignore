@@ -1,0 +1,30 @@
+# Diagnostic / one-off scripts — never ship to production image
+_*
+fix_*
+diag_*
+stop_all.py
+repair_server.py
+
+# Secrets & local env
+.env
+.env.*
+.bitcall_pw
+RENDER_SSH_KEY*
+*.pem
+*.key
+
+# Docs & deploy metadata
+*.md
+render.yaml
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Server-only artifacts (deployed via SSH, not needed in Render container)
+press1_audio_dtmf.py
+AST_press1_dtmf.pl
