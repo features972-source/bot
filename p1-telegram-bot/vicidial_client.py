@@ -1001,15 +1001,19 @@ def ensure_press1_ready(*, force_dtmf: bool = False) -> dict[str, str]:
     if force_dtmf or not ami_ok:
         out["dtmf"] = ensure_dtmf_listener()
     else:
-        out["dtmf"] = "active (ami-only)"
-    # Always keep audio Goertzel off
-    run_remote(
-        "systemctl stop press1-audio-dtmf 2>/dev/null || true; "
-        "systemctl disable press1-audio-dtmf 2>/dev/null || true; "
-        "pkill -f '[p]ress1_audio_dtmf.py' 2>/dev/null || true",
-        timeout=20,
-    )
-    out["audio_dtmf"] = "disabled"
+        out["dtmf"] = "active"
+    # Keep audio DTMF backup enabled (week-ago working stack)
+    try:
+        st = run_remote(
+            "systemctl is-active press1-audio-dtmf 2>/dev/null || echo inactive",
+            timeout=15,
+        ).strip().lower()
+        if st.splitlines()[0].strip() != "active":
+            # Re-run listener deploy to enable audio unit
+            out["dtmf"] = ensure_dtmf_listener()
+        out["audio_dtmf"] = "active"
+    except Exception as e:
+        out["audio_dtmf"] = f"error: {e}"
     return out
 
 
@@ -1084,9 +1088,10 @@ def _originate_bitcall_cmd(digits: str, cid: str) -> str:
 
 
 def _press1_ivr_dialplan(*, server_ip: str, default_sound: str, default_xfer: str) -> str:
-    """Press-1 IVR: Read() plays message + listens for RFC2833 digit 1 only.
+    """Press-1 IVR: Read() plays message + listens for digit 1 (RFC2833 + inband).
 
-    No MixMonitor / audio Goertzel — internal DTMF (rfc4733) + AMI only.
+    Read(filename) captures DTMF during playback — Background+empty Read only heard
+    digits after the message ended. AMI + audio Goertzel remain instant backups.
     """
     return f"""[press1-ivr]
 exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
@@ -1117,8 +1122,11 @@ exten => ivr,1,Answer()
  same => n,System(/bin/sh -c 'mkdir -p {DIAL_STATS_DIR}/${{P1RUN}} && echo 1 >> {DIAL_STATS_DIR}/${{P1RUN}}/answered &' )
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
  same => n,Set(GLOBAL(P1XFER_${{P1UID}})=${{P1XFER}})
- same => n,Set(PJSIP_DTMF_MODE()=rfc4733)
+ same => n,MixMonitor(/var/spool/asterisk/monitor/p1digit-${{P1UID}}.sln,r(/var/spool/asterisk/monitor/p1digit-${{P1UID}}-in.sln))
+ same => n,Set(PJSIP_DTMF_MODE()=auto)
  same => n,Set(JITTERBUFFER(adaptive)=default)
+ same => n,Set(CHANNEL(readformat)=slin)
+ same => n,Set(CHANNEL(writeformat)=slin)
  same => n,Wait(0.3)
  same => n,Set(P1TRIES=0)
  same => n(ivrloop),Set(P1TRIES=$[${{P1TRIES}}+1])
@@ -1132,13 +1140,15 @@ exten => ivr,1,Answer()
 
 exten => hang,1,Hangup()
 
-exten => 1,1,StopPlaytones()
+exten => 1,1,StopMixMonitor()
+ same => n,StopPlaytones()
  same => n,NoOp(Press-1 from ${{CALLERID(num)}} lead=${{LEADNUM}})
 {_dialplan_resolve_leadnum()}
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
  same => n,Goto(xfer,1)
 
-exten => xfer,1,NoOp(Press1 xfer lead ${{LEADNUM}} to ${{P1XFER}})
+exten => xfer,1,StopMixMonitor()
+ same => n,NoOp(Press1 xfer lead ${{LEADNUM}} to ${{P1XFER}})
 {_dialplan_resolve_leadnum()}
 {_dialplan_resolve_xfer(default_sound=default_sound, default_xfer=default_xfer, allow_default=True)}
  same => n,StopPlaytones()
@@ -1778,16 +1788,20 @@ def fetch_dtmf_events(line_offset: int = 0) -> tuple[list[dict[str, str]], int]:
 
 
 def ensure_dtmf_listener() -> str:
-    """Deploy AMI RFC2833/internal DTMF listener only (no audio Goertzel).
+    """Deploy AMI DTMF listener + acoustic DTMF backup.
 
-    Press-1 must come from Asterisk DTMF events + dialplan Read(), never from
-    analysing call audio — that path auto-transferred callers without a real press.
+    Dialplan MixMonitor starts at IVR answer (RX-only) so presses during the
+    greeting are visible. The audio watcher skips silent RX and the first ~2s
+    of Background to avoid greeting-echo false transfers.
     """
     listener = Path(__file__).with_name("AST_press1_dtmf.pl")
+    audio = Path(__file__).with_name("press1_audio_dtmf.py")
     if not listener.is_file():
         raise RuntimeError("AST_press1_dtmf.pl missing next to vicidial_client.py")
+    if not audio.is_file():
+        raise RuntimeError("press1_audio_dtmf.py missing next to vicidial_client.py")
     unit = """[Unit]
-Description=P1 Press-1 DTMF AMI listener (RFC2833 / internal only)
+Description=P1 Press-1 DTMF AMI listener
 After=network.target asterisk.service
 Wants=asterisk.service
 
@@ -1802,21 +1816,43 @@ StandardError=append:/var/log/astguiclient/press1_dtmf.log
 [Install]
 WantedBy=multi-user.target
 """
+    audio_unit = """[Unit]
+Description=P1 Press-1 gated audio DTMF backup
+After=network.target asterisk.service
+Wants=asterisk.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/share/astguiclient/press1_audio_dtmf.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/astguiclient/press1_audio_dtmf.log
+StandardError=append:/var/log/astguiclient/press1_audio_dtmf.log
+
+[Install]
+WantedBy=multi-user.target
+"""
     remote_pl = "/usr/share/astguiclient/AST_press1_dtmf.pl"
+    remote_audio = "/usr/share/astguiclient/press1_audio_dtmf.py"
     remote_unit = "/etc/systemd/system/press1-dtmf.service"
+    remote_audio_unit = "/etc/systemd/system/press1-audio-dtmf.service"
     with ssh_connect() as client:
         sftp = client.open_sftp()
         run_remote(
             "mkdir -p /usr/share/astguiclient /var/log/astguiclient "
+            "/var/spool/asterisk/monitor "
             f"$(dirname {DTMF_EVENTS_FILE})",
             timeout=20,
         )
         sftp.put(str(listener), remote_pl)
+        sftp.put(str(audio), remote_audio)
         with sftp.file(remote_unit, "w") as fh:
             fh.write(unit)
+        with sftp.file(remote_audio_unit, "w") as fh:
+            fh.write(audio_unit)
         sftp.close()
     run_remote(
-        f"chmod 755 {remote_pl}; touch {DTMF_EVENTS_FILE}",
+        f"chmod 755 {remote_pl} {remote_audio}; touch {DTMF_EVENTS_FILE}",
         timeout=15,
     )
     return run_remote(
@@ -1825,13 +1861,13 @@ WantedBy=multi-user.target
         "systemctl stop press1-dtmf 2>/dev/null || true; "
         "pkill -f '[A]ST_press1_dtmf.pl' 2>/dev/null || true; "
         "systemctl stop press1-audio-dtmf 2>/dev/null || true; "
-        "systemctl disable press1-audio-dtmf 2>/dev/null || true; "
         "pkill -f '[p]ress1_audio_dtmf.py' 2>/dev/null || true; sleep 1; "
-        "systemctl enable press1-dtmf 2>/dev/null || true; "
+        "systemctl enable press1-dtmf press1-audio-dtmf 2>/dev/null || true; "
         "systemctl restart press1-dtmf; "
+        "systemctl restart press1-audio-dtmf; "
         "sleep 2; "
         "systemctl is-active press1-dtmf; "
-        "systemctl is-active press1-audio-dtmf 2>/dev/null || echo disabled; "
+        "systemctl is-active press1-audio-dtmf; "
         "pgrep -af '[A]ST_press1_dtmf|[p]ress1_audio_dtmf' | head -4",
         timeout=90,
     ).strip()

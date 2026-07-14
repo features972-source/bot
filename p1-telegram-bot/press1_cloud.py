@@ -1,4 +1,4 @@
-"""Press-1 bot entry point for Render (health check + Telegram webhook)."""
+﻿"""Press-1 bot entry point for Render (health check + Telegram webhook)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-BUILD = "press1-ready-v34"
+BUILD = "press1-ready-v35"
 WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "telegram/webhook").lstrip("/")
 PUBLIC_URL = (
     os.getenv("TELEGRAM_WEBHOOK_URL_BASE")
@@ -56,7 +56,7 @@ def _use_polling() -> bool:
 
 def _run_polling() -> None:
     app = build_application()
-    logger.info("Press-1 bot polling (local/dev only)…")
+    logger.info("Press-1 bot polling (local/dev only)â€¦")
     app.run_polling(
         allowed_updates=["message", "callback_query"],
         drop_pending_updates=True,
@@ -125,7 +125,7 @@ def _run_webhook() -> None:
         update = Update.de_json(data, tg_app.bot)
         if update is None:
             return "", 400
-        # Ack immediately — Telegram times out (~60s) if we wait for handlers.
+        # Ack immediately â€” Telegram times out (~60s) if we wait for handlers.
         future = asyncio.run_coroutine_threadsafe(tg_app.process_update(update), loop)
         future.add_done_callback(_log_update_done)
         return "", 200
