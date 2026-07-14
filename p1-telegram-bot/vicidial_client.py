@@ -896,7 +896,7 @@ def fix_bitcall_endpoint() -> str:
 
 
 def ensure_bitcall_dtmf_auto() -> str:
-    """BitCall DTMF = rfc4733 (internal telephone-event), never audio-scan based."""
+    """Light patch: BitCall DTMF auto (RFC2833 + inband) without full PJSIP rebuild."""
     return run_remote(
         r"""
 python3 - <<'PY'
@@ -907,24 +907,15 @@ t = p.read_text(errors='replace')
 m = re.search(r'(?ms)^\[bitcall\]\n(.*?)(?=^\[|\Z)', t)
 if not m:
     raise SystemExit('no bitcall endpoint')
-body = m.group(1)
-body = re.sub(r'(?m)^dtmf_mode=.*$', 'dtmf_mode=rfc4733', body)
+body = re.sub(r'(?m)^dtmf_mode=.*$', 'dtmf_mode=auto', m.group(1))
 if 'dtmf_mode=' not in body:
-    body = body.rstrip() + '\ndtmf_mode=rfc4733\n'
-# telephone-event needed for RFC2833 digits
-allow_m = re.search(r'(?m)^allow\s*=\s*(.+)$', body)
-if allow_m:
-    allow = allow_m.group(1).strip()
-    if 'telephone-event' not in allow:
-        body = re.sub(r'(?m)^allow\s*=\s*.+$', f'allow={allow},telephone-event', body, count=1)
-else:
-    body = body.rstrip() + '\nallow=ulaw,alaw,telephone-event\n'
+    body = body.rstrip() + '\ndtmf_mode=auto\n'
 t = t[: m.start(1)] + body + t[m.end(1) :]
 p.write_text(t)
-print('dtmf_mode=rfc4733')
+print('dtmf_mode=auto')
 PY
-asterisk -rx 'module reload res_pjsip.so' 2>&1 | tail -1
-asterisk -rx 'pjsip show endpoint bitcall' 2>/dev/null | grep -iE 'dtmf_mode|allow ' || true
+asterisk -rx 'pjsip reload' 2>&1 | tail -1
+asterisk -rx 'pjsip show endpoint bitcall' 2>/dev/null | grep -i dtmf_mode || true
 rm -f /var/lib/asterisk/press1_campaign_ready 2>/dev/null || true
 """,
         timeout=45,
