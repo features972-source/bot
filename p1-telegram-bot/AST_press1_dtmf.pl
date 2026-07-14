@@ -51,6 +51,9 @@ my %lead_cache;
 my %chan_app;
 my %chan_ctx;
 my %chan_ext;
+my %chan_ivr;
+my %ivr_since;    # epoch when channel first entered press1-ivr
+my $MIN_IVR_SEC = 1.2;  # ignore connect glitches / early false tones
 
 sub xfer_allowed {
     my ($chan) = @_;
@@ -58,22 +61,16 @@ sub xfer_allowed {
     my $ctx = lc($chan_ctx{$chan} // '');
     my $ext = lc($chan_ext{$chan} // '');
 
-    # Never yank an active 3CX transfer
-    return 0 if $app =~ /^(?:dial|bridge|queue)$/;
+    return 0 if $app =~ /^(?:dial|bridge|queue|appdial2)$/;
     return 0 if $ext =~ /^(?:xfer|xferdial|hang)$/;
+    return 0 unless $ctx eq 'press1-ivr' || $chan_ivr{$chan};
 
-    # Normal IVR apps (including Playback — press during greeting)
-    return 1 if $app =~ /^(?:background|waitexten|read|playback|wait|mixmonitor|noop|set|answer)$/;
+    # Require real digit window: Read / WaitExten (message+listen), not Playback noise.
+    return 1 if $app =~ /^(?:read|waitexten)$/;
 
-    # Still in press1-ivr context
-    if ($ctx =~ /press1-ivr/) {
-        return 0 if $ext =~ /^(?:xfer|xferdial|hang)$/;
-        return 1;
-    }
+    # BitCall sometimes blanks app during Read — only if we already saw IVR.
+    return 1 if ($app eq '' || $app eq 'noop' || $app eq 'set') && $chan_ivr{$chan};
 
-    # Asterisk often sends DTMF with EMPTY app/ctx on BitCall PJSIP.
-    # Historically every successful capture looked like app= ctx= — must allow.
-    return 1 if $app eq '' && $ctx eq '';
     return 0;
 }
 
@@ -84,6 +81,11 @@ sub try_xfer_on_one {
     my $app = $chan_app{$chan} // '';
     my $ctx = $chan_ctx{$chan} // '';
     my $ext = $chan_ext{$chan} // '';
+    my $since = $ivr_since{$chan} // 0;
+    if ($since && ($now - $since) < $MIN_IVR_SEC) {
+        logmsg("skip early DTMF 1 on $chan (ivr_age=" . ($now - $since) . "s app=$app)");
+        return;
+    }
     unless (xfer_allowed($chan)) {
         logmsg("skip DTMF 1 on $chan app=$app ctx=$ctx ext=$ext");
         return;
@@ -140,6 +142,10 @@ while (1) {
         if ($evn eq 'Newexten') {
             $chan_app{$chan} = $ev{Application} if defined $ev{Application} && length $ev{Application};
             $chan_ctx{$chan} = $ev{Context} if defined $ev{Context} && length $ev{Context};
+            if (lc($ev{Context} // '') eq 'press1-ivr') {
+                $chan_ivr{$chan} = 1;
+                $ivr_since{$chan} = time() unless $ivr_since{$chan};
+            }
             if (defined $ev{Extension} && length $ev{Extension}) {
                 $chan_ext{$chan} = $ev{Extension};
                 my $digits = $ev{Extension};
@@ -149,6 +155,7 @@ while (1) {
             next;
         }
 
+        # Authoritative press-1: completed digit only (not Begin — fewer false hits).
         if ($evn =~ /^(?:DTMFEnd|ChannelDtmfReceived|DTMF)$/i) {
             my $digit = $ev{Digit} // $ev{DigitReceived} // '';
             next unless length $digit;
@@ -178,9 +185,8 @@ while (1) {
             next unless $digit eq '1';
             logmsg(
                 "DTMFBegin 1 on $chan app=" . ($chan_app{$chan} // '')
-                . " ctx=" . ($chan_ctx{$chan} // '') . " -> redirect"
+                . " ctx=" . ($chan_ctx{$chan} // '') . " (wait End — no redirect)"
             );
-            try_xfer_on_one($sock, $chan);
             next;
         }
 
@@ -198,6 +204,8 @@ while (1) {
             delete $chan_app{$chan};
             delete $chan_ctx{$chan};
             delete $chan_ext{$chan};
+            delete $chan_ivr{$chan};
+            delete $ivr_since{$chan};
         }
     }
     logmsg("AMI disconnected");
