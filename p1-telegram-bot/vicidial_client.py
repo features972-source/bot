@@ -728,14 +728,17 @@ def cleanup_stale_dialers(chat_id: int | None = None) -> str:
 
 
 def unstick_dial_server() -> str:
-    """Clear stale spool files and stuck dialers so new test/campaign calls are not blocked."""
+    """Clear stale spool call files only — never kill a live campaign dialer.
+
+    Older versions pkilled every /tmp/press1_dial_* script here, which made any
+    /testcall (or repair path that called unstick) abort a running /run mid-list
+    and show STALLED after a handful of dials.
+    """
     return run_remote(
-        "pkill -9 -f '/tmp/press1_dial_' 2>/dev/null || true; "
-        "pkill -9 -f 'press1_dial_run.sh' 2>/dev/null || true; "
         "find /var/spool/asterisk/outgoing -name 'press1_*.call' -delete 2>/dev/null || true; "
         "find /var/spool/asterisk/tmp -name 'press1_*.call' -delete 2>/dev/null || true; "
         "rm -f /tmp/press1_dial.lock /tmp/press1_dial_stop 2>/dev/null || true; "
-        "echo cleared",
+        "echo cleared_spool",
         timeout=25,
     ).strip()
 
@@ -1328,7 +1331,9 @@ ACTIVE={ACTIVE_RUN_ID}
 exec 8>"$GLOBAL_LOCK"
 flock -n 8 || {{ echo "$(date '+%Y-%m-%d %H:%M:%S') skip global lock held (another campaign running) run=$RUNID" >>"$LOG"; exit 0; }}
 echo "$RUNID" > "$ACTIVE"
-trap 'rm -f "$ACTIVE"' EXIT
+# Do NOT clear ACTIVE on forced kill — watchdog uses it to restart stalled runs.
+# Cleared only on intentional stop/finish below.
+trap 'echo "$(date "+%Y-%m-%d %H:%M:%S") dialer EXIT run=$RUNID code=$?" >>"$LOG"' EXIT
 exec 9>"$LOCK"
 flock -n 9 || {{ echo "$(date '+%Y-%m-%d %H:%M:%S') skip duplicate dialer run $RUNID (locked)" >>"$LOG"; exit 0; }}
 rm -f "$STOP" "$PAUSEFILE"
@@ -1349,13 +1354,21 @@ batch_n=0
 nz_fail=0
 while IFS= read -r num || [ -n "$num" ]; do
   wait_if_paused
-  [ -f "$STOP" ] && exit 0
+  if [ -f "$STOP" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') stop requested run=$RUNID" >>"$LOG"
+    rm -f "$ACTIVE"
+    exit 0
+  fi
   num=$(echo "$num" | tr -d '\\r' | tr -d ' ')
   [ -z "$num" ] && continue
   grep -qxF "$num" "$DONE" 2>/dev/null && continue
   while [ "$CAP" -gt 0 ]; do
     wait_if_paused
-    [ -f "$STOP" ] && exit 0
+    if [ -f "$STOP" ]; then
+      echo "$(date '+%Y-%m-%d %H:%M:%S') stop requested run=$RUNID" >>"$LOG"
+      rm -f "$ACTIVE"
+      exit 0
+    fi
     live=$(/usr/sbin/asterisk -rx "core show channels concise" 2>/dev/null | grep -c '^PJSIP/bitcall-' || true)
     [ "$live" -lt "$CAP" ] && break
     sleep 1
@@ -1371,9 +1384,10 @@ while IFS= read -r num || [ -n "$num" ]; do
   if [ -n "$XFER" ]; then
     /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >/dev/null 2>&1
   fi
-  # Proven high-P1 path: dial BitCall straight into press1-ivr (no Local/U() hop).
+  # Async originate — never block the dial loop on call duration (sync originate
+  # stalls the whole campaign when BitCall/legs hang).
   cid={DEFAULT_CALLER_ID}
-  orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid ${{cid}}" 2>&1)
+  orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid ${{cid}} async" 2>&1)
   PLACED=NO
   if echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
     PLACED=NO
@@ -1399,6 +1413,7 @@ while IFS= read -r num || [ -n "$num" ]; do
   fi
 done < "$NUMFILE"
 touch "$STOP"
+rm -f "$ACTIVE"
 echo "$(date '+%Y-%m-%d %H:%M:%S') finished run $RUNID" >>"$LOG"
 exit 0
 """
@@ -2159,6 +2174,7 @@ def _stop_remote_dialer(run_id: str | None = None) -> None:
             p = _run_paths(run_id)
             run_remote(
                 f"touch {p['stop']} 2>/dev/null; rm -f {p['pause']} 2>/dev/null; "
+                f"rm -f {ACTIVE_RUN_ID} 2>/dev/null; "
                 f"pkill -9 -f '{p['script']}' 2>/dev/null; true",
                 timeout=20,
             )
@@ -2166,6 +2182,7 @@ def _stop_remote_dialer(run_id: str | None = None) -> None:
         else:
             run_remote(
                 f"touch {DIAL_STOP} 2>/dev/null; rm -f {DIAL_PAUSE} 2>/dev/null; "
+                f"rm -f {ACTIVE_RUN_ID} 2>/dev/null; "
                 f"pkill -9 -f press1_dial_run.sh 2>/dev/null; "
                 f"pkill -9 -f '/tmp/press1_dial_' 2>/dev/null; true",
                 timeout=20,
