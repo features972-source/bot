@@ -99,7 +99,7 @@ HELP = (
             ui.bullet("/audio", "change this chat's IVR message", icon="▪️"),
             ui.bullet("/settings", "transfer target for this chat", icon="▪️"),
             ui.bullet("/leads", "loaded lead count", icon="▪️"),
-            ui.bullet("/clear", "clear loaded numbers", icon="▪️"),
+            ui.bullet("/clear", "clear loaded numbers (optional — new paste replaces list)", icon="▪️"),
             ui.bullet("/clearleads", "same as /clear", icon="▪️"),
             "",
             "🔐 <b>ACCESS</b> (owner only)",
@@ -1421,13 +1421,12 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     s = session_for(update, context)
     prev = len(s.numbers)
-    s.numbers = list(dict.fromkeys(s.numbers + nums))
+    # Fresh list on every upload — never silently merge into old leads.
+    s.numbers = list(dict.fromkeys(nums))
     dest.unlink(missing_ok=True)
-    extra = ""
-    if prev > 0:
-        extra = f"\n\n⚠️ You still had {prev} leads loaded — new file was <b>added</b> (not replaced). Use /clear first if you only want this file."
+    note = f" (replaced {prev} previously loaded)" if prev > 0 else ""
     await update.message.reply_text(
-        f"📥 Loaded {len(nums)} leads ({len(s.numbers)} total). /run to dial.{extra}"
+        f"📥 Loaded {len(s.numbers)} leads{note}. /run to dial."
     )
 
 
@@ -1442,12 +1441,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     s = session_for(update, context)
     prev = len(s.numbers)
-    s.numbers = list(dict.fromkeys(s.numbers + nums))
-    extra = ""
-    if prev > 0:
-        extra = f"\n\n⚠️ You still had {prev} leads loaded — pasted numbers were <b>added</b>. Use /clear first for a fresh list only."
+    # Fresh list on every paste — never silently merge into old leads.
+    s.numbers = list(dict.fromkeys(nums))
+    note = f" (replaced {prev} previously loaded)" if prev > 0 else ""
     await update.message.reply_text(
-        f"📥 Added {len(nums)} leads ({len(s.numbers)} total). /run to dial.{extra}"
+        f"📥 Loaded {len(s.numbers)} leads{note}. /run to dial."
     )
 
 
