@@ -1242,9 +1242,15 @@ def test_numbers(*, prefer_owner: bool = False, chat_id: int | None = None) -> l
 
 
 def _load_pkey() -> paramiko.PKey:
+    # Prefer base64 form — literal PEM with \\n can break Render builds (exit 128).
+    b64 = os.getenv("VICIDIAL_SSH_KEY_B64", "").strip()
     key_data = os.getenv("VICIDIAL_SSH_KEY", "").strip()
+    if b64 and not key_data:
+        import base64
+
+        key_data = base64.b64decode(b64).decode("utf-8", errors="replace").strip()
     if not key_data:
-        raise RuntimeError("VICIDIAL_SSH_KEY is not set on Render")
+        raise RuntimeError("VICIDIAL_SSH_KEY (or VICIDIAL_SSH_KEY_B64) is not set on Render")
     if "\\n" in key_data:
         key_data = key_data.replace("\\n", "\n")
     stream = StringIO(key_data)
