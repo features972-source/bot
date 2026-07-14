@@ -133,7 +133,7 @@ def live_read_channels() -> list[tuple[str, str, int]]:
             continue
         parts = line.split("!")
         app = parts[5] if len(parts) > 5 else ""
-        if app not in ("Read", "WaitExten"):
+        if app not in ("Read", "WaitExten", "Playback"):
             continue
         chan, uid = parts[0], parts[-1].strip()
         dur = 0
