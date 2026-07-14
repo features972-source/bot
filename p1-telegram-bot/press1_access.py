@@ -46,29 +46,37 @@ def load_access_data() -> dict:
 
 def save_access_data(data: dict) -> None:
     payload = json.dumps(data, indent=2)
-    vd.run_remote(
-        f"mkdir -p $(dirname {vd.ACCESS_PATH}); "
-        f"cat > {vd.ACCESS_PATH} <<'EOF'\n{payload}\nEOF\n"
-        f"chmod 644 {vd.ACCESS_PATH}",
-        timeout=20,
-    )
+    try:
+        vd.run_remote(
+            f"mkdir -p $(dirname {vd.ACCESS_PATH}); "
+            f"cat > {vd.ACCESS_PATH} <<'EOF'\n{payload}\nEOF\n"
+            f"chmod 644 {vd.ACCESS_PATH}",
+            timeout=20,
+        )
+    except Exception as e:
+        # Never break Telegram commands if dial-server SSH is briefly unavailable.
+        print(f"[press1] access save skipped: {e}")
+        return
     _cache["at"] = 0.0
 
 
 def remember_user(user_id: int, username: str | None, full_name: str | None = None) -> None:
     if not user_id:
         return
-    data = load_access_data()
-    users = data.setdefault("users", {})
-    key = str(user_id)
-    entry = users.get(key, {})
-    if username:
-        entry["username"] = username.lstrip("@").lower()
-    if full_name:
-        entry["name"] = full_name
-    entry["user_id"] = user_id
-    users[key] = entry
-    save_access_data(data)
+    try:
+        data = load_access_data()
+        users = data.setdefault("users", {})
+        key = str(user_id)
+        entry = users.get(key, {})
+        if username:
+            entry["username"] = username.lstrip("@").lower()
+        if full_name:
+            entry["name"] = full_name
+        entry["user_id"] = user_id
+        users[key] = entry
+        save_access_data(data)
+    except Exception as e:
+        print(f"[press1] remember_user skipped: {e}")
 
 
 def _prune_expired(data: dict) -> bool:

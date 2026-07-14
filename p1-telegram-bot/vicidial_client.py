@@ -1241,26 +1241,52 @@ def test_numbers(*, prefer_owner: bool = False, chat_id: int | None = None) -> l
     return nums
 
 
-def _load_pkey() -> paramiko.PKey:
-    # Prefer base64 form — literal PEM with \\n can break Render builds (exit 128).
-    b64 = os.getenv("VICIDIAL_SSH_KEY_B64", "").strip()
-    key_data = os.getenv("VICIDIAL_SSH_KEY", "").strip()
-    if b64 and not key_data:
-        import base64
-
-        key_data = base64.b64decode(b64).decode("utf-8", errors="replace").strip()
-    if not key_data:
-        raise RuntimeError("VICIDIAL_SSH_KEY (or VICIDIAL_SSH_KEY_B64) is not set on Render")
+def _normalize_pem(key_data: str) -> str:
+    # Strip UTF-16 leftovers / BOM if an env value was mis-encoded.
+    if key_data.startswith("\ufeff"):
+        key_data = key_data.lstrip("\ufeff")
+    if "\x00" in key_data:
+        key_data = key_data.replace("\x00", "")
     if "\\n" in key_data:
         key_data = key_data.replace("\\n", "\n")
-    stream = StringIO(key_data)
-    for key_cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
+    return key_data.strip()
+
+
+def _load_pkey() -> paramiko.PKey:
+    # Prefer base64 form — literal PEM with newlines can break Render builds.
+    import base64
+
+    candidates: list[str] = []
+    b64 = os.getenv("VICIDIAL_SSH_KEY_B64", "").strip()
+    if b64:
         try:
-            stream.seek(0)
-            return key_cls.from_private_key(stream)
+            candidates.append(base64.b64decode(b64).decode("utf-8", errors="strict"))
         except Exception:
+            try:
+                candidates.append(base64.b64decode(b64).decode("utf-16", errors="replace"))
+            except Exception:
+                pass
+    raw = os.getenv("VICIDIAL_SSH_KEY", "").strip()
+    if raw:
+        candidates.append(raw)
+
+    if not candidates:
+        raise RuntimeError("VICIDIAL_SSH_KEY (or VICIDIAL_SSH_KEY_B64) is not set on Render")
+
+    last_err: Exception | None = None
+    for key_data in candidates:
+        key_data = _normalize_pem(key_data)
+        if "BEGIN" not in key_data:
             continue
-    raise RuntimeError("VICIDIAL_SSH_KEY is not a valid private key")
+        stream = StringIO(key_data)
+        for key_cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
+            try:
+                stream.seek(0)
+                return key_cls.from_private_key(stream)
+            except Exception as e:
+                last_err = e
+                continue
+    raise RuntimeError(f"VICIDIAL_SSH_KEY is not a valid private key ({last_err})")
 
 
 @contextmanager
