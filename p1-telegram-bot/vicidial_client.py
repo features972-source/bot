@@ -1030,10 +1030,10 @@ def _originate_bitcall_cmd(digits: str, cid: str) -> str:
 
 
 def _press1_ivr_dialplan(*, server_ip: str, default_sound: str, default_xfer: str) -> str:
-    """Press-1 IVR: Read() plays message + listens for digit 1 (RFC2833 + inband).
+    """Press-1 IVR: Background + Read with inband DTMF (BitCall keypad is audio).
 
-    Read(filename) captures DTMF during playback — Background+empty Read only heard
-    digits after the message ended. AMI + audio Goertzel remain instant backups.
+    rfc4733 was ignoring real presses when telephone-event was negotiated but empty.
+    Audio Goertzel remains backup during digit-wait MixMonitor.
     """
     return f"""[press1-ivr]
 exten => _X.,1,Set(LEADNUM=${{FILTER(0-9,${{EXTEN}})}})
@@ -1065,7 +1065,7 @@ exten => ivr,1,Answer()
  same => n,NoOp(IVR sound=${{P1SOUND}} xfer=${{P1XFER}} run=${{P1RUN}})
  same => n,Set(GLOBAL(P1XFER_${{P1UID}})=${{P1XFER}})
  same => n,MixMonitor(/var/spool/asterisk/monitor/p1digit-${{P1UID}}.sln,r(/var/spool/asterisk/monitor/p1digit-${{P1UID}}-in.sln))
- same => n,Set(PJSIP_DTMF_MODE()=auto)
+ same => n,Set(PJSIP_DTMF_MODE()=inband)
  same => n,Set(JITTERBUFFER(adaptive)=default)
  same => n,Set(CHANNEL(readformat)=slin)
  same => n,Set(CHANNEL(writeformat)=slin)
@@ -1073,7 +1073,9 @@ exten => ivr,1,Answer()
  same => n,Set(P1TRIES=0)
  same => n(ivrloop),Set(P1TRIES=$[${{P1TRIES}}+1])
  same => n,GotoIf($[${{P1TRIES}}>2]?hang,1)
- same => n,Read(P1DIGIT,${{P1SOUND}}&beep,1,,,{IVR_DIGIT_TIMEOUT})
+ same => n,Background(${{P1SOUND}})
+ same => n,Playback(beep)
+ same => n,Read(P1DIGIT,,1,,,{IVR_DIGIT_TIMEOUT})
  same => n,NoOp(IVR digit=${{P1DIGIT}} try=${{P1TRIES}})
  same => n,System(/bin/sh -c 'echo ${{EPOCH}} digit=${{P1DIGIT}} try=${{P1TRIES}} lead=${{LEADNUM}} >> /var/log/astguiclient/press1_ivr_digits.log &' )
  same => n,GotoIf($["${{P1DIGIT}}" = "1"]?1,1)

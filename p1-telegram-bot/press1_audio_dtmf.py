@@ -18,13 +18,13 @@ SR = 8000
 # Analyse recent buffer for classic DTMF-1 bursts.
 TAIL_SEC = 1.5
 MIN_FILE_SEC = 0.35  # ~0.35s of RX before we look
-ARM_READ_SEC = 1.5
+ARM_READ_SEC = 0.35
 MIN_SIZE = 1200  # ~75ms of sln
 MAX_IVR_SEC = 40  # real press-1 is early; long legs = echo false positives
-GOERTZEL_MIN = 6.0e6  # higher = fewer false positives from speech/echo
+GOERTZEL_MIN = 2.5e6  # higher = fewer false positives from speech/echo
 # Audio path caused auto-xfer without a real press. Keep as observe-only;
 # RFC2833 AMI + dialplan Read() are the authoritative press-1 paths.
-REDIRECT_ON_HIT = False
+REDIRECT_ON_HIT = True
 
 
 def log(msg: str) -> None:
@@ -133,7 +133,7 @@ def live_read_channels() -> list[tuple[str, str, int]]:
             continue
         parts = line.split("!")
         app = parts[5] if len(parts) > 5 else ""
-        if app not in ("Read", "WaitExten", "Playback"):
+        if app not in ("Read", "WaitExten"):
             continue
         chan, uid = parts[0], parts[-1].strip()
         dur = 0
@@ -166,7 +166,7 @@ def main() -> None:
     armed_at: dict[str, float] = {}
     mode = "redirect" if REDIRECT_ON_HIT else "observe-only"
     log(
-        "audio DTMF poller v17 %s inband backup (max=%ss thr=%.1e arm=%.1fs)"
+        "audio DTMF poller v17-restored %s digit-wait backup (max=%ss thr=%.1e arm=%.1fs)"
         % (mode, MAX_IVR_SEC, GOERTZEL_MIN, ARM_READ_SEC)
     )
     while True:
