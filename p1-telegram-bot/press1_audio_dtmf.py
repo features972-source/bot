@@ -18,13 +18,14 @@ SR = 8000
 # Analyse recent buffer for classic DTMF-1 bursts.
 TAIL_SEC = 1.5
 MIN_FILE_SEC = 0.35  # ~0.35s of RX before we look
-ARM_READ_SEC = 0.35
+ARM_READ_SEC = 1.5
 MIN_SIZE = 1200  # ~75ms of sln
 MAX_IVR_SEC = 40  # real press-1 is early; long legs = echo false positives
-GOERTZEL_MIN = 2.5e6  # higher = fewer false positives from speech/echo
-# Audio path caused auto-xfer without a real press. Keep as observe-only;
-# RFC2833 AMI + dialplan Read() are the authoritative press-1 paths.
-REDIRECT_ON_HIT = True
+GOERTZEL_MIN = 6.0e6  # higher = fewer false positives from speech/echo
+# NEVER auto-redirect from audio Goertzel — it false-fires on speech/echo
+# (e.g. Jul 14 11:15 owner test -> straight to agent at dur=7s).
+# Real press-1 = RFC2833 AMI + dialplan Read() only.
+REDIRECT_ON_HIT = False
 
 
 def log(msg: str) -> None:
