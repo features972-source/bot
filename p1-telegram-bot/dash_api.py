@@ -302,18 +302,38 @@ def api_start():
 def api_stop():
     tenant = request.dash_tenant
     prog = _progress_for(tenant)
-    run_id = str(prog.get("run_id") or "")
-    if not run_id:
-        try:
-            run_id = vd.resolve_chat_run_id(tenant) or ""
-        except Exception:
-            run_id = ""
     try:
-        vd._stop_remote_dialer(run_id or None)
+        vd.abandon_chat_campaign(tenant)
     except Exception:
-        pass
+        run_id = str(prog.get("run_id") or "")
+        if not run_id:
+            try:
+                run_id = vd.resolve_chat_run_id(tenant) or ""
+            except Exception:
+                run_id = ""
+        try:
+            vd._stop_remote_dialer(run_id or None)
+        except Exception:
+            pass
     prog["running"] = False
     prog["stop"] = True
+    prog["total"] = 0
+    prog.pop("run_id", None)
+    return jsonify({"ok": True, "campaign": _campaign_view({}, prog, tenant)})
+
+
+@bp.post("/api/campaign/clear")
+@auth_required
+def api_clear_campaign():
+    """Clear leads for this tenant and wipe any server-side dialer list."""
+    tenant = request.dash_tenant
+    prog = _progress_for(tenant)
+    try:
+        vd.abandon_chat_campaign(tenant)
+    except Exception:
+        pass
+    prog.clear()
+    prog.update({"running": False, "stop": True, "total": 0, "started": 0, "failed": 0})
     return jsonify({"ok": True, "campaign": _campaign_view({}, prog, tenant)})
 
 

@@ -520,6 +520,42 @@ def prepare_exclusive_campaign(run_id: str) -> None:
     )
 
 
+def abandon_chat_campaign(chat_id: int) -> str:
+    """Stop this chat's dialer and wipe its lead file so old numbers cannot keep dialing.
+
+    Telegram /clear and fresh pastes only cleared the bot session before — the server
+    kept dialing the previous numbers file (and watchdog could revive it).
+    """
+    rid = ""
+    try:
+        rid = resolve_chat_run_id(chat_id) or ""
+    except Exception:
+        rid = ""
+
+    parts = [
+        f"rm -f {_chat_run_marker(chat_id)} 2>/dev/null || true",
+    ]
+    if rid:
+        p = _run_paths(rid)
+        rid_q = shlex.quote(rid)
+        parts.extend(
+            [
+                f"touch {p['stop']} 2>/dev/null || true",
+                f"rm -f {p['pause']} {p['lock']} 2>/dev/null || true",
+                f"pkill -9 -f '{p['script']}' 2>/dev/null || true",
+                # Wipe leads so watchdog / accidental resume cannot redial the old list.
+                f": > {p['numbers']} 2>/dev/null || true",
+                f"echo 0 > {p['total']} 2>/dev/null || true",
+                f"if [ \"$(cat {ACTIVE_RUN_ID} 2>/dev/null)\" = {rid_q} ]; then rm -f {ACTIVE_RUN_ID}; fi",
+            ]
+        )
+
+    try:
+        return run_remote("; ".join(parts) + "; echo abandoned", timeout=25).strip()
+    except Exception as e:
+        return f"abandon_failed: {e}"
+
+
 def _write_run_xfer_file(run_id: str, xfer: str) -> None:
     rid = _safe_run_token(run_id)
     run_remote(

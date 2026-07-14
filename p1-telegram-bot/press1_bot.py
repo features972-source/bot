@@ -530,8 +530,44 @@ async def cmd_leads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
+    chat_id = update.effective_chat.id
     session_for(update, context).numbers.clear()
-    await update.message.reply_text("🧹 Loaded leads cleared.")
+    _stop_live_updater(context, chat_id)
+    # Also wipe the server-side number file — session clear alone left the dialer
+    # (or watchdog) still working the previous list.
+    try:
+        await asyncio.to_thread(vd.abandon_chat_campaign, chat_id)
+    except Exception as e:
+        print(f"[press1] abandon on /clear: {e}")
+    camps = context.application.bot_data.get("chat_campaigns", {})
+    camps.pop(chat_id, None)
+    await update.message.reply_text(
+        "🧹 Loaded leads cleared — any dialer for this chat was stopped."
+    )
+
+
+async def _replace_session_leads(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    nums: list[str],
+) -> None:
+    """Replace the Telegram lead list and abandon any dialer still using the old list."""
+    chat_id = update.effective_chat.id
+    s = session_for(update, context)
+    prev = len(s.numbers)
+    s.numbers = list(dict.fromkeys(nums))
+    if prev > 0:
+        _stop_live_updater(context, chat_id)
+        try:
+            await asyncio.to_thread(vd.abandon_chat_campaign, chat_id)
+        except Exception as e:
+            print(f"[press1] abandon on replace: {e}")
+        camps = context.application.bot_data.get("chat_campaigns", {})
+        camps.pop(chat_id, None)
+    note = f" (replaced {prev} previously loaded)" if prev > 0 else ""
+    await update.message.reply_text(
+        f"📥 Loaded {len(s.numbers)} leads{note}. /run to dial."
+    )
 
 
 def _threex_keyboard(active_id: str) -> InlineKeyboardMarkup:
@@ -808,7 +844,13 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     _stop_live_updater(context, chat_id)
     msg = await update.message.reply_text("🛑 Stopping campaign…")
-    await msg.edit_text("🛑 Campaign stopped in this chat.")
+    try:
+        await asyncio.to_thread(vd.abandon_chat_campaign, chat_id)
+    except Exception as e:
+        print(f"[press1] abandon on /stop: {e}")
+    camps = context.application.bot_data.get("chat_campaigns", {})
+    camps.pop(chat_id, None)
+    await msg.edit_text("🛑 Campaign stopped — old lead file cleared for this chat.")
 
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1419,15 +1461,8 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     nums = parse_csv(content) if name.endswith(".csv") else parse_numbers(
         content.decode("utf-8-sig", errors="replace")
     )
-    s = session_for(update, context)
-    prev = len(s.numbers)
-    # Fresh list on every upload — never silently merge into old leads.
-    s.numbers = list(dict.fromkeys(nums))
     dest.unlink(missing_ok=True)
-    note = f" (replaced {prev} previously loaded)" if prev > 0 else ""
-    await update.message.reply_text(
-        f"📥 Loaded {len(s.numbers)} leads{note}. /run to dial."
-    )
+    await _replace_session_leads(update, context, nums)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1439,14 +1474,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     nums = parse_numbers(text)
     if not nums:
         return
-    s = session_for(update, context)
-    prev = len(s.numbers)
-    # Fresh list on every paste — never silently merge into old leads.
-    s.numbers = list(dict.fromkeys(nums))
-    note = f" (replaced {prev} previously loaded)" if prev > 0 else ""
-    await update.message.reply_text(
-        f"📥 Loaded {len(s.numbers)} leads{note}. /run to dial."
-    )
+    await _replace_session_leads(update, context, nums)
 
 
 async def _format_dtmf_message(ev: dict[str, str]) -> str | None:
