@@ -489,9 +489,15 @@ def stop_all_dialers(*, hangup_bitcall: bool = True) -> str:
         "pkill -9 -f 'bash /tmp/press1_dial_' 2>/dev/null || true; "
         "touch /tmp/press1_dial_stop 2>/dev/null || true; "
         "for f in /tmp/press1_stop_*; do touch \"$f\" 2>/dev/null || true; done; "
-        "rm -f /tmp/press1_pause_* 2>/dev/null || true; "
+        "rm -f /tmp/press1_pause_* /tmp/press1_dial_pause 2>/dev/null || true; "
         f"{hangup}"
-        f"rm -f {ACTIVE_RUN_ID} 2>/dev/null || true; "
+        f"rm -f {ACTIVE_RUN_ID} /tmp/press1_dial_run_id /tmp/press1_chat_run_* 2>/dev/null || true; "
+        # Wipe ghost campaign counters so /status and dashboard stop resurrecting old totals.
+        ": > /tmp/press1_dial_numbers.txt 2>/dev/null || true; "
+        "echo 0 > /tmp/press1_dial_total; echo 0 > /tmp/press1_dial_started; echo 0 > /tmp/press1_dial_failed; "
+        "for f in /tmp/press1_numbers_*.txt; do [ -f \"$f\" ] && : > \"$f\"; done; "
+        "for f in /tmp/press1_total_*; do [ -f \"$f\" ] && echo 0 > \"$f\"; done; "
+        "for f in /tmp/press1_started_*; do [ -f \"$f\" ] && echo 0 > \"$f\"; done; "
         "sleep 2; "
         "n=$(ps aux 2>/dev/null | grep -c '[b]ash /tmp/press1_dial_' || true); "
         "bc=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -ci '^PJSIP/bitcall-' || true); "
@@ -2169,20 +2175,28 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         state = _fetch_server_dial_state(run_id or None)
         file_lines = int(state["file_lines"])
         file_total = int(state["total"])
-        # Server file is source of truth for the active run (avoid stale session totals).
-        if run_id and (file_total > 0 or file_lines > 0):
-            total = file_total or file_lines
-        else:
-            total = file_total or file_lines or expected
         started = int(state["started"])
         failed = int(state["failed"])
         live = int(state["live"])
         running = bool(state["script_running"])
         paused = bool(state.get("paused"))
-        # Finished dialer but live calls still up = paused-style dashboard
-        if (not running) and live > 0 and started >= total > 0:
-            paused = True
-            running = True
+        # Dead dialer + empty lead file = idle. Never resurrect wiped campaigns from
+        # leftover total/started/pause files (that was the ghost "1383 / paused" bug).
+        if (not running) and live == 0 and file_lines == 0:
+            total = 0
+            started = 0
+            failed = 0
+            paused = False
+        else:
+            # Server file is source of truth for the active run (avoid stale session totals).
+            if run_id and (file_total > 0 or file_lines > 0):
+                total = file_total or file_lines
+            else:
+                total = file_total or file_lines or expected
+            # Finished dialer but live calls still up = paused-style dashboard
+            if (not running) and live > 0 and started >= total > 0:
+                paused = True
+                running = True
         left = max(0, total - started - failed)
         dial_state = _dial_state_label(running, total, left, failed, paused=paused)
 
