@@ -20,8 +20,29 @@ URL: `https://p1-bot.onrender.com/health` or `https://p1-telegram-bot.onrender.c
 
 **Important:** Use **one** Render Web Service for this bot. If you have both `p1-bot` and `p1-telegram-bot`, suspend/delete one — same `BOT_TOKEN` causes Telegram Conflict errors.
 
+### `BOT_TOKEN is not set` on deploy
+
+You likely have **two** P1 services from the same GitHub repo:
+
+| Service | Status |
+|---------|--------|
+| **`p1-bot-m9an`** (or `p1-bot`) | ✅ Working — has secrets in Render env |
+| **`p1-telegram-bot`** | ❌ Blueprint auto-deploy — secrets are `sync: false`, never filled in |
+
+**Fix (pick one):**
+
+1. **Recommended:** Render dashboard → open the **failing** `p1-telegram-bot` service → **Suspend** (or Delete). Keep `p1-bot-m9an`.
+2. **Or sync secrets:** From repo root, with [Render API key](https://dashboard.render.com/u/settings/api-keys):
+   ```powershell
+   $env:RENDER_API_KEY = "rnd_..."
+   powershell -File scripts/ready-p1-render.ps1
+   ```
+   This copies `BOT_TOKEN`, SSH key, etc. from `.env.press1` and suspends broken duplicates.
+
+Campaigns use the **healthy** URL only: `https://p1-bot-m9an.onrender.com/health` must return `"ok": true`.
+
 ## Telegram commands
 
-`/start` `/status` `/run` `/stop` `/testcall` — plus send MP3/voice (audio) or numbers/CSV (leads).
+`/start` opens **THE FLOOR** (operator pad). `/go` preflight+launch · `/pulse` heat intel · `/run` `/stop` `/testcall` — plus MP3/voice (audio) or numbers/CSV (leads).
 
 Pushes that only change files **outside** `p1-telegram-bot/` will not redeploy this service if you set a build filter (see `render.yaml`).

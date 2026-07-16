@@ -130,19 +130,27 @@ def predict_eta(
     return eta, forecast
 
 
-def _header(dial_state: str, total: int, finished: bool, *, dialed: int = 0) -> str:
+def _header(
+    dial_state: str,
+    total: int,
+    finished: bool,
+    *,
+    dialed: int = 0,
+    callsign: str = "",
+) -> str:
     sep = f" {ui.SEP} "
+    tag = f"{callsign}{sep}" if callsign else ""
     if dial_state == "stalled" and dialed <= 0:
-        return f"⚠️ DIALER FAILED{sep}{total} leads"
+        return f"⚠️ DIALER FAILED{sep}{tag}{total} leads"
     if finished or dial_state == "finished":
-        return f"✅ CAMPAIGN COMPLETE{sep}{total} leads"
+        return f"✅ FLOOR CLOSED{sep}{tag}{total} leads"
     if dial_state == "stalled":
-        return f"⚠️ STALLED{sep}{dialed}/{total} dialed"
+        return f"⚠️ STALLED{sep}{tag}{dialed}/{total}"
     if dial_state == "finishing":
-        return f"🟡 FINISHING{sep}calls in flight"
+        return f"🟡 FINISHING{sep}{tag}calls in flight"
     if dial_state == "paused":
-        return f"⏸ PAUSED{sep}live calls continue"
-    return f"🟢 LIVE CAMPAIGN{sep}{total} leads"
+        return f"⏸ PAUSED{sep}{tag}live continue"
+    return f"🟢 LIVE ON THE FLOOR{sep}{tag}{total} leads"
 
 
 def format_campaign_body(
@@ -157,6 +165,8 @@ def format_campaign_body(
     finished: bool = False,
 ) -> str:
     """Return the campaign status as a single HTML blockquote card."""
+    import press1_floor as floor
+
     progress = progress or {}
     total = int(st.get("list_size", 0) or 0) or total_leads
     dialed = int(st.get("dialed", 0) or 0)
@@ -166,9 +176,19 @@ def format_campaign_body(
     live = int(st.get("live", 0) or 0)
     failed = int(st.get("failed", 0) or 0)
     dial_state = st.get("dial_state", "")
+    callsign = str(progress.get("callsign") or "")
     pct = (dialed * 100 // total) if total > 0 else 0
+    badge, blurb = floor.heat_label(dialed=dialed, answered=answered, press1=press1)
+    bar = floor.heat_bar(dialed=dialed, answered=answered, press1=press1)
 
     lines: list[str] = [ui.esc(progress_line(pct, dialed, total))]
+    lines.append(ui.esc(f"{badge}  {bar}"))
+    if dialed > 0 or answered > 0:
+        lines.append(f"<i>{ui.esc(blurb)}</i>")
+
+    batch_line = animated_batch_line(dialed, total, batch_size, frame)
+    if batch_line and dial_state in ("running", "paused", "finishing") and not finished:
+        lines.append(ui.esc(batch_line))
 
     lines.append("")
     lines.append(ui.stat("Dialed", dialed, icon="📞"))
@@ -187,7 +207,7 @@ def format_campaign_body(
     if failed > 0:
         lines.append(ui.stat("Failed", failed, icon="❌"))
 
-    eta, _ = predict_eta(
+    eta, forecast = predict_eta(
         dialed=dialed,
         total=total,
         hopper=hopper,
@@ -202,8 +222,13 @@ def format_campaign_body(
     if eta and not finished:
         lines.append("")
         lines.append(ui.stat("ETA", eta, icon="⏱️"))
+    if forecast and not finished:
+        lines.append(ui.stat("P1 forecast", forecast, icon="🎯"))
 
-    return ui.card(_header(dial_state, total, finished, dialed=dialed), lines)
+    return ui.card(
+        _header(dial_state, total, finished, dialed=dialed, callsign=callsign),
+        lines,
+    )
 
 
 def format_dashboard(
@@ -224,11 +249,13 @@ def format_dashboard(
     dial_state = st.get("dial_state", "idle")
     total = int(st.get("list_size", 0) or 0) or total_leads
     dialed = int(st.get("dialed", 0) or 0)
-    title = "🎛 CONTROL ROOM"
+    title = "🎛  THE FLOOR"
+    callsign = str((progress or {}).get("callsign") or "")
+    if callsign:
+        title = f"🎛  {callsign}"
 
     config_lines = [
-        ui.stat("Pacing", f"{call_gap:g}s gap {ui.SEP} batch {batch_size}", icon="⚙️"),
-        ui.stat("Max lines", max_concurrent or "∞", icon="📡"),
+        ui.stat("Pacing", f"{call_gap:g}s gap {ui.SEP} max {max_concurrent or 40}", icon="⚙️"),
         ui.stat("Transfer", transfer_label, icon="🎯"),
     ]
     if loaded_in_bot > 0:
@@ -240,12 +267,12 @@ def format_dashboard(
         standby = ui.card(
             title,
             [
-                ui.note("⚪", "Standing by — no active campaign"),
+                ui.note("⚪", "Standing by — floor is quiet"),
                 "",
                 *config_lines,
             ],
         )
-        return f"{standby}\n<i>Load leads then /run · refresh 5s</i>"
+        return f"{standby}\n<i>Load leads · /go to open the floor · refresh 5s</i>"
 
     body = format_campaign_body(
         st,
@@ -258,4 +285,4 @@ def format_dashboard(
         finished=dial_state in ("finished", "stalled", "idle") and dialed == 0,
     )
     config = ui.card("⚙️ CONFIG", config_lines)
-    return f"{body}\n{config}\n<i>refresh 5s · /stop to end</i>"
+    return f"{body}\n{config}\n<i>refresh 5s · pad below · /stop to close</i>"
