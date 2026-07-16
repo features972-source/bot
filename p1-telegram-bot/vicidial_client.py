@@ -33,13 +33,13 @@ SERVER_IP = os.getenv("VICIDIAL_SERVER_IP", "206.189.118.204")
 MAX_CONCURRENT = int(os.getenv("VICIDIAL_MAX_CONCURRENT", "0"))
 # 0 in env used to mean "uncapped" — that flooded BitCall and killed campaign DTMF
 # while single /testcall still worked. Treat 0/missing as a safe press-1 cap.
-_RAW_DIALER_CAP = int(os.getenv("VICIDIAL_DIALER_CAP", "40"))
-DIALER_CONCURRENT_CAP = 40 if _RAW_DIALER_CAP <= 0 else min(_RAW_DIALER_CAP, 80)
+_RAW_DIALER_CAP = int(os.getenv("VICIDIAL_DIALER_CAP", "55"))
+DIALER_CONCURRENT_CAP = 55 if _RAW_DIALER_CAP <= 0 else min(_RAW_DIALER_CAP, 80)
 BATCH_SIZE = int(os.getenv("VICIDIAL_BATCH_SIZE", "50"))
 BATCH_PAUSE_SEC = int(os.getenv("VICIDIAL_BATCH_PAUSE_SEC", "0"))
-# High-conversion pacing, but never faster than 0.2s — 0.1s uncapped dropped press-1s.
-_RAW_GAP = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.2"))
-CALL_GAP_SEC = max(0.2, _RAW_GAP)
+# 0.15s is safe with CAP~55; 0.1s uncapped historically dropped press-1s.
+_RAW_GAP = float(os.getenv("VICIDIAL_CALL_GAP_SEC", "0.15"))
+CALL_GAP_SEC = max(0.12, _RAW_GAP)
 MAX_LEADS = int(os.getenv("VICIDIAL_MAX_LEADS", "5000"))
 CPS = int(os.getenv("VICIDIAL_CPS", "4"))
 # Seconds to wait for digit AFTER greeting (high-P1 era used 25; 8 was too short).

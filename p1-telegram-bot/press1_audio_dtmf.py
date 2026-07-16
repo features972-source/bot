@@ -18,15 +18,14 @@ SR = 8000
 # Analyse recent buffer for classic DTMF-1 bursts.
 TAIL_SEC = 1.5
 MIN_FILE_SEC = 0.35  # ~0.35s of RX before we look
-ARM_READ_SEC = 0.25
+ARM_READ_SEC = 1.2  # wait after entering digit-wait before listening
 MIN_SIZE = 1200  # ~75ms of sln
 MAX_IVR_SEC = 40  # real press-1 is early; long legs = echo false positives
-GOERTZEL_MIN = 2.5e6  # higher = fewer false positives from speech/echo
-# NEVER auto-redirect from audio Goertzel — it false-fires on speech/echo
-# (e.g. Jul 14 11:15 owner test -> straight to agent at dur=7s).
-# Real press-1 = RFC2833 AMI + dialplan Read() only.
-# Jul 16: campaign false-xfered dozens of leads while audio DTMF was redirecting.
-REDIRECT_ON_HIT = False
+MIN_READ_DUR = 4  # seconds into IVR — past greeting; never yank on speech in prompt
+GOERTZEL_MIN = 4.5e6  # stricter than before — speech was false-firing at 2.5e6
+# Redirect ONLY with the gates below (Read app + min duration + high threshold).
+# Jul 16 false-xfer storm was redirect during Playback/speech with weak gates.
+REDIRECT_ON_HIT = True
 
 
 def log(msg: str) -> None:
@@ -127,6 +126,7 @@ def find_press1(samples: list[int]) -> bool:
 
 
 def live_read_channels() -> list[tuple[str, str, int]]:
+    """Only digit-wait (Read/WaitExten). Never Playback — greeting speech false-fires."""
     out: list[tuple[str, str, int]] = []
     for line in sh("/usr/sbin/asterisk -rx 'core show channels concise' 2>/dev/null").splitlines():
         if not line.lower().startswith("pjsip/bitcall-"):
@@ -135,7 +135,7 @@ def live_read_channels() -> list[tuple[str, str, int]]:
             continue
         parts = line.split("!")
         app = parts[5] if len(parts) > 5 else ""
-        if app not in ("Read", "WaitExten", "Playback"):
+        if app not in ("Read", "WaitExten"):
             continue
         chan, uid = parts[0], parts[-1].strip()
         dur = 0
@@ -144,7 +144,7 @@ def live_read_channels() -> list[tuple[str, str, int]]:
                 dur = int(tok)
         if dur > MAX_IVR_SEC:
             continue
-        if app == "Playback" and dur < 1:
+        if dur < MIN_READ_DUR:
             continue
         if chan and uid:
             out.append((chan, uid, dur))
@@ -168,8 +168,9 @@ def main() -> None:
     armed_at: dict[str, float] = {}
     mode = "redirect" if REDIRECT_ON_HIT else "observe-only"
     log(
-        "audio DTMF poller v17-restored %s digit-wait backup (max=%ss thr=%.1e arm=%.1fs)"
-        % (mode, MAX_IVR_SEC, GOERTZEL_MIN, ARM_READ_SEC)
+        "audio DTMF poller v18-strict %s Read-only backup "
+        "(min_dur=%ss max=%ss thr=%.1e arm=%.1fs)"
+        % (mode, MIN_READ_DUR, MAX_IVR_SEC, GOERTZEL_MIN, ARM_READ_SEC)
     )
     while True:
         try:
