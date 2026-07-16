@@ -646,20 +646,8 @@ def _stop_live_updater(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update, context):
-        return
-    msg = await update.message.reply_text("📡 Reading server…")
-    try:
-        st = await asyncio.to_thread(
-            vd.get_dial_stats,
-            None,
-            chat_progress(context.application, update.effective_chat.id),
-        )
-        s = session_for(update, context)
-        text = await _format_status(st, len(s.numbers))
-        await msg.edit_text(text)
-    except Exception as e:
-        await msg.edit_text(ui.error(f"Status failed: {e}"))
+    # Same surface as Status pad / /pulse — one status card, not a second dialect.
+    await cmd_pulse(update, context)
 
 
 async def cmd_leads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
