@@ -1215,10 +1215,10 @@ async def _launch_campaign(
 ) -> None:
     count = len(numbers)
     _stop_live_updater(context, chat_id)
-    # Same safe pacing as website campaigns — uncapped /run was why Telegram
-    # campaigns got answers with 0 press-1s while /testcall still worked.
-    dialer_cap = max(1, min(int(vd.DIALER_CONCURRENT_CAP or 55), 80))
-    call_gap = max(0.12, float(vd.CALL_GAP_SEC or 0.15))
+    # Use the same pacing the board shows — never silently dial hotter than SETUP.
+    pacing = _pacing(chat_id)
+    dialer_cap = max(1, min(int(pacing.get("max_concurrent") or vd.DIALER_CONCURRENT_CAP or 40), 55))
+    call_gap = max(0.15, float(pacing.get("call_gap") or vd.CALL_GAP_SEC or 0.2))
     callsign = floor.fresh_callsign()
     # Re-bind this chat's transfer/audio before dialing (matches /testcall path).
     try:
@@ -1510,12 +1510,13 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id if update.effective_user else 0
+    pacing = _pacing(chat_id)
     progress = chat_progress(context.application, chat_id) or {
         "chat_id": chat_id,
         "owner_id": user_id,
         "callsign": floor.fresh_callsign(),
-        "dialer_cap": max(1, min(int(vd.DIALER_CONCURRENT_CAP or 55), 80)),
-        "call_gap_sec": max(0.12, float(vd.CALL_GAP_SEC or 0.15)),
+        "dialer_cap": max(1, min(int(pacing.get("max_concurrent") or vd.DIALER_CONCURRENT_CAP or 40), 55)),
+        "call_gap_sec": max(0.15, float(pacing.get("call_gap") or vd.CALL_GAP_SEC or 0.2)),
     }
     if not progress.get("callsign"):
         progress["callsign"] = floor.fresh_callsign()

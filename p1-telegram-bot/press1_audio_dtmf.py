@@ -23,10 +23,12 @@ MIN_SIZE = 1200  # ~75ms of sln
 MAX_IVR_SEC = 40  # real press-1 is early; long legs = echo false positives
 MIN_READ_DUR = 4  # seconds into IVR — past greeting; never yank on speech in prompt
 GOERTZEL_MIN = 4.5e6  # stricter than before — speech was false-firing at 2.5e6
-# NEVER auto-redirect from Goertzel — speech false-fires and queues fake agent
-# transfers (LIVE inflated, PRESS-1=0). Real P1 = dialplan Read() + AMI DTMF only.
-# Website /testcall works because it relies on Read, not this watcher.
-REDIRECT_ON_HIT = False
+# NEVER channel-redirect from Goertzel — that queued fake agent legs (LIVE up,
+# PRESS-1=0). Campaign BitCall often sends inband DTMF that Read() misses while
+# MixMonitor still hears it. Inject digit 1 into the live Read() so the same
+# dialplan path as /testcall completes the transfer.
+INJECT_ON_HIT = True
+REDIRECT_ON_HIT = False  # kept for emergency; prefer inject
 
 
 def log(msg: str) -> None:
@@ -163,13 +165,34 @@ def paths_for(uid: str) -> list[Path]:
     ]
 
 
+def inject_digit_one(chan: str) -> str:
+    """Feed digit 1 into an active Read() — does not yank the channel off IVR."""
+    safe = chan.replace("'", "").replace(";", "")
+    for cmd in (
+        f"/usr/sbin/asterisk -rx 'channel play dtmf {safe} 1' 2>&1",
+        f"/usr/sbin/asterisk -rx 'play dtmf {safe} 1' 2>&1",
+    ):
+        out = sh(cmd).strip()
+        low = out.lower()
+        if out and "no such" not in low and "not found" not in low and "failed" not in low:
+            return out or "ok"
+        if not out:
+            return "ok"
+    return out or "inject-failed"
+
+
 def main() -> None:
     MONITOR_DIR.mkdir(parents=True, exist_ok=True)
     fired: set[str] = set()
     armed_at: dict[str, float] = {}
-    mode = "redirect" if REDIRECT_ON_HIT else "observe-only"
+    if REDIRECT_ON_HIT:
+        mode = "redirect"
+    elif INJECT_ON_HIT:
+        mode = "inject"
+    else:
+        mode = "observe-only"
     log(
-        "audio DTMF poller v18-strict %s Read-only backup "
+        "audio DTMF poller v19-inject %s Read-only backup "
         "(min_dur=%ss max=%ss thr=%.1e arm=%.1fs)"
         % (mode, MIN_READ_DUR, MAX_IVR_SEC, GOERTZEL_MIN, ARM_READ_SEC)
     )
@@ -207,13 +230,19 @@ def main() -> None:
                 if not hit_path:
                     continue
                 fired.add(chan)
+                safe = chan.replace("'", "")
+                if INJECT_ON_HIT and not REDIRECT_ON_HIT:
+                    result = inject_digit_one(safe)
+                    log(
+                        f"AUDIO DTMF1/inject {chan} dur={dur} file={hit_path} -> {result}"
+                    )
+                    continue
                 if not REDIRECT_ON_HIT:
                     log(
                         f"AUDIO DTMF1/observe {chan} dur={dur} file={hit_path} "
-                        "(no redirect — AMI/Read are authoritative)"
+                        "(no action — AMI/Read are authoritative)"
                     )
                     continue
-                safe = chan.replace("'", "")
                 redirect = sh(
                     f"/usr/sbin/asterisk -rx 'channel redirect {safe} press1-ivr,1,1' 2>&1"
                 )

@@ -300,6 +300,6 @@ def format_dashboard(
     tip = (
         ui.muted("Tap Retry · or Stop to close")
         if dial_state == "stalled"
-        else ui.muted("Auto-refreshes · Stop to close")
+        else ui.muted("Live board · Stop to close")
     )
     return f"{body}\n{tip}"
