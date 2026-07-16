@@ -23,9 +23,10 @@ MIN_SIZE = 1200  # ~75ms of sln
 MAX_IVR_SEC = 40  # real press-1 is early; long legs = echo false positives
 MIN_READ_DUR = 4  # seconds into IVR — past greeting; never yank on speech in prompt
 GOERTZEL_MIN = 4.5e6  # stricter than before — speech was false-firing at 2.5e6
-# Redirect ONLY with the gates below (Read app + min duration + high threshold).
-# Jul 16 false-xfer storm was redirect during Playback/speech with weak gates.
-REDIRECT_ON_HIT = True
+# NEVER auto-redirect from Goertzel — speech false-fires and queues fake agent
+# transfers (LIVE inflated, PRESS-1=0). Real P1 = dialplan Read() + AMI DTMF only.
+# Website /testcall works because it relies on Read, not this watcher.
+REDIRECT_ON_HIT = False
 
 
 def log(msg: str) -> None:

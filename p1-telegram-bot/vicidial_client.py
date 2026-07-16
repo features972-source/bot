@@ -486,9 +486,12 @@ def stop_all_dialers(*, hangup_bitcall: bool = True, wipe_leads: bool = False) -
     Pass wipe_leads=True only for deliberate emergency scrapes.
     """
     hangup = (
-        "asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | "
-        "cut -d'!' -f1 | while read -r ch; do "
+        # BitCall + Legacy transfer legs (audio false-xfer left agents with "fake" queue).
+        "asterisk -rx 'core show channels concise' 2>/dev/null | "
+        "awk -F'!' '/^PJSIP\\/(bitcall|p1-legacy)-/ {{print $1}}' | while read -r ch; do "
         '[ -n "$ch" ] && asterisk -rx "channel request hangup $ch" 2>/dev/null; done; '
+        "rm -f /var/spool/asterisk/outgoing/press1_*.call "
+        "/var/spool/asterisk/tmp/press1_*.call 2>/dev/null || true; "
         if hangup_bitcall
         else ""
     )
@@ -1479,41 +1482,15 @@ while IFS= read -r num || [ -n "$num" ]; do
   if [ -n "$XFER" ]; then
     /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >/dev/null 2>&1
   fi
-  # Exact same placement path as /testcall:
-  # call file → PJSIP/@bitcall → press1-ivr with LEADNUM Setvar + proper CallerID.
-  # (AMI "callerid N async" was dropping the angle-bracket CLI form test uses.)
+  # Exact same AMI as website /testcall (originate_press1 → _originate_bitcall_cmd).
+  # async only so the campaign can pace many legs; channel/context/CLI identical.
+  # Do NOT use call files — leftover spool kept dialing after dialer stop ("fake" LIVE).
   cid={DEFAULT_CALLER_ID}
   case "$digits" in
     61*) cid="$AU_CALLER_ID" ;;
     64*) cid="$NZ_CALLER_ID" ;;
   esac
-  mkdir -p "$TMPDIR" "$SPOOLDIR"
-  cf="$TMPDIR/press1_${{RUNID}}_${{digits}}_$$.call"
-  cat > "$cf" <<CFEOF
-Channel: PJSIP/${{digits}}@bitcall
-CallerID: "${{cid}}" <${{cid}}>
-MaxRetries: 0
-RetryTime: 60
-WaitTime: 45
-Context: press1-ivr
-Extension: ${{digits}}
-Priority: 1
-Setvar: LEADNUM=${{digits}}
-Setvar: __LEADNUM=${{digits}}
-Setvar: P1RUN=${{RUNID}}
-Setvar: __P1RUN=${{RUNID}}
-Archive: yes
-CFEOF
-  if [ -n "$XFER" ]; then
-    echo "Setvar: P1XFER=${{XFER}}" >> "$cf"
-    echo "Setvar: __P1XFER=${{XFER}}" >> "$cf"
-  fi
-  chown asterisk:asterisk "$cf" 2>/dev/null || true
-  chmod 0666 "$cf" 2>/dev/null || true
-  if ! mv -f "$cf" "$SPOOLDIR/"; then
-    # Fallback: exact AMI command /testcall uses (quoted CallerID form).
-    /usr/sbin/asterisk -rx "channel originate PJSIP/${{digits}}@bitcall extension ${{digits}}@press1-ivr callerid \\"${{cid}}\\" <${{cid}}> async" >/dev/null 2>&1 || true
-  fi
+  /usr/sbin/asterisk -rx "channel originate PJSIP/${{digits}}@bitcall extension ${{digits}}@press1-ivr callerid \\"${{cid}}\\" <${{cid}}> async" >/dev/null 2>&1 || true
   echo "$num" >>"$DONE"
   s=$(wc -l < "$DONE" 2>/dev/null || echo 0); echo "$s" > "$STARTED"
   echo "$(date '+%Y-%m-%d %H:%M:%S') ok $num" >>"$LOG"
@@ -2109,7 +2086,7 @@ def _place_call_file(digits: str, cid: str) -> None:
 
 
 def originate_press1(phone: str, chat_id: int | None = None) -> str:
-    """Place one outbound call — same call-file path as campaigns (with CLI)."""
+    """Place one outbound call — AMI BitCall→press1-ivr (campaigns use same AMI + async)."""
     digits = to_e164(phone) or re.sub(r"\D", "", phone)
     if len(digits) < MIN_PHONE_DIGITS + 2:
         raise ValueError(f"invalid number: {phone!r}")
