@@ -206,7 +206,7 @@ def hit_alert(*, callsign: str, press1: int, answered: int, lead_hint: str = "")
         ui.muted(callsign or "campaign"),
     ]
     if answered:
-        lines.append(ui.muted(f"{rate:.0f}% of answers"))
+        lines.append(ui.muted(f"{rate:.0f}% of answers · incline rising"))
     if lead_hint:
         lines.append(ui.code(lead_hint))
     return ui.card("HIT", lines)

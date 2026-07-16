@@ -30,6 +30,7 @@ import vicidial_client as vd
 import press1_access as access
 import press1_campaign as campaign
 import press1_floor as floor
+import press1_fx as fx
 import press1_schedule as schedule
 import press1_ui as ui
 from press1_settings import THREECX_PROFILES, format_settings_text
@@ -106,18 +107,20 @@ def _floor_pad(
     mode: str | None = None,
     app: Application | None = None,
     chat_id: int | None = None,
+    frame: int = 0,
 ) -> InlineKeyboardMarkup:
     """Contextual operator pad — only the buttons that matter right now."""
     m = _pad_mode_for(app, chat_id, show_retry=show_retry, mode=mode)
 
     if m == "live":
+        pulse = fx.live_pulse(frame)
         rows = [
             [
                 InlineKeyboardButton("⏸  Pause", callback_data="floor:pause"),
                 InlineKeyboardButton("■  Stop", callback_data="floor:stop"),
             ],
             [
-                InlineKeyboardButton("●  Status", callback_data="floor:pulse"),
+                InlineKeyboardButton(f"{pulse}  Status", callback_data="floor:pulse"),
                 InlineKeyboardButton("◈  Route", callback_data="floor:settings"),
             ],
         ]
@@ -424,6 +427,37 @@ def _warn(text: str) -> str:
     return f"\n\n⚠ <i>{ui.esc(text)}</i>"
 
 
+async def _send_hit_fx(
+    bot,
+    chat_id: int,
+    *,
+    callsign: str,
+    press1: int,
+    answered: int,
+    lead_hint: str = "",
+) -> None:
+    """Hit alert with phone notification sound + Telegram message effect."""
+    text = floor.hit_alert(
+        callsign=callsign,
+        press1=press1,
+        answered=answered,
+        lead_hint=lead_hint,
+    )
+    effect = fx.effect_for_hit(press1=press1, answered=answered)
+    try:
+        await bot.send_message(
+            chat_id,
+            text,
+            disable_notification=False,
+            message_effect_id=effect,
+        )
+    except Exception:
+        # Effects are private-chat only; groups still get the loud notification.
+        try:
+            await bot.send_message(chat_id, text, disable_notification=False)
+        except Exception:
+            return
+
 async def _format_status(st: dict[str, str], loaded_in_bot: int) -> str:
     pacing = _pacing()
     return floor.pulse_card(
@@ -457,13 +491,12 @@ async def _live_campaign_updater(
             answered_now = int(st.get("answered", 0) or 0)
             if press1_now > last_press1:
                 try:
-                    await context.bot.send_message(
+                    await _send_hit_fx(
+                        context.bot,
                         chat_id,
-                        floor.hit_alert(
-                            callsign=str(progress.get("callsign") or ""),
-                            press1=press1_now,
-                            answered=answered_now,
-                        ),
+                        callsign=str(progress.get("callsign") or ""),
+                        press1=press1_now,
+                        answered=answered_now,
                     )
                 except Exception:
                     pass
@@ -490,6 +523,7 @@ async def _live_campaign_updater(
                                 app=context.application,
                                 chat_id=chat_id,
                                 mode=pad_mode,
+                                frame=frame,
                             ),
                         ),
                         chat_id=msg.chat_id,
@@ -1855,7 +1889,7 @@ async def _format_dtmf_message(ev: dict[str, str]) -> str | None:
             [
                 ui.kv("Lead", lead),
                 "",
-                ui.muted("Transfer path engaged."),
+                ui.muted("Transfer path engaged · incline up."),
             ],
         )
     return None
@@ -1878,11 +1912,26 @@ async def _dtmf_notify_loop(app: Application) -> None:
                 text = await _format_dtmf_message(ev)
                 if not text:
                     continue
+                lead = ev.get("lead", "").strip()
                 for chat_id in chats:
                     try:
-                        await app.bot.send_message(chat_id=chat_id, text=text)
-                    except Exception as e:
-                        print(f"[press1] dtmf send to {chat_id}: {e}")
+                        await app.bot.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                            disable_notification=False,
+                            message_effect_id=fx.EFFECT_PARTY,
+                        )
+                    except Exception:
+                        try:
+                            await app.bot.send_message(
+                                chat_id=chat_id,
+                                text=text,
+                                disable_notification=False,
+                            )
+                        except Exception as e:
+                            print(f"[press1] dtmf send to {chat_id}: {e}")
+                    # Keep DTMF spam light — no WAV on every digit event
+                    _ = lead
         except Exception as e:
             print(f"[press1] dtmf notify: {e}")
         await asyncio.sleep(0.8)

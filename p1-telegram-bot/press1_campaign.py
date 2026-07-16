@@ -126,7 +126,9 @@ def predict_eta(
     return eta, forecast
 
 
-def _status_chip(dial_state: str, finished: bool) -> str:
+def _status_chip(dial_state: str, finished: bool, frame: int = 0) -> str:
+    import press1_fx as fx
+
     if finished or dial_state == "finished":
         return "✓  closed"
     if dial_state == "stalled":
@@ -136,7 +138,7 @@ def _status_chip(dial_state: str, finished: bool) -> str:
     if dial_state == "paused":
         return "⏸  paused"
     if dial_state == "running":
-        return "●  live"
+        return f"{fx.live_pulse(frame)}  live"
     return "○  standby"
 
 
@@ -161,8 +163,8 @@ def format_campaign_body(
     max_concurrent: int = 0,
 ) -> str:
     import press1_floor as floor
+    import press1_fx as fx
 
-    _ = frame  # reserved for future soft motion; batch spinner removed
     progress = progress or {}
     total = int(st.get("list_size", 0) or 0) or total_leads
     dialed = int(st.get("dialed", 0) or 0)
@@ -184,13 +186,21 @@ def format_campaign_body(
         )
 
     title = callsign or "CAMPAIGN"
-    chip = _status_chip(dial_state, finished)
+    chip = _status_chip(dial_state, finished, frame=frame)
     mood, mood_blurb = floor.heat_label(dialed=dialed, answered=answered, press1=press1)
+    incline = fx.record_incline(progress, answered=answered, press1=press1)
+    spark = fx.incline_spark(incline)
+
+    bar = (
+        fx.progress_shimmer(pct, frame)
+        if dial_state == "running" and not finished
+        else progress_bar(pct)
+    )
 
     lines: list[str] = [
         ui.esc(chip),
         "",
-        progress_line(pct, dialed, total),
+        f"{bar}  <b>{pct}%</b>",
         ui.muted(f"{dialed:,} of {total:,} dialed"),
         "",
     ]
@@ -203,11 +213,13 @@ def format_campaign_body(
     lines.append(f"<b>{live}</b>  live")
     lines.append(f"<b>{answered}</b>  answered{ui.esc(ans_tail)}")
     lines.append(f"<b>{press1}</b>  press-1{ui.esc(p1_tail)}")
+    if spark and (answered >= 2 or press1 > 0):
+        lines.append(ui.muted(f"incline  {spark}"))
 
     if failed > 0:
         lines.append(f"<b>{failed}</b>  failed")
 
-    # Soft mood — skip harsh "Ice" early noise; only after we have signal
+    # Soft mood — skip harsh early noise; only after we have signal
     if answered >= 3 or press1 > 0:
         lines.append("")
         lines.append(ui.muted(f"{mood} · {mood_blurb}"))
