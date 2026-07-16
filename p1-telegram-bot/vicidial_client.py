@@ -1468,35 +1468,55 @@ while IFS= read -r num || [ -n "$num" ]; do
     sleep 1
   done
   digits=$(echo "$num" | tr -cd '0-9')
-  # Sync AstDB BEFORE originate (high-P1 path — background race left xfer/run empty).
+  # Sync AstDB BEFORE originate (same as /testcall apply_lead_run_config).
   XFER=""
   if [ -f "/tmp/press1_xfer_$RUNID.txt" ]; then
     XFER=$(tr -d '\\r\\n' < "/tmp/press1_xfer_$RUNID.txt")
   fi
   /usr/sbin/asterisk -rx "database put press1 runs/${{digits}} ${{RUNID}}" >/dev/null 2>&1
   /usr/sbin/asterisk -rx "database put press1 lead/${{digits}} ${{num}}" >/dev/null 2>&1
+  /usr/sbin/asterisk -rx "database put press1 lead/${{digits}} ${{digits}}" >/dev/null 2>&1
   if [ -n "$XFER" ]; then
     /usr/sbin/asterisk -rx "database put press1 leadxfer/${{digits}} ${{XFER}}" >/dev/null 2>&1
   fi
-  # Async originate — never block the dial loop on call duration (sync originate
-  # stalls the whole campaign when BitCall/legs hang).
+  # Exact same placement path as /testcall:
+  # call file → PJSIP/@bitcall → press1-ivr with LEADNUM Setvar + proper CallerID.
+  # (AMI "callerid N async" was dropping the angle-bracket CLI form test uses.)
   cid={DEFAULT_CALLER_ID}
-  orig_out=$(/usr/sbin/asterisk -rx "channel originate PJSIP/${{num}}@bitcall extension ${{num}}@press1-ivr callerid ${{cid}} async" 2>&1)
-  PLACED=NO
-  if echo "$orig_out" | grep -qiE 'error|failed|reject|unable'; then
-    PLACED=NO
-  else
-    PLACED=YES
+  case "$digits" in
+    61*) cid="$AU_CALLER_ID" ;;
+    64*) cid="$NZ_CALLER_ID" ;;
+  esac
+  mkdir -p "$TMPDIR" "$SPOOLDIR"
+  cf="$TMPDIR/press1_${{RUNID}}_${{digits}}_$$.call"
+  cat > "$cf" <<CFEOF
+Channel: PJSIP/${{digits}}@bitcall
+CallerID: "${{cid}}" <${{cid}}>
+MaxRetries: 0
+RetryTime: 60
+WaitTime: 45
+Context: press1-ivr
+Extension: ${{digits}}
+Priority: 1
+Setvar: LEADNUM=${{digits}}
+Setvar: __LEADNUM=${{digits}}
+Setvar: P1RUN=${{RUNID}}
+Setvar: __P1RUN=${{RUNID}}
+Archive: yes
+CFEOF
+  if [ -n "$XFER" ]; then
+    echo "Setvar: P1XFER=${{XFER}}" >> "$cf"
+    echo "Setvar: __P1XFER=${{XFER}}" >> "$cf"
   fi
-  if [ "$PLACED" != "YES" ]; then
-    f=$(cat "$FAILED" 2>/dev/null || echo 0); echo $((f+1)) > "$FAILED"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') fail $num $orig_out" >>"$LOG"
-  else
-    nz_fail=0
-    echo "$num" >>"$DONE"
-    s=$(wc -l < "$DONE" 2>/dev/null || echo 0); echo "$s" > "$STARTED"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') ok $num" >>"$LOG"
+  chown asterisk:asterisk "$cf" 2>/dev/null || true
+  chmod 0666 "$cf" 2>/dev/null || true
+  if ! mv -f "$cf" "$SPOOLDIR/"; then
+    # Fallback: exact AMI command /testcall uses (quoted CallerID form).
+    /usr/sbin/asterisk -rx "channel originate PJSIP/${{digits}}@bitcall extension ${{digits}}@press1-ivr callerid \\"${{cid}}\\" <${{cid}}> async" >/dev/null 2>&1 || true
   fi
+  echo "$num" >>"$DONE"
+  s=$(wc -l < "$DONE" 2>/dev/null || echo 0); echo "$s" > "$STARTED"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') ok $num" >>"$LOG"
   batch_n=$((batch_n+1))
   wait_if_paused
   sleep "$GAP"
