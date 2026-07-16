@@ -77,14 +77,20 @@ ALLOWED = access.OWNERS | {
 HELP = floor.help_card()
 
 
-def _floor_pad() -> InlineKeyboardMarkup:
-    """One-tap operator pad — the thing that makes the bot feel like a console."""
-    return InlineKeyboardMarkup(
+def _floor_pad(*, show_retry: bool = False) -> InlineKeyboardMarkup:
+    """One-tap operator pad — clean, fixed layout."""
+    rows = [
         [
-            [
-                InlineKeyboardButton("🛫 GO", callback_data="floor:go"),
-                InlineKeyboardButton("📡 PULSE", callback_data="floor:pulse"),
-            ],
+            InlineKeyboardButton("🛫 GO", callback_data="floor:go"),
+            InlineKeyboardButton("📡 PULSE", callback_data="floor:pulse"),
+        ],
+    ]
+    if show_retry:
+        rows.append(
+            [InlineKeyboardButton("🔁 RETRY", callback_data="floor:retry")]
+        )
+    rows.extend(
+        [
             [
                 InlineKeyboardButton("⏸ PAUSE", callback_data="floor:pause"),
                 InlineKeyboardButton("▶️ RESUME", callback_data="floor:unpause"),
@@ -97,6 +103,7 @@ def _floor_pad() -> InlineKeyboardMarkup:
             ],
         ]
     )
+    return InlineKeyboardMarkup(rows)
 
 
 @dataclass
@@ -1206,11 +1213,18 @@ async def _launch_campaign(
         except Exception as e:
             progress["error"] = str(e)
             progress["running"] = False
-            st = await asyncio.to_thread(vd.get_dial_stats, run_since, progress)
             await _safe_edit(
                 msg,
-                await _format_live_stats(st, count, progress=progress) + _warn(e),
+                floor.fail_card(
+                    callsign=str(progress.get("callsign") or ""),
+                    total=count,
+                    reason=floor.tidy_reason(e),
+                ),
             )
+            try:
+                await msg.edit_reply_markup(reply_markup=_floor_pad(show_retry=True))
+            except Exception:
+                pass
             return
         fresh = {
             "list_size": str(count),
@@ -1435,6 +1449,58 @@ async def cmd_go(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _launch_campaign(context, chat_id, user_id, numbers)
 
 
+async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Restart a failed/stalled hopper without re-uploading leads."""
+    if not await guard(update, context):
+        return
+    msg = update.effective_message
+    if not msg:
+        return
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else 0
+    progress = chat_progress(context.application, chat_id) or {
+        "chat_id": chat_id,
+        "owner_id": user_id,
+        "callsign": floor.fresh_callsign(),
+        "dialer_cap": max(1, min(int(vd.DIALER_CONCURRENT_CAP or 40), 80)),
+        "call_gap_sec": max(0.2, float(vd.CALL_GAP_SEC or 0.2)),
+    }
+    if not progress.get("callsign"):
+        progress["callsign"] = floor.fresh_callsign()
+    status = await msg.reply_text("🔁 Rewriting dial script and restarting hopper…")
+    try:
+        info = await asyncio.to_thread(vd.repair_and_restart_run, chat_id, progress)
+        set_chat_progress(context.application, chat_id, progress)
+        callsign = str(progress.get("callsign") or "")
+        text = floor.launch_banner(
+            callsign=callsign or "RETRY",
+            count=int(info["leads"]),
+            cap=int(info["cap"]),
+            gap=float(info["gap"]),
+        )
+        await status.edit_text(text, reply_markup=_floor_pad())
+        run_since = await asyncio.to_thread(vd.server_now)
+        progress["run_since"] = run_since
+        progress["running"] = True
+        stop_event = asyncio.Event()
+        context.application.bot_data.setdefault("live_updater_stops", {})[chat_id] = stop_event
+        task = asyncio.create_task(
+            _live_campaign_updater(
+                status, int(info["leads"]), run_since, stop_event, context, chat_id
+            )
+        )
+        context.application.bot_data.setdefault("live_updater_tasks", {})[chat_id] = task
+    except Exception as e:
+        await status.edit_text(
+            floor.fail_card(
+                callsign=str(progress.get("callsign") or ""),
+                total=int(progress.get("total") or 0),
+                reason=floor.tidy_reason(e),
+            ),
+            reply_markup=_floor_pad(show_retry=True),
+        )
+
+
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
@@ -1467,6 +1533,10 @@ async def on_floor_pad(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if action == "go":
         await query.answer("Preflight…")
         await cmd_go(update, context)
+        return
+    if action == "retry":
+        await query.answer("Retry…")
+        await cmd_retry(update, context)
         return
     if action == "pulse":
         await query.answer("Pulse")
@@ -1827,6 +1897,7 @@ async def post_init(app: Application) -> None:
         [
             BotCommand("start", "Enter THE FLOOR"),
             BotCommand("go", "Preflight + launch campaign"),
+            BotCommand("retry", "Restart failed hopper"),
             BotCommand("pulse", "Live conversion intel"),
             BotCommand("run", "Launch without preflight"),
             BotCommand("audio", "Change IVR audio"),
@@ -1902,6 +1973,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("dashboard", cmd_dashboard))
     app.add_handler(CommandHandler("go", cmd_go))
+    app.add_handler(CommandHandler("retry", cmd_retry))
     app.add_handler(CommandHandler("pulse", cmd_pulse))
     app.add_handler(CommandHandler("run", cmd_run))
     app.add_handler(CommandHandler("pause", cmd_pause))

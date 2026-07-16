@@ -2419,6 +2419,19 @@ def _start_dial_script(run_id: str) -> None:
         prepare_exclusive_campaign(run_id)
     p = _run_paths(run_id)
     rid = _safe_run_token(run_id)
+    # Never launch an empty/corrupt script (cap-guard race used to leave 0-byte .sh).
+    check = run_remote(
+        f"wc -c < {p['script']} 2>/dev/null || echo 0; "
+        f"grep -c 'while IFS' {p['script']} 2>/dev/null || echo 0",
+        timeout=15,
+    ).strip().splitlines()
+    script_bytes = int((check[0] if check else "0").strip() or "0")
+    loops = int((check[1] if len(check) > 1 else "0").strip() or "0")
+    if script_bytes < 200 or loops < 1:
+        raise RuntimeError(
+            f"Dial script missing or empty on server (bytes={script_bytes}) — "
+            "re-upload with /go"
+        )
     run_remote(f"chmod +x {p['script']}", timeout=15)
     # Clear stop/pause AND release stale flock holders before start.
     run_remote(
@@ -2571,23 +2584,9 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     )
 
     script_body = _server_dial_script(run_id)
-    with ssh_connect() as client:
-        sftp = client.open_sftp()
-        with sftp.file(paths["numbers"], "w") as remote_file:
-            remote_file.write("\n".join(numbers) + "\n")
-        with sftp.file(paths["script"], "w") as remote_file:
-            remote_file.write(script_body)
-        sftp.close()
+    if len(script_body) < 200 or "while IFS" not in script_body:
+        raise RuntimeError("Internal error: dial script template empty — try /go again")
 
-    verify = run_remote(
-        f"wc -l < {paths['numbers']}; grep -c 'while IFS' {paths['script']}",
-        timeout=20,
-    ).strip().splitlines()
-    line_count = int(verify[0].strip()) if verify else 0
-    if line_count < len(numbers):
-        raise RuntimeError(f"Upload failed: expected {len(numbers)} lines, got {line_count}")
-
-    run_remote(f"echo {len(numbers)} > {paths['total']}", timeout=15)
     # Prefer per-campaign overrides from the website dashboard; fall back to env.
     # CAP=0 (uncapped) is what made campaign press-1 die while testcall still worked:
     # too many concurrent MixMonitor/RTP legs and DTMF never arrives.
@@ -2603,14 +2602,120 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
     except (TypeError, ValueError):
         gap = CALL_GAP_SEC
     gap = max(0.15, min(float(gap), 2.0))
+    # Bake pacing into the script BEFORE upload so we never rely on a live sed race
+    # against press1-cap-guard (inotify sed -i was zeroing scripts mid-write).
+    script_body = re.sub(r"(?m)^GAP=.*$", f"GAP={gap:g}", script_body, count=1)
+    script_body = re.sub(r"(?m)^BATCH=.*$", f"BATCH={BATCH_SIZE}", script_body, count=1)
+    script_body = re.sub(r"(?m)^PAUSE=.*$", f"PAUSE={BATCH_PAUSE_SEC}", script_body, count=1)
+    script_body = re.sub(r"(?m)^CAP=.*$", f"CAP={cap}", script_body, count=1)
+
+    numbers_tmp = paths["numbers"] + ".tmp"
+    script_tmp = paths["script"] + ".tmp"
+    with ssh_connect() as client:
+        sftp = client.open_sftp()
+        with sftp.file(numbers_tmp, "w") as remote_file:
+            remote_file.write("\n".join(numbers) + "\n")
+        with sftp.file(script_tmp, "w") as remote_file:
+            remote_file.write(script_body)
+        sftp.close()
+
+    # Atomic publish: mv only after both files are complete. Avoids empty .sh from
+    # inotify/cap-guard sed racing an open SFTP truncate.
+    verify = run_remote(
+        f"wc -l < {numbers_tmp}; wc -c < {script_tmp}; "
+        f"grep -c 'while IFS' {script_tmp} || echo 0",
+        timeout=20,
+    ).strip().splitlines()
+    line_count = int((verify[0] if verify else "0").strip() or "0")
+    script_bytes = int((verify[1] if len(verify) > 1 else "0").strip() or "0")
+    loop_hits = int((verify[2] if len(verify) > 2 else "0").strip() or "0")
+    if line_count < len(numbers):
+        raise RuntimeError(f"Upload failed: expected {len(numbers)} lines, got {line_count}")
+    if script_bytes < 200 or loop_hits < 1:
+        raise RuntimeError(
+            f"Dial script upload failed (bytes={script_bytes}, loops={loop_hits}) — try /go again"
+        )
     run_remote(
-        f"sed -i 's/^GAP=.*/GAP={gap}/' {paths['script']}; "
-        f"sed -i 's/^BATCH=.*/BATCH={BATCH_SIZE}/' {paths['script']}; "
-        f"sed -i 's/^PAUSE=.*/PAUSE={BATCH_PAUSE_SEC}/' {paths['script']}; "
-        f"sed -i 's/^CAP=.*/CAP={cap}/' {paths['script']}",
-        timeout=15,
+        f"chmod 755 {script_tmp}; "
+        f"mv -f {numbers_tmp} {paths['numbers']}; "
+        f"mv -f {script_tmp} {paths['script']}; "
+        f"echo {len(numbers)} > {paths['total']}; "
+        f"test -s {paths['script']} && grep -q 'while IFS' {paths['script']}",
+        timeout=20,
     )
     _start_dial_script(run_id)
+
+
+def repair_and_restart_run(chat_id: int, progress: dict | None = None) -> dict:
+    """Rewrite dial script if empty/corrupt and start remaining hopper leads.
+
+    Used by /retry after a FLOOR FAULT — numbers stay on the server.
+    """
+    prog = progress or {}
+    run_id = str(prog.get("run_id") or "").strip()
+    if not run_id:
+        run_id = resolve_chat_run_id(int(chat_id)) or ""
+    if not run_id:
+        run_id = run_remote(f"cat {ACTIVE_RUN_ID} 2>/dev/null || true", timeout=10).strip()
+    if not run_id:
+        raise RuntimeError("No campaign hopper found for this chat — paste leads and /go")
+
+    p = _run_paths(run_id)
+    nums = int(
+        run_remote(f"wc -l < {p['numbers']} 2>/dev/null || echo 0", timeout=15).strip().split()[-1]
+        or "0"
+    )
+    if nums <= 0:
+        raise RuntimeError("Hopper is empty — paste leads and /go")
+
+    try:
+        apply_run_config(run_id, int(chat_id))
+    except Exception as e:
+        print(f"[press1] apply_run_config on retry: {e}")
+
+    try:
+        cap = int(prog.get("dialer_cap") or DIALER_CONCURRENT_CAP or 40)
+    except (TypeError, ValueError):
+        cap = 40
+    if cap <= 0:
+        cap = 40
+    cap = max(1, min(cap, 80))
+    try:
+        gap = float(prog.get("call_gap_sec") or CALL_GAP_SEC)
+    except (TypeError, ValueError):
+        gap = CALL_GAP_SEC
+    gap = max(0.15, min(float(gap), 2.0))
+
+    body = _server_dial_script(run_id)
+    body = re.sub(r"(?m)^GAP=.*$", f"GAP={gap:g}", body, count=1)
+    body = re.sub(r"(?m)^BATCH=.*$", f"BATCH={BATCH_SIZE}", body, count=1)
+    body = re.sub(r"(?m)^PAUSE=.*$", f"PAUSE={BATCH_PAUSE_SEC}", body, count=1)
+    body = re.sub(r"(?m)^CAP=.*$", f"CAP={cap}", body, count=1)
+    tmp = p["script"] + ".tmp"
+    with ssh_connect() as client:
+        sftp = client.open_sftp()
+        with sftp.file(tmp, "w") as fh:
+            fh.write(body)
+        sftp.close()
+    run_remote(
+        f"test -s {tmp} && grep -q 'while IFS' {tmp} && chmod 755 {tmp} && mv -f {tmp} {p['script']}",
+        timeout=20,
+    )
+    run_remote(
+        f"rm -f {p['stop']} {p['pause']} {p['lock']} {GLOBAL_DIAL_LOCK}; "
+        f"echo {run_id} > {ACTIVE_RUN_ID}; "
+        f"echo {run_id} > {_chat_run_marker(int(chat_id))}; "
+        f"echo \"$(date '+%Y-%m-%d %H:%M:%S') retry rewrite+start run={run_id} leads={nums}\" >> {DIAL_LOG}",
+        timeout=15,
+    )
+    prog["run_id"] = run_id
+    prog["chat_id"] = int(chat_id)
+    prog["total"] = nums
+    prog["running"] = True
+    prog.pop("error", None)
+    prog.pop("stalled", None)
+    _start_dial_script(run_id)
+    return {"run_id": run_id, "leads": nums, "cap": cap, "gap": gap}
 
 
 def dial_leads(phones: list[str], progress: dict) -> None:

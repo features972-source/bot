@@ -98,6 +98,7 @@ def help_card() -> str:
                 "",
                 "🚀 <b>RUN THE LIST</b>",
                 ui.bullet("/go", "preflight + launch (recommended)", icon="▪️"),
+                ui.bullet("/retry", "restart failed hopper (no re-upload)", icon="▪️"),
                 ui.bullet("/run", "launch loaded leads now", icon="▪️"),
                 ui.bullet("/pulse", "live conversion intel", icon="▪️"),
                 ui.bullet("/dashboard", "pinned control room", icon="▪️"),
@@ -265,12 +266,47 @@ def forecast_line(*, dialed: int, answered: int, press1: int, remaining: int) ->
     """Project press-1s if the rest of the list converts like so far."""
     if answered < 8 or remaining <= 0:
         return ""
-    rate = press1 / answered
-    # Assume remaining answers at same answer-rate as dialed so far is noisy —
-    # use press1-per-dial when dialed is healthier.
     if dialed >= 20:
         rate = press1 / dialed
         projected = int(round(press1 + rate * remaining))
         return f"P1 forecast ~{projected} if pace holds"
+    rate = press1 / answered
     projected = int(round(press1 + rate * remaining * 0.35))
     return f"P1 forecast ~{projected} (early read)"
+
+
+def fail_card(
+    *,
+    callsign: str = "",
+    total: int = 0,
+    reason: str = "",
+) -> str:
+    lines = [
+        ui.note("⚠️", "Dialer never started — hopper is still on the server"),
+        "",
+        ui.stat("Callsign", callsign or "—", icon="🏷️"),
+        ui.stat("Leads waiting", total, icon="💾"),
+    ]
+    if reason:
+        lines.append("")
+        lines.append(f"<i>{ui.esc(reason[:180])}</i>")
+    lines.extend(
+        [
+            "",
+            "<i>Tap 🔁 RETRY or /retry — no need to re-upload the list.</i>",
+        ]
+    )
+    return ui.card("⚠️  FLOOR FAULT", lines)
+
+
+def tidy_reason(err: object) -> str:
+    text = str(err or "").strip()
+    if not text:
+        return "Dial script did not stay running"
+    # Collapse noisy SSH tails into one clean line.
+    text = text.replace("\n", " · ")
+    if "Dialer did not start" in text:
+        return "Dial script exited immediately — usually an empty/corrupt upload"
+    if "empty" in text.lower() and "script" in text.lower():
+        return "Dial script was empty on the server (fixed — use /retry)"
+    return text[:160]

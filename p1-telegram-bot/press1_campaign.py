@@ -177,30 +177,41 @@ def format_campaign_body(
     failed = int(st.get("failed", 0) or 0)
     dial_state = st.get("dial_state", "")
     callsign = str(progress.get("callsign") or "")
+    err = str(progress.get("error") or "").strip()
     pct = (dialed * 100 // total) if total > 0 else 0
+
+    # Clean fail state — no fake "COLD START" heat on a dead dialer.
+    if dial_state == "stalled" and dialed <= 0:
+        return floor.fail_card(
+            callsign=callsign,
+            total=total or total_leads,
+            reason=floor.tidy_reason(err),
+        )
+
     badge, blurb = floor.heat_label(dialed=dialed, answered=answered, press1=press1)
     bar = floor.heat_bar(dialed=dialed, answered=answered, press1=press1)
 
     lines: list[str] = [ui.esc(progress_line(pct, dialed, total))]
-    lines.append(ui.esc(f"{badge}  {bar}"))
-    if dialed > 0 or answered > 0:
-        lines.append(f"<i>{ui.esc(blurb)}</i>")
+    if dialed > 0 or answered > 0 or dial_state == "running":
+        lines.append(ui.esc(f"{badge}  {bar}"))
+        if dialed > 0 or answered > 0:
+            lines.append(f"<i>{ui.esc(blurb)}</i>")
 
     batch_line = animated_batch_line(dialed, total, batch_size, frame)
     if batch_line and dial_state in ("running", "paused", "finishing") and not finished:
         lines.append(ui.esc(batch_line))
 
     lines.append("")
-    lines.append(ui.stat("Dialed", dialed, icon="📞"))
-    lines.append(ui.stat("Live now", live, icon="📡"))
+    lines.append(ui.stat("Dialed", f"{dialed} / {total}", icon="📞"))
+    lines.append(ui.stat("Live", live, icon="📡"))
     lines.append(ui.stat("Waiting", hopper, icon="⏳"))
 
     lines.append("")
     if dialed > 0:
         ans_pct = answered * 100 / dialed
         p1_pct = press1 * 100 / dialed
-        lines.append(ui.stat("Answered", answered, icon="✅", suffix=f" ({ans_pct:.0f}%)"))
-        lines.append(ui.stat("Press-1", press1, icon="🔥", suffix=f" ({p1_pct:.1f}%)"))
+        lines.append(ui.stat("Answered", answered, icon="✅", suffix=f"  {ans_pct:.0f}%"))
+        lines.append(ui.stat("Press-1", press1, icon="🔥", suffix=f"  {p1_pct:.1f}%"))
     else:
         lines.append(ui.stat("Answered", answered, icon="✅"))
         lines.append(ui.stat("Press-1", press1, icon="🔥"))
@@ -254,25 +265,23 @@ def format_dashboard(
     if callsign:
         title = f"🎛  {callsign}"
 
-    config_lines = [
-        ui.stat("Pacing", f"{call_gap:g}s gap {ui.SEP} max {max_concurrent or 40}", icon="⚙️"),
-        ui.stat("Transfer", transfer_label, icon="🎯"),
-    ]
-    if loaded_in_bot > 0:
-        config_lines.append(ui.stat("Loaded", f"{loaded_in_bot} leads", icon="💾"))
-    if scheduled_count > 0:
-        config_lines.append(ui.stat("Scheduled", f"{scheduled_count} runs", icon="⏰"))
+    # One clean card — no nested "CONFIG" block with duplicate icons.
+    route = transfer_label or "—"
+    pace = f"{call_gap:g}s · max {max_concurrent or 40}"
 
     if dial_state == "idle" and total == 0 and dialed == 0:
-        standby = ui.card(
-            title,
-            [
-                ui.note("⚪", "Standing by — floor is quiet"),
-                "",
-                *config_lines,
-            ],
-        )
-        return f"{standby}\n<i>Load leads · /go to open the floor · refresh 5s</i>"
+        standby_lines = [
+            ui.note("⚪", "Standing by"),
+            "",
+            ui.stat("Route", route, icon="🎯"),
+            ui.stat("Pace", pace, icon="⚙️"),
+        ]
+        if loaded_in_bot > 0:
+            standby_lines.append(ui.stat("Loaded", f"{loaded_in_bot} leads", icon="💾"))
+        if scheduled_count > 0:
+            standby_lines.append(ui.stat("Scheduled", f"{scheduled_count} runs", icon="⏰"))
+        standby = ui.card(title, standby_lines)
+        return f"{standby}\n<i>Load leads · /go · refresh 5s</i>"
 
     body = format_campaign_body(
         st,
@@ -284,5 +293,19 @@ def format_dashboard(
         frame=frame,
         finished=dial_state in ("finished", "stalled", "idle") and dialed == 0,
     )
-    config = ui.card("⚙️ CONFIG", config_lines)
-    return f"{body}\n{config}\n<i>refresh 5s · pad below · /stop to close</i>"
+    meta = (
+        "<blockquote>"
+        + "\n".join(
+            [
+                ui.stat("Route", route, icon="🎯"),
+                ui.stat("Pace", pace, icon="⚙️"),
+            ]
+        )
+        + "</blockquote>"
+    )
+    footer = (
+        "<i>/retry if stalled · /stop to close · refresh 5s</i>"
+        if dial_state == "stalled"
+        else "<i>refresh 5s · /stop to close</i>"
+    )
+    return f"{body}\n{meta}\n{footer}"
