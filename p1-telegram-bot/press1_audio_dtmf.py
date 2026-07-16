@@ -25,7 +25,8 @@ GOERTZEL_MIN = 2.5e6  # higher = fewer false positives from speech/echo
 # NEVER auto-redirect from audio Goertzel — it false-fires on speech/echo
 # (e.g. Jul 14 11:15 owner test -> straight to agent at dur=7s).
 # Real press-1 = RFC2833 AMI + dialplan Read() only.
-REDIRECT_ON_HIT = True
+# Jul 16: campaign false-xfered dozens of leads while audio DTMF was redirecting.
+REDIRECT_ON_HIT = False
 
 
 def log(msg: str) -> None:
