@@ -327,26 +327,40 @@ def api_start():
 @bp.post("/api/campaign/stop")
 @auth_required
 def api_stop():
+    """Stop must return fast — website curl timeout is ~20–45s and Resolve+hangup was exceeding it."""
     tenant = request.dash_tenant
     prog = _progress_for(tenant)
-    try:
-        vd.abandon_chat_campaign(tenant)
-    except Exception:
-        run_id = str(prog.get("run_id") or "")
-        if not run_id:
-            try:
-                run_id = vd.resolve_chat_run_id(tenant) or ""
-            except Exception:
-                run_id = ""
-        try:
-            vd._stop_remote_dialer(run_id or None)
-        except Exception:
-            pass
+    run_id = str(prog.get("run_id") or "").strip()
+    # Mark idle BEFORE remote work so concurrent /api/stats cannot resurrect Live.
     prog["running"] = False
     prog["stop"] = True
-    prog["total"] = 0
+    prog["paused"] = False
+    prog.pop("stalled", None)
+    known_run = run_id
     prog.pop("run_id", None)
-    return jsonify({"ok": True, "campaign": _campaign_view({}, prog, tenant)})
+
+    def _stop_bg() -> None:
+        try:
+            vd.abandon_chat_campaign(tenant, run_id=known_run or None)
+        except Exception:
+            try:
+                vd._stop_remote_dialer(known_run or None)
+            except Exception:
+                pass
+            try:
+                # Exclusive dialer — safe to clear any leftover bash dial scripts.
+                vd.stop_all_dialers(hangup_bitcall=True, wipe_leads=False)
+            except Exception:
+                pass
+
+    threading.Thread(target=_stop_bg, daemon=True, name=f"dash-stop-{tenant}").start()
+    idle = _campaign_view({}, prog, tenant)
+    idle["running"] = False
+    idle["paused"] = False
+    idle["live"] = 0
+    idle["dial_state"] = "idle"
+    idle["hopper"] = 0
+    return jsonify({"ok": True, "campaign": idle})
 
 
 @bp.post("/api/campaign/clear")

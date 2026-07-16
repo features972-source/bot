@@ -548,20 +548,28 @@ def prepare_exclusive_campaign(run_id: str) -> None:
     )
 
 
-def abandon_chat_campaign(chat_id: int) -> str:
+def abandon_chat_campaign(chat_id: int, run_id: str | None = None) -> str:
     """Stop this chat's dialer and wipe its lead file so old numbers cannot keep dialing.
 
     Telegram /clear and fresh pastes only cleared the bot session before — the server
     kept dialing the previous numbers file (and watchdog could revive it).
+
+    Prefer an explicit run_id (from progress) so website Stop does not wait on a
+    slow resolve_chat_run_id SSH round-trip (that was timing out the dashboard).
     """
-    rid = ""
-    try:
-        rid = resolve_chat_run_id(chat_id) or ""
-    except Exception:
-        rid = ""
+    rid = _safe_run_token(run_id or "") if run_id else ""
+    if not rid:
+        try:
+            rid = resolve_chat_run_id(chat_id) or ""
+        except Exception:
+            rid = ""
 
     parts = [
         f"rm -f {_chat_run_marker(chat_id)} 2>/dev/null || true",
+        # Always kill any dialer for this chat suffix + clear global lock leftovers.
+        f"pkill -9 -f 'bash /tmp/press1_dial_.*_{abs(int(chat_id))}\\.sh' 2>/dev/null || true",
+        "rm -f /var/spool/asterisk/outgoing/press1_*.call "
+        "/var/spool/asterisk/tmp/press1_*.call 2>/dev/null || true",
     ]
     if rid:
         p = _run_paths(rid)
@@ -577,9 +585,21 @@ def abandon_chat_campaign(chat_id: int) -> str:
                 f"if [ \"$(cat {ACTIVE_RUN_ID} 2>/dev/null)\" = {rid_q} ]; then rm -f {ACTIVE_RUN_ID}; fi",
             ]
         )
+    else:
+        # No known run — still clear active marker so stats cannot resurrect a ghost campaign.
+        parts.append(f"rm -f {ACTIVE_RUN_ID} /tmp/press1_global_dial.lock 2>/dev/null || true")
+
+    # Hang up live BitCall/Legacy legs in the background so the HTTP stop returns fast.
+    parts.append(
+        "( asterisk -rx 'core show channels concise' 2>/dev/null "
+        "| awk -F'!' '/^PJSIP\\/(bitcall|p1-legacy)-/ {print $1}' "
+        "| while read -r ch; do "
+        '[ -n "$ch" ] && asterisk -rx "channel request hangup $ch" >/dev/null 2>&1; '
+        "done ) >/dev/null 2>&1 &"
+    )
 
     try:
-        return run_remote("; ".join(parts) + "; echo abandoned", timeout=25).strip()
+        return run_remote("; ".join(parts) + "; echo abandoned", timeout=20).strip()
     except Exception as e:
         return f"abandon_failed: {e}"
 
@@ -2172,15 +2192,18 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
     expected = int(prog.get("total", 0) or 0)
     run_id = str(prog.get("run_id", "") or "").strip()
     chat_id = prog.get("chat_id")
+    user_stopped = bool(prog.get("stop"))
     # Survive Render restarts / lost session: recover run_id from dial server.
-    if not run_id and chat_id is not None:
+    # Never steal a foreign ACTIVE_RUN_ID when this tenant already stopped — that
+    # made the website Stop button look broken (stats flipped back to Live).
+    if not run_id and chat_id is not None and not user_stopped:
         try:
             run_id = resolve_chat_run_id(int(chat_id)) or ""
             if run_id:
                 prog["run_id"] = run_id
         except Exception:
             pass
-    if not run_id:
+    if not run_id and chat_id is None and not user_stopped:
         try:
             run_id = run_remote(f"cat {ACTIVE_RUN_ID} 2>/dev/null || true", timeout=10).strip()
             if run_id:
@@ -2188,6 +2211,24 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         except Exception:
             pass
     try:
+        if user_stopped and not run_id:
+            # Hard idle after Stop — skip SSH resurrect until a new /start sets run_id.
+            prog["running"] = False
+            prog.pop("paused", None)
+            prog.pop("stalled", None)
+            return {
+                "list_size": str(int(prog.get("total", 0) or 0)),
+                "dialed": str(int(prog.get("started", 0) or 0)),
+                "failed": str(int(prog.get("failed", 0) or 0)),
+                "answered": str(int(prog.get("answered", 0) or 0)),
+                "press1": str(int(prog.get("press1", 0) or 0)),
+                "live": "0",
+                "hopper": "0",
+                "run_id": "",
+                "campaign_active": "N",
+                "dial_state": "idle",
+                "paused": "N",
+            }
         state = _fetch_server_dial_state(run_id or None)
         file_lines = int(state["file_lines"])
         file_total = int(state["total"])
@@ -2196,9 +2237,18 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
         live = int(state["live"])
         running = bool(state["script_running"])
         paused = bool(state.get("paused"))
+        # User hit Stop — dialer gone means idle even if transfer legs are still draining.
+        if user_stopped and not running:
+            live = 0
+            paused = False
+            running = False
+            if file_lines == 0:
+                total = int(prog.get("total", 0) or 0) or file_total
+            else:
+                total = file_total or file_lines or expected
         # Dead dialer + empty lead file = idle. Never resurrect wiped campaigns from
         # leftover total/started/pause files (that was the ghost "1383 / paused" bug).
-        if (not running) and live == 0 and file_lines == 0:
+        elif (not running) and live == 0 and file_lines == 0:
             total = 0
             started = 0
             failed = 0
@@ -2210,7 +2260,8 @@ def get_dial_stats(since: str | None, progress: dict | None) -> dict[str, str]:
             else:
                 total = file_total or file_lines or expected
             # Finished dialer but live calls still up = paused-style dashboard
-            if (not running) and live > 0 and started >= total > 0:
+            # (skip when user explicitly stopped — leftover xfers are not "still campaigning")
+            if (not user_stopped) and (not running) and live > 0 and started >= total > 0:
                 paused = True
                 running = True
         left = max(0, total - started - failed)
