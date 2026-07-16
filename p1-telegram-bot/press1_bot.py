@@ -74,36 +74,113 @@ ALLOWED = access.OWNERS | {
     if x.strip().isdigit()
 }
 
-HELP = floor.help_card()
+HELP = floor.help_card() + floor.menu_footer()
 
 
-def _floor_pad(*, show_retry: bool = False) -> InlineKeyboardMarkup:
-    """One-tap operator pad — clean, fixed layout."""
-    rows = [
-        [
-            InlineKeyboardButton("🛫 GO", callback_data="floor:go"),
-            InlineKeyboardButton("📡 PULSE", callback_data="floor:pulse"),
-        ],
-    ]
+def _pad_mode_for(
+    app: Application | None,
+    chat_id: int | None,
+    *,
+    show_retry: bool = False,
+    mode: str | None = None,
+) -> str:
+    if mode:
+        return mode
     if show_retry:
-        rows.append(
-            [InlineKeyboardButton("🔁 RETRY", callback_data="floor:retry")]
-        )
-    rows.extend(
-        [
+        return "fault"
+    if app is None or chat_id is None:
+        return "idle"
+    prog = chat_progress(app, chat_id) or {}
+    if prog.get("error") and not prog.get("running"):
+        return "fault"
+    if prog.get("paused"):
+        return "paused"
+    if prog.get("running") or prog.get("run_id"):
+        return "live"
+    return "idle"
+
+
+def _floor_pad(
+    *,
+    show_retry: bool = False,
+    mode: str | None = None,
+    app: Application | None = None,
+    chat_id: int | None = None,
+) -> InlineKeyboardMarkup:
+    """Contextual operator pad — only the buttons that matter right now."""
+    m = _pad_mode_for(app, chat_id, show_retry=show_retry, mode=mode)
+
+    if m == "live":
+        rows = [
             [
-                InlineKeyboardButton("⏸ PAUSE", callback_data="floor:pause"),
-                InlineKeyboardButton("▶️ RESUME", callback_data="floor:unpause"),
-                InlineKeyboardButton("🛑 STOP", callback_data="floor:stop"),
+                InlineKeyboardButton("⏸  Pause", callback_data="floor:pause"),
+                InlineKeyboardButton("■  Stop", callback_data="floor:stop"),
             ],
             [
-                InlineKeyboardButton("📞 TEST", callback_data="floor:test"),
-                InlineKeyboardButton("🎛 DASH", callback_data="floor:dash"),
-                InlineKeyboardButton("🎯 ROUTE", callback_data="floor:settings"),
+                InlineKeyboardButton("●  Status", callback_data="floor:pulse"),
+                InlineKeyboardButton("◈  Route", callback_data="floor:settings"),
+            ],
+        ]
+        return InlineKeyboardMarkup(rows)
+
+    if m == "paused":
+        rows = [
+            [
+                InlineKeyboardButton("▶  Resume", callback_data="floor:unpause"),
+                InlineKeyboardButton("■  Stop", callback_data="floor:stop"),
+            ],
+            [
+                InlineKeyboardButton("●  Status", callback_data="floor:pulse"),
+                InlineKeyboardButton("◈  Route", callback_data="floor:settings"),
+            ],
+        ]
+        return InlineKeyboardMarkup(rows)
+
+    if m == "fault":
+        rows = [
+            [InlineKeyboardButton("↻  Retry", callback_data="floor:retry")],
+            [
+                InlineKeyboardButton("▶  Launch", callback_data="floor:go"),
+                InlineKeyboardButton("■  Stop", callback_data="floor:stop"),
+            ],
+            [
+                InlineKeyboardButton("●  Status", callback_data="floor:pulse"),
+                InlineKeyboardButton("◈  Route", callback_data="floor:settings"),
+            ],
+        ]
+        return InlineKeyboardMarkup(rows)
+
+    # idle / default
+    rows = [
+        [
+            InlineKeyboardButton("▶  Launch", callback_data="floor:go"),
+            InlineKeyboardButton("●  Status", callback_data="floor:pulse"),
+        ],
+        [
+            InlineKeyboardButton("☎  Test", callback_data="floor:test"),
+            InlineKeyboardButton("◈  Route", callback_data="floor:settings"),
+        ],
+        [
+            InlineKeyboardButton("♫  Audio", callback_data="floor:audio"),
+            InlineKeyboardButton("⌘  Menu", callback_data="floor:menu"),
+        ],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _menu_pad() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🎛  Pin board", callback_data="floor:dash"),
+                InlineKeyboardButton("📅  Schedules", callback_data="floor:schedules"),
+            ],
+            [
+                InlineKeyboardButton("🧹  Clear leads", callback_data="floor:clear"),
+                InlineKeyboardButton("◀  Back", callback_data="floor:home"),
             ],
         ]
     )
-    return InlineKeyboardMarkup(rows)
 
 
 @dataclass
@@ -202,7 +279,14 @@ async def guard(update: Update, context: ContextTypes.DEFAULT_TYPE | None = None
         _note_user(context.application, user)
     if not allowed(uid):
         if update.callback_query:
-            await update.callback_query.answer()
+            await update.callback_query.answer("No access", show_alert=True)
+            return False
+        msg = update.effective_message
+        if msg:
+            try:
+                await msg.reply_text(floor.access_denied())
+            except Exception:
+                pass
         return False
     return True
 
@@ -213,15 +297,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     s = session_for(update, context)
     transfer = ""
+    grant_left = ""
     try:
         transfer = str(_pacing(chat_id).get("transfer_label") or "")
     except Exception:
         pass
+    # Single clean entry — no double-post wall of help.
     await update.message.reply_text(
-        floor.welcome_card(transfer=transfer, loaded=len(s.numbers)),
-        reply_markup=_floor_pad(),
+        floor.welcome_card(transfer=transfer, loaded=len(s.numbers), grant_left=grant_left),
+        reply_markup=_floor_pad(mode="idle"),
     )
-    await update.message.reply_text(HELP, reply_markup=_floor_pad())
     user = update.effective_user
     if user:
         asyncio.create_task(
@@ -353,7 +438,7 @@ async def _format_live_stats(
 
 
 def _warn(text: str) -> str:
-    return f"\n\n⚠️ <i>{ui.esc(text)}</i>"
+    return f"\n\n⚠ <i>{ui.esc(text)}</i>"
 
 
 async def _format_status(st: dict[str, str], loaded_in_bot: int) -> str:
@@ -367,28 +452,28 @@ async def _format_status(st: dict[str, str], loaded_in_bot: int) -> str:
     pct = (dialed * 100 // total) if total > 0 else 0
     lines = [
         ui.esc(campaign.progress_line(pct, dialed, total)),
-        "",
-        ui.stat("List on server", total, icon="📋"),
-        ui.stat("Dialed", dialed, icon="📞"),
-        ui.stat("Live now", live, icon="📡"),
-        ui.stat("Waiting", waiting, icon="⏳"),
+        ui.rule(),
+        ui.kv("List", total),
+        ui.kv("Dialed", dialed),
+        ui.kv("Live", live),
+        ui.kv("Waiting", waiting),
+        ui.rule(),
     ]
-    lines.append("")
     if dialed > 0:
         ans_pct = answered * 100 / dialed
         p1_pct = press1 * 100 / dialed
-        lines.append(ui.stat("Answered", answered, icon="✅", suffix=f" ({ans_pct:.0f}%)"))
-        lines.append(ui.stat("Press-1", press1, icon="🔥", suffix=f" ({p1_pct:.1f}%)"))
+        lines.append(ui.kv("Answered", f"{answered}  ({ans_pct:.0f}%)"))
+        lines.append(ui.kv("Press-1", f"{press1}  ({p1_pct:.1f}%)"))
     else:
-        lines.append(ui.stat("Answered", answered, icon="✅"))
-        lines.append(ui.stat("Press-1", press1, icon="🔥"))
+        lines.append(ui.kv("Answered", answered))
+        lines.append(ui.kv("Press-1", press1))
     if failed > 0:
-        lines.append(ui.stat("Failed", failed, icon="❌"))
+        lines.append(ui.kv("Failed", failed))
     if loaded_in_bot != total:
-        lines.append(ui.stat("In bot session", loaded_in_bot, icon="💾"))
+        lines.append(ui.kv("In bot", loaded_in_bot))
     lines.append("")
     lines.append(_state_line(st))
-    return ui.card("📊 STATUS SNAPSHOT", lines)
+    return ui.card("STATUS", lines)
 
 
 async def _live_campaign_updater(
@@ -438,8 +523,18 @@ async def _live_campaign_updater(
             dialed = int(st.get("dialed", 0) or 0)
             if text != last_text:
                 try:
+                    pad_mode = "paused" if dial_state == "paused" else (
+                        "fault" if dial_state == "stalled" and dialed <= 0 else "live"
+                    )
                     await _edit_text_resilient(
-                        lambda: msg.edit_text(text, reply_markup=_floor_pad()),
+                        lambda: msg.edit_text(
+                            text,
+                            reply_markup=_floor_pad(
+                                app=context.application,
+                                chat_id=chat_id,
+                                mode=pad_mode,
+                            ),
+                        ),
                         chat_id=msg.chat_id,
                         message_id=msg.message_id,
                     )
@@ -571,9 +666,13 @@ async def cmd_leads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, context):
         return
     s = session_for(update, context)
+    n = len(s.numbers)
     await update.message.reply_text(
-        f"💾 {len(s.numbers)} leads loaded. Send more or /go.",
-        reply_markup=_floor_pad(),
+        floor.leads_brief(count=n) if n else ui.card(
+            "HOPPER",
+            [ui.muted("Empty — paste numbers or drop a CSV.")],
+        ),
+        reply_markup=_floor_pad(mode="idle"),
     )
 
 
@@ -592,7 +691,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     camps = context.application.bot_data.get("chat_campaigns", {})
     camps.pop(chat_id, None)
     await update.message.reply_text(
-        "🧹 Loaded leads cleared — any dialer for this chat was stopped."
+        "Leads cleared — any dialer for this chat was stopped."
     )
 
 
@@ -625,14 +724,14 @@ async def _replace_session_leads(
         pass
     await update.message.reply_text(
         floor.leads_brief(count=len(s.numbers), replaced=prev, cap=cap, gap=gap),
-        reply_markup=_floor_pad(),
+        reply_markup=_floor_pad(mode="idle"),
     )
 
 
 def _threex_keyboard(active_id: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for pid, info in THREECX_PROFILES.items():
-        mark = " ✅" if pid == active_id else ""
+        mark = "  ✓" if pid == active_id else ""
         rows.append(
             [InlineKeyboardButton(f"{info['label']}{mark}", callback_data=f"p1_3cx:{pid}")]
         )
@@ -659,7 +758,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     reply = update.effective_message
     if not reply:
         return
-    msg = await reply.reply_text("⚙️ Loading settings…")
+    msg = await reply.reply_text("Loading routes…")
     try:
         text, keyboard = await asyncio.to_thread(_settings_message, chat_id)
         await msg.edit_text(text, reply_markup=keyboard)
@@ -682,7 +781,7 @@ async def on_threex_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         p = await asyncio.to_thread(vd.apply_threex_target, profile_id, chat_id)
         text, keyboard = await asyncio.to_thread(_settings_message, chat_id)
-        note = f"\n\n✅ This chat now transfers to {ui.b(p['label'])}."
+        note = f"\n\n✓  This chat now transfers to {ui.b(p['label'])}."
         await query.edit_message_text(text + note, reply_markup=keyboard)
     except Exception as e:
         await query.edit_message_text(ui.error(f"Transfer update failed: {e}"))
@@ -1184,7 +1283,9 @@ async def _launch_campaign(
     text_intro = intro or floor.launch_banner(
         callsign=callsign, count=count, cap=dialer_cap, gap=call_gap
     )
-    msg = await context.bot.send_message(chat_id, text_intro, reply_markup=_floor_pad())
+    msg = await context.bot.send_message(
+        chat_id, text_intro, reply_markup=_floor_pad(mode="live")
+    )
     try:
         run_since = await asyncio.to_thread(vd.server_now)
         progress: dict = {
@@ -1222,7 +1323,7 @@ async def _launch_campaign(
                 ),
             )
             try:
-                await msg.edit_reply_markup(reply_markup=_floor_pad(show_retry=True))
+                await msg.edit_reply_markup(reply_markup=_floor_pad(mode="fault"))
             except Exception:
                 pass
             return
@@ -1374,7 +1475,7 @@ async def cmd_pulse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not msg:
         return
     chat_id = update.effective_chat.id
-    status = await msg.reply_text("📡 Reading the floor…")
+    status = await msg.reply_text("Reading status…")
     try:
         progress = chat_progress(context.application, chat_id)
         st = await asyncio.to_thread(vd.get_dial_stats, None, progress)
@@ -1390,9 +1491,12 @@ async def cmd_pulse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             transfer=transfer,
             loaded=len(s.numbers),
         )
-        await status.edit_text(text, reply_markup=_floor_pad())
+        await status.edit_text(
+            text,
+            reply_markup=_floor_pad(app=context.application, chat_id=chat_id),
+        )
     except Exception as e:
-        await status.edit_text(ui.error(f"Pulse failed: {e}"))
+        await status.edit_text(ui.error(f"Status failed: {e}"))
 
 
 async def _preflight_checks(chat_id: int, lead_count: int) -> list[tuple[str, bool, str]]:
@@ -1435,13 +1539,16 @@ async def cmd_go(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     s = session_for(update, context)
     if not s.numbers:
         await msg.reply_text(
-            "📥 Hopper empty — paste numbers or drop a CSV, then /go.",
-            reply_markup=_floor_pad(),
+            ui.card("HOPPER", [ui.muted("Empty — paste numbers or drop a CSV, then Launch.")]),
+            reply_markup=_floor_pad(mode="idle"),
         )
         return
-    status = await msg.reply_text("🛫 Running preflight…")
+    status = await msg.reply_text("Running preflight…")
     checks = await _preflight_checks(chat_id, len(s.numbers))
-    await status.edit_text(floor.preflight_card(checks), reply_markup=_floor_pad())
+    await status.edit_text(
+        floor.preflight_card(checks),
+        reply_markup=_floor_pad(mode="idle"),
+    )
     if not all(ok for _, ok, _ in checks):
         return
     numbers = list(s.numbers)
@@ -1467,7 +1574,7 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     }
     if not progress.get("callsign"):
         progress["callsign"] = floor.fresh_callsign()
-    status = await msg.reply_text("🔁 Rewriting dial script and restarting hopper…")
+    status = await msg.reply_text("Rewriting dial script…")
     try:
         info = await asyncio.to_thread(vd.repair_and_restart_run, chat_id, progress)
         set_chat_progress(context.application, chat_id, progress)
@@ -1478,7 +1585,7 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             cap=int(info["cap"]),
             gap=float(info["gap"]),
         )
-        await status.edit_text(text, reply_markup=_floor_pad())
+        await status.edit_text(text, reply_markup=_floor_pad(mode="live"))
         run_since = await asyncio.to_thread(vd.server_now)
         progress["run_since"] = run_since
         progress["running"] = True
@@ -1497,7 +1604,7 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 total=int(progress.get("total") or 0),
                 reason=floor.tidy_reason(e),
             ),
-            reply_markup=_floor_pad(show_retry=True),
+            reply_markup=_floor_pad(mode="fault"),
         )
 
 
@@ -1509,7 +1616,10 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     s = session_for(update, context)
     if not s.numbers:
-        await msg.reply_text("📥 Load leads first — paste a list or send a .csv.")
+        await msg.reply_text(
+            ui.card("HOPPER", [ui.muted("Empty — paste a list or drop a CSV.")]),
+            reply_markup=_floor_pad(mode="idle"),
+        )
         return
     numbers = list(s.numbers)
     s.numbers.clear()
@@ -1522,13 +1632,14 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_floor_pad(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Inline console — GO / PULSE / PAUSE / RESUME / STOP / TEST / DASH / ROUTE."""
+    """Contextual pad — Launch / Status / Pause / Stop / Test / Route / Menu."""
     query = update.callback_query
     if not query or not query.data or not query.data.startswith("floor:"):
         return
     if not await guard(update, context):
         return
     action = query.data.split(":", 1)[1]
+    chat_id = update.effective_chat.id if update.effective_chat else 0
 
     if action == "go":
         await query.answer("Preflight…")
@@ -1539,7 +1650,7 @@ async def on_floor_pad(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await cmd_retry(update, context)
         return
     if action == "pulse":
-        await query.answer("Pulse")
+        await query.answer("Status")
         await cmd_pulse(update, context)
         return
     if action == "pause":
@@ -1559,12 +1670,44 @@ async def on_floor_pad(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await cmd_testcall(update, context)
         return
     if action == "dash":
-        await query.answer("Dashboard")
+        await query.answer("Pinning board")
         await cmd_dashboard(update, context)
         return
     if action == "settings":
         await query.answer("Route")
         await cmd_settings(update, context)
+        return
+    if action == "audio":
+        await query.answer("Audio")
+        await cmd_audio(update, context)
+        return
+    if action == "menu":
+        await query.answer()
+        target = query.message
+        if target:
+            await target.reply_text(HELP, reply_markup=_menu_pad())
+        return
+    if action == "home":
+        await query.answer()
+        s = session_for(update, context)
+        transfer = ""
+        try:
+            transfer = str(_pacing(chat_id).get("transfer_label") or "")
+        except Exception:
+            pass
+        if query.message:
+            await query.message.reply_text(
+                floor.welcome_card(transfer=transfer, loaded=len(s.numbers)),
+                reply_markup=_floor_pad(mode="idle"),
+            )
+        return
+    if action == "schedules":
+        await query.answer("Schedules")
+        await cmd_schedules(update, context)
+        return
+    if action == "clear":
+        await query.answer("Clearing")
+        await cmd_clear(update, context)
         return
     await query.answer()
 
@@ -1685,18 +1828,16 @@ async def cmd_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _set_awaiting_ivr(context)
     sent = await update.message.reply_text(
         ui.card(
-            "🔊  CHANGE IVR AUDIO",
+            "IVR AUDIO",
             [
-                ui.note(
-                    "↩️",
-                    "<b>In groups:</b> reply to this message with your audio file.",
-                ),
-                ui.note("🎧", "Or send MP3, WAV, M4A, OGG, or a voice note now."),
-                ui.note("↪️", "Or reply to an audio file with /audio."),
-                ui.note("💬", "Applies to this chat only."),
+                ui.note_html("↩", "<b>In groups:</b> reply to this message with your audio file."),
+                ui.note("♫", "Or send MP3, WAV, M4A, OGG, or a voice note now."),
+                ui.note("↪", "Or reply to an audio file with /audio."),
+                ui.note("◇", "Applies to this chat only."),
             ],
         )
-        + "\n💡 <i>Mono voice prompts sound best on phone lines.</i>"
+        + "\n"
+        + ui.muted("Mono voice prompts sound best on phone lines.")
     )
     context.chat_data["ivr_audio_prompt_msg_id"] = sent.message_id
 
@@ -1759,25 +1900,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _format_dtmf_message(ev: dict[str, str]) -> str | None:
+    """Only surface real press-1 digits — skip noise and call-ended spam."""
     kind = ev.get("e", "")
     lead = ev.get("lead", "").strip() or "unknown"
-    if kind == "digit":
-        digit = ev.get("d", "")
-        icon = "🔥" if digit == "1" else "☎️"
+    if kind == "digit" and ev.get("d", "") == "1":
         return ui.card(
-            f"{icon}  KEYPRESS · {lead}",
+            "PRESS-1",
             [
-                ui.bullet("Pressed", digit, icon="🔢"),
-                ui.bullet("Sequence", ev.get("seq", ""), icon="🧮"),
+                ui.kv("Lead", lead),
+                "",
+                ui.muted("Transfer path engaged."),
             ],
-        )
-    if kind == "summary":
-        digits = ev.get("digits", "")
-        if not digits:
-            return None
-        return ui.card(
-            f"📴  CALL ENDED · {lead}",
-            [ui.bullet("All digits", digits, icon="🧮")],
         )
     return None
 
@@ -1895,29 +2028,25 @@ async def post_init(app: Application) -> None:
         print(f"[press1] webhook active: {webhook_url}")
     await app.bot.set_my_commands(
         [
-            BotCommand("start", "Enter THE FLOOR"),
-            BotCommand("go", "Preflight + launch campaign"),
-            BotCommand("retry", "Restart failed hopper"),
-            BotCommand("pulse", "Live conversion intel"),
-            BotCommand("run", "Launch without preflight"),
-            BotCommand("audio", "Change IVR audio"),
-            BotCommand("status", "Hopper & live calls"),
-            BotCommand("dashboard", "Pinned control room"),
-            BotCommand("pause", "Pause campaign"),
-            BotCommand("unpause", "Resume campaign"),
+            BotCommand("start", "Open THE FLOOR"),
+            BotCommand("go", "Preflight + launch"),
+            BotCommand("pulse", "Live status"),
             BotCommand("stop", "Stop campaign"),
-            BotCommand("testcall", "Ring test numbers"),
-            BotCommand("testnumber", "Set UK test mobile"),
-            BotCommand("settings", "Transfer target & options"),
-            BotCommand("leads", "Loaded lead count"),
-            BotCommand("clear", "Clear loaded numbers"),
-            BotCommand("clearleads", "Clear loaded numbers"),
-            BotCommand("schedule", "Schedule a campaign"),
-            BotCommand("schedules", "List scheduled runs"),
-            BotCommand("addkey", "Grant temporary access"),
-            BotCommand("listkeys", "List access keys"),
-            BotCommand("revokekey", "Revoke access"),
-            BotCommand("repair", "Re-sync dial server stack"),
+            BotCommand("pause", "Pause dialing"),
+            BotCommand("unpause", "Resume dialing"),
+            BotCommand("retry", "Restart failed hopper"),
+            BotCommand("testcall", "Ring your test phone"),
+            BotCommand("settings", "Transfer route"),
+            BotCommand("audio", "Change IVR"),
+            BotCommand("dashboard", "Pin live board"),
+            BotCommand("leads", "Hopper count"),
+            BotCommand("clear", "Clear leads"),
+            BotCommand("schedule", "Schedule a run"),
+            BotCommand("schedules", "Upcoming runs"),
+            BotCommand("testnumber", "Set test mobile"),
+            BotCommand("addkey", "Grant access"),
+            BotCommand("listkeys", "List access"),
+            BotCommand("repair", "Re-sync dial stack"),
         ]
     )
     try:

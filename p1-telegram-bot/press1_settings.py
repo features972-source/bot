@@ -96,7 +96,7 @@ THREECX_PROFILES: dict[str, dict[str, str]] = {
     },
 }
 
-DEFAULT_THREECX = os.getenv("PRESS1_THREECX_DEFAULT", "swapofica")
+DEFAULT_THREECX = os.getenv("PRESS1_THREECX_DEFAULT", "legacy")
 
 
 def profile(profile_id: str) -> dict[str, str]:
@@ -133,14 +133,14 @@ def format_settings_text(
 ) -> str:
     p = profile(threex_id)
     card = ui.card(
-        "⚙️  SETTINGS",
+        "ROUTE & PACE",
         [
-            ui.bullet("IVR audio", sound_name, icon="🔊"),
-            ui.bullet("Call gap", f"{call_gap:g}s", icon="⏱"),
-            ui.bullet("Batch", f"{batch_size} · pause {batch_pause}s", icon="📦"),
-            ui.bullet("Max concurrent", max_concurrent or "unlimited", icon="📡"),
-            "",
-            ui.bullet("Transfer", transfer_display(p), icon="🎯"),
+            ui.kv("IVR", sound_name, icon="♫"),
+            ui.kv("Gap", f"{call_gap:g}s"),
+            ui.kv("Batch", f"{batch_size} · pause {batch_pause}s"),
+            ui.kv("Ceiling", max_concurrent or "unlimited"),
+            ui.rule(),
+            ui.kv("Transfer", transfer_display(p), icon="◈"),
         ],
     )
-    return f"{card}\n<i>Tap a button below — settings apply to <b>this chat only</b>.</i>"
+    return f"{card}\n{ui.muted('Tap a route below — applies to this chat only.')}"

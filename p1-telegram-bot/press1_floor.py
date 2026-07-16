@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""THE FLOOR — unique P1 operator identity, callsigns, heat, and pulse intel.
+"""THE FLOOR — operator identity, callsigns, heat, and pulse intel.
 
-This is the visual/ops language that makes the Telegram bot feel like a
-live trading floor for press-1 campaigns — not a generic dialer menu.
+Visual language: calm signal-room cards, sparse icons, clear hierarchy.
+Easy to scan on a phone during a live campaign.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 
 import press1_ui as ui
 
-# Phonetic callsign banks — short, radio-ready, memorable.
 _PREFIXES = (
     "TIDE", "NIGHT", "SPARK", "DRIFT", "SIGNAL", "CURRENT", "FLASH",
     "EMBER", "NORTH", "VELOCITY", "ECHO", "MERIDIAN", "HALO", "RIPTIDE",
@@ -24,7 +23,6 @@ _SUFFIX_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
 def callsign_for_run(run_id: str = "", *, chat_id: int = 0) -> str:
-    """Stable-ish memorable callsign for a campaign run."""
     seed = f"{run_id}|{chat_id}|{int(time.time()) // 60}"
     digest = hashlib.sha256(seed.encode()).hexdigest()
     pref = _PREFIXES[int(digest[:2], 16) % len(_PREFIXES)]
@@ -39,27 +37,26 @@ def fresh_callsign() -> str:
 
 
 def heat_label(*, dialed: int, answered: int, press1: int) -> tuple[str, str]:
-    """Return (badge, blurb) for conversion heat."""
     if answered <= 0 and dialed < 5:
-        return "⚪ COLD START", "Waiting for first answers"
+        return "◌ Quiet", "Waiting for first answers"
     if answered <= 0:
-        return "🔵 SILENT", "Answers not converting yet"
+        return "○ Silent", "Answers not converting yet"
     rate = press1 / answered
     if rate >= 0.18:
-        return "🔥 ON FIRE", f"{rate * 100:.1f}% of answers press 1"
+        return "▲ Hot", f"{rate * 100:.1f}% of answers press 1"
     if rate >= 0.10:
-        return "🟠 HOT", f"{rate * 100:.1f}% press-1 rate"
+        return "● Warm", f"{rate * 100:.1f}% press-1 rate"
     if rate >= 0.05:
-        return "🟡 WARM", f"{rate * 100:.1f}% press-1 rate"
+        return "◉ Steady", f"{rate * 100:.1f}% press-1 rate"
     if press1 > 0:
-        return "🔵 COOL", f"{rate * 100:.1f}% — stack is catching some"
-    return "⚪ ICE", "Answers landing, no press-1s yet"
+        return "○ Cool", f"{rate * 100:.1f}% — catching some"
+    return "◌ Ice", "Answers landing, no press-1s yet"
 
 
 def heat_bar(*, dialed: int, answered: int, press1: int, width: int = 10) -> str:
     if answered <= 0:
         return "·" * width
-    rate = min(1.0, (press1 / answered) / 0.22)  # 22% = full bar
+    rate = min(1.0, (press1 / answered) / 0.22)
     filled = int(round(width * rate))
     return "▓" * filled + "░" * (width - filled)
 
@@ -70,63 +67,62 @@ def floor_clock() -> str:
 
 def welcome_card(*, transfer: str = "", loaded: int = 0, grant_left: str = "") -> str:
     lines = [
-        ui.note("🎙️", "Live press-1 operations floor"),
-        "",
-        "Paste a list · drop a CSV · tap the pad below.",
-        "",
-        ui.stat("Transfer", transfer or "not set", icon="🎯"),
-        ui.stat("Loaded", f"{loaded} leads", icon="💾"),
+        ui.muted("Press-1 operations · live transfers"),
+        ui.rule(),
+        ui.kv("Route", transfer or "not set", icon="◈"),
+        ui.kv("Hopper", f"{loaded:,} leads" if loaded else "empty", icon="▣"),
     ]
     if grant_left:
-        lines.append(ui.stat("Access", grant_left, icon="🔑"))
+        lines.append(ui.kv("Access", grant_left, icon="◇"))
     lines.extend(
         [
+            ui.rule(),
+            "Paste numbers · drop a CSV · tap Launch.",
             "",
-            "<i>Every digit a caller presses streams here live.</i>",
-            f"<i>Floor clock {floor_clock()}</i>",
+            ui.muted(f"Floor clock  {floor_clock()}"),
         ]
     )
-    return ui.card("🌊  THE FLOOR", lines)
+    return ui.card("THE FLOOR", lines)
 
 
 def help_card() -> str:
+    return ui.card(
+        "COMMANDS",
+        [
+            ui.muted("Essentials"),
+            ui.bullet("/go", "check stack + launch"),
+            ui.bullet("/stop", "kill this chat's campaign"),
+            ui.bullet("/pulse", "live conversion read"),
+            ui.bullet("/testcall", "prove press-1 on your phone"),
+            "",
+            ui.muted("Campaign"),
+            ui.bullet("/pause", "hold new dials"),
+            ui.bullet("/unpause", "resume"),
+            ui.bullet("/retry", "restart failed hopper"),
+            ui.bullet("/dashboard", "pin a live board"),
+            "",
+            ui.muted("Setup"),
+            ui.bullet("/settings", "transfer route"),
+            ui.bullet("/audio", "swap IVR"),
+            ui.bullet("/testnumber", "your test mobile"),
+            ui.bullet("/clear", "wipe loaded leads"),
+            ui.bullet("/schedule", "queue a timed run"),
+            "",
+            ui.muted("Owner"),
+            ui.bullet("/addkey", "@user 24h seat"),
+            ui.bullet("/listkeys", "who has access"),
+            ui.bullet("/repair", "re-sync dial stack"),
+        ],
+        expandable=True,
+    )
+
+
+def menu_footer() -> str:
     return (
-        ui.card(
-            "🌊  THE FLOOR",
-            [
-                ui.note("🎙️", "Operator-built press-1 war room"),
-                "",
-                "🚀 <b>RUN THE LIST</b>",
-                ui.bullet("/go", "preflight + launch (recommended)", icon="▪️"),
-                ui.bullet("/retry", "restart failed hopper (no re-upload)", icon="▪️"),
-                ui.bullet("/run", "launch loaded leads now", icon="▪️"),
-                ui.bullet("/pulse", "live conversion intel", icon="▪️"),
-                ui.bullet("/dashboard", "pinned control room", icon="▪️"),
-                ui.bullet("/status", "quick snapshot", icon="▪️"),
-                ui.bullet("/pause", "hold new dials", icon="▪️"),
-                ui.bullet("/unpause", "resume dials", icon="▪️"),
-                ui.bullet("/stop", "kill this chat's campaign", icon="▪️"),
-                ui.bullet("/testcall", "prove press-1 on your handset", icon="▪️"),
-                "",
-                "⏰ <b>SCHEDULE</b>",
-                ui.bullet("/schedule 9am", "queue a run", icon="▪️"),
-                ui.bullet("/schedules", "upcoming runs", icon="▪️"),
-                "",
-                "🎛 <b>SETUP</b>",
-                ui.bullet("/audio", "swap IVR recording", icon="▪️"),
-                ui.bullet("/settings", "transfer route", icon="▪️"),
-                ui.bullet("/testnumber", "your prove-out mobile", icon="▪️"),
-                ui.bullet("/clear", "wipe loaded leads + server list", icon="▪️"),
-                "",
-                "🔐 <b>ACCESS</b> (owner)",
-                ui.bullet("/addkey @user 24h", "temp seat on the floor", icon="▪️"),
-                ui.bullet("/listkeys", "who has a seat", icon="▪️"),
-                ui.bullet("/repair", "re-sync dial stack", icon="▪️"),
-            ],
-            expandable=True,
-        )
-        + "\n🔔 <i>/go runs a stack check first — same path that makes /testcall transfer.</i>"
-        + "\n🔔 <i>Campaigns get a callsign. Press-1 hits get their own alert.</i>"
+        "\n"
+        + ui.muted("Tip: /go runs the same transfer path as /testcall.")
+        + "\n"
+        + ui.muted("Each campaign gets a callsign · press-1s alert live.")
     )
 
 
@@ -144,94 +140,100 @@ def pulse_card(
     hopper = int(st.get("hopper", 0) or 0)
     total = int(st.get("list_size", 0) or 0)
     failed = int(st.get("failed", 0) or 0)
-    state = st.get("dial_state", "idle")
+    state = str(st.get("dial_state", "idle") or "idle")
     badge, blurb = heat_label(dialed=dialed, answered=answered, press1=press1)
     bar = heat_bar(dialed=dialed, answered=answered, press1=press1)
     ans_rate = (answered * 100 / dialed) if dialed else 0.0
     p1_of_ans = (press1 * 100 / answered) if answered else 0.0
 
-    title = f"📡  PULSE · {callsign}" if callsign else "📡  PULSE"
+    state_icon = {
+        "running": "●",
+        "paused": "⏸",
+        "stalled": "⚠",
+        "finished": "✓",
+        "finishing": "…",
+    }.get(state, "○")
+
+    title = f"STATUS  ·  {callsign}" if callsign else "STATUS"
     lines = [
         ui.esc(f"{badge}  {bar}"),
-        f"<i>{ui.esc(blurb)}</i>",
-        "",
-        ui.stat("State", state, icon="🟢" if state == "running" else "⚪"),
-        ui.stat("Live legs", live, icon="📡"),
-        ui.stat("Dialed", f"{dialed}/{total or '—'}", icon="📞"),
-        ui.stat("Waiting", hopper, icon="⏳"),
-        "",
-        ui.stat("Answer rate", f"{ans_rate:.0f}%", icon="✅"),
-        ui.stat("P1 / answer", f"{p1_of_ans:.1f}%", icon="🔥"),
-        ui.stat("Press-1s", press1, icon="🎯"),
+        ui.muted(blurb),
+        ui.rule(),
+        ui.kv("State", f"{state_icon} {state}"),
+        ui.kv("Live", live),
+        ui.kv("Dialed", f"{dialed} / {total or '—'}"),
+        ui.kv("Waiting", hopper),
+        ui.rule(),
+        ui.kv("Answer rate", f"{ans_rate:.0f}%"),
+        ui.kv("P1 / answer", f"{p1_of_ans:.1f}%"),
+        ui.kv("Press-1s", press1),
     ]
     if failed:
-        lines.append(ui.stat("Failed", failed, icon="❌"))
+        lines.append(ui.kv("Failed", failed))
     if transfer:
-        lines.append("")
-        lines.append(ui.stat("Transfer", transfer, icon="🎯"))
+        lines.append(ui.rule())
+        lines.append(ui.kv("Route", transfer, icon="◈"))
     if loaded:
-        lines.append(ui.stat("In hopper (bot)", loaded, icon="💾"))
+        lines.append(ui.kv("In bot", f"{loaded} leads", icon="▣"))
     remaining = max(0, (total or dialed + hopper) - dialed)
     forecast = forecast_line(
         dialed=dialed, answered=answered, press1=press1, remaining=remaining
     )
     if forecast:
-        lines.append("")
-        lines.append(ui.note("📉", forecast))
+        lines.append(ui.rule())
+        lines.append(ui.muted(forecast))
     lines.append("")
-    lines.append(f"<i>Floor clock {floor_clock()}</i>")
+    lines.append(ui.muted(f"Floor clock  {floor_clock()}"))
     return ui.card(title, lines)
 
 
 def hit_alert(*, callsign: str, press1: int, answered: int, lead_hint: str = "") -> str:
     rate = (press1 * 100 / answered) if answered else 0.0
     lines = [
-        ui.note("🔥", f"Press-1 #{press1} locked"),
-        "",
-        ui.stat("Callsign", callsign or "—", icon="🏷️"),
-        ui.stat("P1 / answer", f"{rate:.1f}%", icon="📈"),
+        ui.kv("Hit", f"#{press1}"),
+        ui.kv("Callsign", callsign or "—"),
+        ui.kv("P1 / answer", f"{rate:.1f}%"),
     ]
     if lead_hint:
-        lines.append(ui.stat("Lead", lead_hint, icon="📱"))
-    lines.append("")
-    lines.append("<i>Transfer path engaged.</i>")
-    return ui.card("💥  FLOOR HIT", lines)
+        lines.append(ui.kv("Lead", lead_hint))
+    lines.extend(["", ui.muted("Transfer path engaged.")])
+    return ui.card("PRESS-1", lines)
 
 
 def launch_banner(*, callsign: str, count: int, cap: int, gap: float) -> str:
-    lines = [
-        ui.note("🚀", f"Opening {count} leads on the floor"),
-        "",
-        ui.stat("Callsign", callsign, icon="🏷️"),
-        ui.stat("Ceiling", f"{cap} live", icon="📡"),
-        ui.stat("Pace", f"{gap:g}s gap", icon="⚙️"),
-        "",
-        "<i>Watch for 💥 FLOOR HIT alerts when someone presses 1.</i>",
-    ]
-    return ui.card("🌊  FLOOR OPEN", lines)
+    return ui.card(
+        "FLOOR OPEN",
+        [
+            ui.kv("Callsign", callsign),
+            ui.kv("Leads", f"{count:,}"),
+            ui.kv("Ceiling", f"{cap} live"),
+            ui.kv("Pace", f"{gap:g}s gap"),
+            "",
+            ui.muted("Watch for PRESS-1 alerts."),
+        ],
+    )
 
 
 def preflight_card(checks: list[tuple[str, bool, str]]) -> str:
     lines = []
     for label, ok, detail in checks:
-        mark = "✅" if ok else "❌"
-        lines.append(f"{mark} <b>{ui.esc(label)}</b> — {ui.esc(detail)}")
+        mark = "✓" if ok else "✗"
+        lines.append(f"{mark}  <b>{ui.esc(label)}</b>  —  {ui.esc(detail)}")
     all_ok = all(ok for _, ok, _ in checks)
-    footer = "All green — launching." if all_ok else "Fix the red lines, then /go again."
-    lines.append("")
-    lines.append(f"<i>{ui.esc(footer)}</i>")
-    return ui.card("🛫  PREFLIGHT", lines)
+    footer = "All green — launching." if all_ok else "Fix the red lines, then Launch again."
+    lines.extend(["", ui.muted(footer)])
+    return ui.card("PREFLIGHT", lines)
 
 
 def finished_banner(*, callsign: str, dialed: int, answered: int, press1: int) -> str:
     badge, blurb = heat_label(dialed=dialed, answered=answered, press1=press1)
     return ui.card(
-        "🏁  FLOOR CLOSED",
+        "FLOOR CLOSED",
         [
-            ui.stat("Callsign", callsign or "—", icon="🏷️"),
-            ui.stat("Dialed", dialed, icon="📞"),
-            ui.stat("Answered", answered, icon="✅"),
-            ui.stat("Press-1", press1, icon="🔥"),
+            ui.kv("Callsign", callsign or "—"),
+            ui.kv("Dialed", dialed),
+            ui.kv("Answered", answered),
+            ui.kv("Press-1", press1),
             "",
             ui.esc(f"{badge} — {blurb}"),
         ],
@@ -239,11 +241,9 @@ def finished_banner(*, callsign: str, dialed: int, answered: int, press1: int) -
 
 
 def eta_minutes(*, count: int, cap: int = 40, gap: float = 0.2) -> int:
-    """Rough wall-clock estimate if the hopper stays full at the live ceiling."""
     if count <= 0:
         return 0
     _ = gap
-    # Empirical: ~cap/12 leads per second under safe BitCall pacing.
     cps = max(0.5, min(float(cap) / 12.0, 8.0))
     return max(1, int(round(count / cps / 60.0)))
 
@@ -252,18 +252,17 @@ def leads_brief(*, count: int, replaced: int = 0, cap: int = 40, gap: float = 0.
     eta = eta_minutes(count=count, cap=cap, gap=gap)
     note = f" (replaced {replaced})" if replaced > 0 else ""
     return ui.card(
-        "📥  HOPPER LOADED",
+        "HOPPER",
         [
-            ui.stat("Leads", f"{count}{note}", icon="💾"),
-            ui.stat("Est. floor time", f"~{eta} min @ {cap} live", icon="⏱️"),
+            ui.kv("Leads", f"{count:,}{note}"),
+            ui.kv("Est. time", f"~{eta} min @ {cap} live"),
             "",
-            "<i>Tap 🛫 GO for preflight + launch — or /go</i>",
+            ui.muted("Tap Launch for preflight + go."),
         ],
     )
 
 
 def forecast_line(*, dialed: int, answered: int, press1: int, remaining: int) -> str:
-    """Project press-1s if the rest of the list converts like so far."""
     if answered < 8 or remaining <= 0:
         return ""
     if dialed >= 20:
@@ -282,31 +281,28 @@ def fail_card(
     reason: str = "",
 ) -> str:
     lines = [
-        ui.note("⚠️", "Dialer never started — hopper is still on the server"),
-        "",
-        ui.stat("Callsign", callsign or "—", icon="🏷️"),
-        ui.stat("Leads waiting", total, icon="💾"),
+        ui.muted("Dialer never started — hopper still on the server."),
+        ui.rule(),
+        ui.kv("Callsign", callsign or "—"),
+        ui.kv("Waiting", f"{total:,} leads"),
     ]
     if reason:
-        lines.append("")
-        lines.append(f"<i>{ui.esc(reason[:180])}</i>")
-    lines.extend(
-        [
-            "",
-            "<i>Tap 🔁 RETRY or /retry — no need to re-upload the list.</i>",
-        ]
-    )
-    return ui.card("⚠️  FLOOR FAULT", lines)
+        lines.extend(["", ui.muted(reason[:180])])
+    lines.extend(["", ui.muted("Tap Retry — no need to re-upload.")])
+    return ui.card("FAULT", lines)
 
 
 def tidy_reason(err: object) -> str:
     text = str(err or "").strip()
     if not text:
         return "Dial script did not stay running"
-    # Collapse noisy SSH tails into one clean line.
     text = text.replace("\n", " · ")
     if "Dialer did not start" in text:
         return "Dial script exited immediately — usually an empty/corrupt upload"
     if "empty" in text.lower() and "script" in text.lower():
-        return "Dial script was empty on the server (fixed — use /retry)"
+        return "Dial script was empty on the server (fixed — use Retry)"
     return text[:160]
+
+
+def access_denied() -> str:
+    return ui.deny()

@@ -245,4 +245,4 @@ def format_grant_list() -> str:
     grants = active_grants()
     if not grants:
         return ui.card("🔑  ACCESS KEYS", [ui.note("⚪", "No active access keys.")])
-    return ui.card("🔑  ACCESS KEYS", [format_grant_line(g) for g in grants])
+    return ui.card("ACCESS", [format_grant_line(g) for g in grants])

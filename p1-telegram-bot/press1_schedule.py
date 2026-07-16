@@ -183,7 +183,7 @@ def format_schedule_line(s: dict) -> str:
 def format_schedule_list(user_id: int | None = None) -> str:
     items = list_schedules(user_id)
     if not items:
-        card = ui.card("⏰  SCHEDULE", [ui.note("⚪", "No scheduled campaigns.")])
+        card = ui.card("SCHEDULE", [ui.note("○", "No scheduled campaigns.")])
         return card
-    card = ui.card("⏰  SCHEDULE", [format_schedule_line(s) for s in items])
-    return f"{card}\n<i>Cancel with /unschedule &lt;id&gt;</i>"
+    card = ui.card("SCHEDULE", [format_schedule_line(s) for s in items])
+    return f"{card}\n{ui.muted('Cancel with /unschedule <id>')}"
