@@ -1,0 +1,2 @@
+# sales-bot health marker — bump to force Render auto-deploy
+BUILD = "sales-ready-v2"
