@@ -2584,11 +2584,26 @@ def launch_dial_campaign(phones: list[str], progress: dict) -> None:
         raise RuntimeError(f"Upload failed: expected {len(numbers)} lines, got {line_count}")
 
     run_remote(f"echo {len(numbers)} > {paths['total']}", timeout=15)
+    # Prefer per-campaign overrides from the website dashboard; fall back to env.
+    # CAP=0 (uncapped) is what made campaign press-1 die while testcall still worked:
+    # too many concurrent MixMonitor/RTP legs and DTMF never arrives.
+    try:
+        cap = int(progress.get("dialer_cap") or DIALER_CONCURRENT_CAP or 0)
+    except (TypeError, ValueError):
+        cap = DIALER_CONCURRENT_CAP
+    if cap <= 0:
+        cap = 40
+    cap = max(1, min(cap, 80))
+    try:
+        gap = float(progress.get("call_gap_sec") or CALL_GAP_SEC)
+    except (TypeError, ValueError):
+        gap = CALL_GAP_SEC
+    gap = max(0.15, min(float(gap), 2.0))
     run_remote(
-        f"sed -i 's/^GAP=.*/GAP={CALL_GAP_SEC}/' {paths['script']}; "
+        f"sed -i 's/^GAP=.*/GAP={gap}/' {paths['script']}; "
         f"sed -i 's/^BATCH=.*/BATCH={BATCH_SIZE}/' {paths['script']}; "
         f"sed -i 's/^PAUSE=.*/PAUSE={BATCH_PAUSE_SEC}/' {paths['script']}; "
-        f"sed -i 's/^CAP=.*/CAP={DIALER_CONCURRENT_CAP}/' {paths['script']}",
+        f"sed -i 's/^CAP=.*/CAP={cap}/' {paths['script']}",
         timeout=15,
     )
     _start_dial_script(run_id)

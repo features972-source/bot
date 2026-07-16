@@ -258,6 +258,31 @@ def api_start():
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
 
+    # Match website testcall: persist transfer/settings before dialing so campaign
+    # leads resolve the same P1XFER/sound path that works on /api/testcall.
+    try:
+        sound = str(body.get("sound_name") or "").strip()
+        if sound:
+            vd.save_chat_settings(tenant, sound_name=sound)
+    except Exception:
+        pass
+
+    # Website sends max_concurrent/cps — honor them. Uncapped floods kill DTMF on
+    # campaign calls even though single testcalls still capture press-1.
+    try:
+        max_conc = int(body.get("max_concurrent") or body.get("dialer_cap") or 0)
+    except (TypeError, ValueError):
+        max_conc = 0
+    if max_conc <= 0:
+        max_conc = 40
+    max_conc = max(1, min(max_conc, 80))
+    try:
+        cps = float(body.get("cps") or 0)
+    except (TypeError, ValueError):
+        cps = 0.0
+    gap = (1.0 / cps) if cps > 0 else 0.2
+    gap = max(0.15, min(gap, 2.0))
+
     try:
         run_since = vd.server_now()
     except Exception:
@@ -278,6 +303,8 @@ def api_start():
             "run_id": "",
             "run_since": run_since,
             "error": None,
+            "dialer_cap": max_conc,
+            "call_gap_sec": gap,
         }
     )
 
