@@ -565,6 +565,8 @@ def launch_dashboard_campaign(tenant: int, numbers: list[str]) -> dict[str, Any]
             "run_id": "",
             "run_since": run_since,
             "error": None,
+            "dialer_cap": max(1, min(int(vd.DIALER_CONCURRENT_CAP or 40), 80)),
+            "call_gap_sec": max(0.2, float(vd.CALL_GAP_SEC or 0.2)),
         }
     )
 

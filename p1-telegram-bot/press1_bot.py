@@ -300,11 +300,23 @@ def _pacing(chat_id: int | None = None) -> dict:
     if cached and now - float(_PACING_CACHE.get("at", 0)) < 60:
         return cached  # type: ignore[return-value]
     summary = vd.settings_summary(chat_id)
+    # Prefer dialer_cap (live channel ceiling) over legacy max_concurrent (often 0/∞).
+    try:
+        cap = int(summary.get("dialer_cap") or 0)
+    except ValueError:
+        cap = 0
+    if cap <= 0:
+        try:
+            cap = int(summary.get("max_concurrent") or 0)
+        except ValueError:
+            cap = 0
+    if cap <= 0:
+        cap = 40
     data = {
         "call_gap": float(summary["call_gap"]),
         "batch_size": int(summary["batch_size"]),
         "batch_pause": int(summary["batch_pause"]),
-        "max_concurrent": int(summary["max_concurrent"]),
+        "max_concurrent": cap,
         "transfer_label": summary.get("threex_label", summary["threex_target"]),
     }
     _PACING_CACHE["at"] = now
@@ -1093,10 +1105,19 @@ async def _launch_campaign(
 ) -> None:
     count = len(numbers)
     _stop_live_updater(context, chat_id)
+    # Same safe pacing as website campaigns — uncapped /run was why Telegram
+    # campaigns got answers with 0 press-1s while /testcall still worked.
+    dialer_cap = max(1, min(int(vd.DIALER_CONCURRENT_CAP or 40), 80))
+    call_gap = max(0.2, float(vd.CALL_GAP_SEC or 0.2))
+    # Re-bind this chat's transfer/audio before dialing (matches /testcall path).
+    try:
+        await asyncio.to_thread(vd.apply_run_config, vd.chat_cfg_run_id(chat_id), chat_id)
+    except Exception as e:
+        print(f"[press1] apply_run_config before /run: {e}")
     text_intro = intro or (
         f"🚀 Launching {count} leads\n"
-        f"{vd.BATCH_SIZE}/batch · {vd.CALL_GAP_SEC:g}s gap · "
-        f"{vd.BATCH_PAUSE_SEC}s between batches…"
+        f"max {dialer_cap} live · {call_gap:g}s gap · "
+        f"{vd.BATCH_SIZE}/batch…"
     )
     msg = await context.bot.send_message(chat_id, text_intro)
     try:
@@ -1117,6 +1138,8 @@ async def _launch_campaign(
             "owner_id": user_id,
             "pace_samples": [],
             "_frame": 0,
+            "dialer_cap": dialer_cap,
+            "call_gap_sec": call_gap,
         }
         set_chat_progress(context.application, chat_id, progress)
         try:
