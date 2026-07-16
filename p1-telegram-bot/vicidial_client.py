@@ -478,8 +478,13 @@ def count_campaign_dialers(except_run_id: str | None = None) -> int:
         return 0
 
 
-def stop_all_dialers(*, hangup_bitcall: bool = True) -> str:
-    """Kill every press-1 dial script, touch stop markers, optionally hang up BitCall legs."""
+def stop_all_dialers(*, hangup_bitcall: bool = True, wipe_leads: bool = False) -> str:
+    """Kill every press-1 dial script and touch stop markers.
+
+    Never wipe per-run number files by default — that was aborting fresh /go and
+    /retry launches (prepare_exclusive → stop_all → empty hopper → dialer exits 0).
+    Pass wipe_leads=True only for deliberate emergency scrapes.
+    """
     hangup = (
         "asterisk -rx 'core show channels concise' 2>/dev/null | grep '^PJSIP/bitcall-' | "
         "cut -d'!' -f1 | while read -r ch; do "
@@ -487,23 +492,32 @@ def stop_all_dialers(*, hangup_bitcall: bool = True) -> str:
         if hangup_bitcall
         else ""
     )
+    wipe = ""
+    if wipe_leads:
+        wipe = (
+            ": > /tmp/press1_dial_numbers.txt 2>/dev/null || true; "
+            "echo 0 > /tmp/press1_dial_total; echo 0 > /tmp/press1_dial_started; echo 0 > /tmp/press1_dial_failed; "
+            "for f in /tmp/press1_numbers_*.txt; do [ -f \"$f\" ] && : > \"$f\"; done; "
+            "for f in /tmp/press1_total_*; do [ -f \"$f\" ] && echo 0 > \"$f\"; done; "
+            "for f in /tmp/press1_started_*; do [ -f \"$f\" ] && echo 0 > \"$f\"; done; "
+        )
     return run_remote(
         "for pid in $(pgrep -f 'bash /tmp/press1_dial_' 2>/dev/null); do kill -9 \"$pid\" 2>/dev/null || true; done; "
         "pkill -9 -f 'press1_dial_run.sh' 2>/dev/null || true; "
         "pkill -9 -f 'bash /tmp/press1_dial_' 2>/dev/null || true; "
         "touch /tmp/press1_dial_stop 2>/dev/null || true; "
-        "for f in /tmp/press1_stop_*; do touch \"$f\" 2>/dev/null || true; done; "
+        # Only touch EXISTING stop files — never create a literal /tmp/press1_stop_* path.
+        "for f in /tmp/press1_stop_*; do "
+        '  [ -e "$f" ] || continue; '
+        '  case "$f" in *\\*) continue ;; esac; '
+        '  touch "$f" 2>/dev/null || true; '
+        "done; "
         "rm -f /tmp/press1_pause_* /tmp/press1_dial_pause 2>/dev/null || true; "
         f"{hangup}"
-        f"rm -f {ACTIVE_RUN_ID} /tmp/press1_dial_run_id /tmp/press1_chat_run_* 2>/dev/null || true; "
-        # Wipe ghost campaign counters so /status and dashboard stop resurrecting old totals.
-        ": > /tmp/press1_dial_numbers.txt 2>/dev/null || true; "
-        "echo 0 > /tmp/press1_dial_total; echo 0 > /tmp/press1_dial_started; echo 0 > /tmp/press1_dial_failed; "
-        "for f in /tmp/press1_numbers_*.txt; do [ -f \"$f\" ] && : > \"$f\"; done; "
-        "for f in /tmp/press1_total_*; do [ -f \"$f\" ] && echo 0 > \"$f\"; done; "
-        "for f in /tmp/press1_started_*; do [ -f \"$f\" ] && echo 0 > \"$f\"; done; "
-        "sleep 2; "
-        "n=$(ps aux 2>/dev/null | grep -c '[b]ash /tmp/press1_dial_' || true); "
+        f"rm -f {ACTIVE_RUN_ID} /tmp/press1_dial_run_id 2>/dev/null || true; "
+        f"{wipe}"
+        "sleep 1; "
+        "n=$(ps aux 2>/dev/null | grep -c '[b]ash /tmp/press1_dial_[0-9]' || true); "
         "bc=$(asterisk -rx 'core show channels concise' 2>/dev/null | grep -ci '^PJSIP/bitcall-' || true); "
         "echo \"dialers=$n bitcall_channels=$bc\"",
         timeout=40,
@@ -513,13 +527,14 @@ def stop_all_dialers(*, hangup_bitcall: bool = True) -> str:
 def prepare_exclusive_campaign(run_id: str) -> None:
     """Ensure no other campaign is running before starting a new /run."""
     rid = _safe_run_token(run_id)
-    stop_all_dialers()
-    if count_campaign_dialers() > 0:
-        stop_all_dialers()
+    # Stop other dialers but keep hoppers intact.
+    stop_all_dialers(hangup_bitcall=False, wipe_leads=False)
+    if count_campaign_dialers(except_run_id=run_id) > 0:
+        stop_all_dialers(hangup_bitcall=False, wipe_leads=False)
         import time
 
         time.sleep(2)
-    if count_campaign_dialers() > 0:
+    if count_campaign_dialers(except_run_id=run_id) > 0:
         raise RuntimeError("Another dialer is still running on the server — try /run again in a few seconds")
     # stop_all touches every stop_* file — clear THIS run's stop/lock so the new dialer can start.
     run_remote(
@@ -2415,23 +2430,30 @@ def _start_dial_script(run_id: str) -> None:
     """Start one campaign dial script detached."""
     import time
 
-    if count_campaign_dialers(except_run_id=run_id) > 0:
-        prepare_exclusive_campaign(run_id)
+    # Kill other campaign dialers without wiping this hopper.
+    others = count_campaign_dialers(except_run_id=run_id)
+    if others > 0:
+        stop_all_dialers(hangup_bitcall=False, wipe_leads=False)
+        time.sleep(1)
     p = _run_paths(run_id)
     rid = _safe_run_token(run_id)
     # Never launch an empty/corrupt script (cap-guard race used to leave 0-byte .sh).
     check = run_remote(
         f"wc -c < {p['script']} 2>/dev/null || echo 0; "
-        f"grep -c 'while IFS' {p['script']} 2>/dev/null || echo 0",
+        f"grep -c 'while IFS' {p['script']} 2>/dev/null || echo 0; "
+        f"wc -l < {p['numbers']} 2>/dev/null || echo 0",
         timeout=15,
     ).strip().splitlines()
     script_bytes = int((check[0] if check else "0").strip() or "0")
     loops = int((check[1] if len(check) > 1 else "0").strip() or "0")
+    nums = int((check[2] if len(check) > 2 else "0").strip() or "0")
     if script_bytes < 200 or loops < 1:
         raise RuntimeError(
             f"Dial script missing or empty on server (bytes={script_bytes}) — "
             "re-upload with /go"
         )
+    if nums <= 0:
+        raise RuntimeError("Hopper empty on server — paste leads and /go again")
     run_remote(f"chmod +x {p['script']}", timeout=15)
     # Clear stop/pause AND release stale flock holders before start.
     run_remote(
