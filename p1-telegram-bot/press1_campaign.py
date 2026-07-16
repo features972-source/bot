@@ -1,6 +1,6 @@
-"""Campaign dashboard formatting, ETA prediction, and progress animation.
+"""Campaign live board — one clean card, scannable on a phone.
 
-All output is Telegram HTML (blockquote cards). See press1_ui for helpers.
+Telegram HTML only. Visual priority: callsign → progress → Live / Answered / Press-1.
 """
 
 from __future__ import annotations
@@ -9,14 +9,16 @@ import time
 
 import press1_ui as ui
 
-_ANIM_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-_PROGRESS_WIDTH = 12
+_PROGRESS_WIDTH = 10
 
 
 def progress_bar(pct: int, width: int = _PROGRESS_WIDTH) -> str:
     pct = max(0, min(100, pct))
     filled = int(round(width * pct / 100))
-    return "■" * filled + "□" * (width - filled)
+    # Always show at least one tick once dialing has started.
+    if pct > 0 and filled == 0:
+        filled = 1
+    return "█" * filled + "░" * (width - filled)
 
 
 def gauge(pct: int, width: int = _PROGRESS_WIDTH) -> str:
@@ -24,7 +26,7 @@ def gauge(pct: int, width: int = _PROGRESS_WIDTH) -> str:
 
 
 def progress_line(pct: int, dialed: int, total: int) -> str:
-    return f"{progress_bar(pct)}  {pct}% {ui.SEP} {dialed}/{total}"
+    return f"{progress_bar(pct)}  <b>{pct}%</b>"
 
 
 def batch_numbers(dialed: int, total: int, batch_size: int) -> tuple[int, int]:
@@ -44,11 +46,8 @@ def animated_batch_line(
     batch_size: int,
     frame: int,
 ) -> str:
-    current, total_batches = batch_numbers(dialed, total, batch_size)
-    if total_batches <= 0:
-        return ""
-    icon = _ANIM_FRAMES[frame % len(_ANIM_FRAMES)]
-    return f"{icon}  batch {current}/{total_batches}"
+    # Intentionally unused in the live card — batch noise made campaigns feel busy.
+    return ""
 
 
 def _format_duration(seconds: float) -> str:
@@ -121,32 +120,31 @@ def predict_eta(
         low = max(press1, int(press1 + remaining_p1 * 0.65))
         high = max(low, int(press1 + remaining_p1 * 1.35) + 1)
         if high > press1:
-            forecast = f"{low}-{high}"
+            forecast = f"{low}–{high}"
         elif press1 > 0:
             forecast = str(press1)
     return eta, forecast
 
 
-def _header(
-    dial_state: str,
-    total: int,
-    finished: bool,
-    *,
-    dialed: int = 0,
-    callsign: str = "",
-) -> str:
-    tag = f"{callsign}  ·  " if callsign else ""
-    if dial_state == "stalled" and dialed <= 0:
-        return f"FAULT  ·  {tag}{total:,} leads"
+def _status_chip(dial_state: str, finished: bool) -> str:
     if finished or dial_state == "finished":
-        return f"CLOSED  ·  {tag}{total:,} leads"
+        return "✓  closed"
     if dial_state == "stalled":
-        return f"STALLED  ·  {tag}{dialed}/{total}"
+        return "⚠  stalled"
     if dial_state == "finishing":
-        return f"FINISHING  ·  {tag}in flight"
+        return "…  wrapping up"
     if dial_state == "paused":
-        return f"PAUSED  ·  {tag}live continue"
-    return f"LIVE  ·  {tag}{total:,} leads"
+        return "⏸  paused"
+    if dial_state == "running":
+        return "●  live"
+    return "○  standby"
+
+
+def _metric(label: str, value: object, detail: str = "") -> str:
+    """Big number row — value first, label soft."""
+    if detail:
+        return f"<b>{ui.esc(value)}</b>  {ui.esc(detail)}\n{ui.muted(label)}"
+    return f"<b>{ui.esc(value)}</b>\n{ui.muted(label)}"
 
 
 def format_campaign_body(
@@ -159,9 +157,12 @@ def format_campaign_body(
     batch_pause: int = 0,
     frame: int = 0,
     finished: bool = False,
+    transfer_label: str = "",
+    max_concurrent: int = 0,
 ) -> str:
     import press1_floor as floor
 
+    _ = frame  # reserved for future soft motion; batch spinner removed
     progress = progress or {}
     total = int(st.get("list_size", 0) or 0) or total_leads
     dialed = int(st.get("dialed", 0) or 0)
@@ -182,35 +183,34 @@ def format_campaign_body(
             reason=floor.tidy_reason(err),
         )
 
-    badge, blurb = floor.heat_label(dialed=dialed, answered=answered, press1=press1)
-    bar = floor.heat_bar(dialed=dialed, answered=answered, press1=press1)
+    title = callsign or "CAMPAIGN"
+    chip = _status_chip(dial_state, finished)
+    mood, mood_blurb = floor.heat_label(dialed=dialed, answered=answered, press1=press1)
 
-    lines: list[str] = [ui.esc(progress_line(pct, dialed, total))]
-    if dialed > 0 or answered > 0 or dial_state == "running":
-        lines.append(ui.esc(f"{badge}  {bar}"))
-        if dialed > 0 or answered > 0:
-            lines.append(ui.muted(blurb))
+    lines: list[str] = [
+        ui.esc(chip),
+        "",
+        progress_line(pct, dialed, total),
+        ui.muted(f"{dialed:,} of {total:,} dialed"),
+        "",
+    ]
 
-    batch_line = animated_batch_line(dialed, total, batch_size, frame)
-    if batch_line and dial_state in ("running", "paused", "finishing") and not finished:
-        lines.append(ui.esc(batch_line))
+    # Hero trio — the only numbers that matter at a glance
+    ans_tail = f"  ·  {answered * 100 / dialed:.0f}%" if dialed > 0 else ""
+    p1_tail = (
+        f"  ·  {press1 * 100 / answered:.1f}% of answers" if answered > 0 else ""
+    )
+    lines.append(f"<b>{live}</b>  live")
+    lines.append(f"<b>{answered}</b>  answered{ui.esc(ans_tail)}")
+    lines.append(f"<b>{press1}</b>  press-1{ui.esc(p1_tail)}")
 
-    lines.append(ui.rule())
-    lines.append(ui.kv("Dialed", f"{dialed:,} / {total:,}"))
-    lines.append(ui.kv("Live", live))
-    lines.append(ui.kv("Waiting", hopper))
-
-    lines.append(ui.rule())
-    if dialed > 0:
-        ans_pct = answered * 100 / dialed
-        p1_pct = press1 * 100 / dialed
-        lines.append(ui.kv("Answered", f"{answered}  ({ans_pct:.0f}%)"))
-        lines.append(ui.kv("Press-1", f"{press1}  ({p1_pct:.1f}%)"))
-    else:
-        lines.append(ui.kv("Answered", answered))
-        lines.append(ui.kv("Press-1", press1))
     if failed > 0:
-        lines.append(ui.kv("Failed", failed))
+        lines.append(f"<b>{failed}</b>  failed")
+
+    # Soft mood — skip harsh "Ice" early noise; only after we have signal
+    if answered >= 3 or press1 > 0:
+        lines.append("")
+        lines.append(ui.muted(f"{mood} · {mood_blurb}"))
 
     eta, forecast = predict_eta(
         dialed=dialed,
@@ -224,16 +224,23 @@ def format_campaign_body(
         batch_pause=batch_pause,
         dial_state=dial_state,
     )
-    if eta and not finished:
-        lines.append(ui.rule())
-        lines.append(ui.kv("ETA", eta))
-    if forecast and not finished:
-        lines.append(ui.kv("P1 forecast", forecast))
 
-    return ui.card(
-        _header(dial_state, total, finished, dialed=dialed, callsign=callsign),
-        lines,
-    )
+    footer_bits: list[str] = []
+    if eta and not finished:
+        footer_bits.append(f"{eta} left")
+    if hopper > 0 and not finished:
+        footer_bits.append(f"{hopper:,} waiting")
+    if forecast and not finished and press1 > 0:
+        footer_bits.append(f"P1 ~{forecast}")
+    route = (transfer_label or "").strip()
+    if route:
+        footer_bits.append(route)
+
+    if footer_bits:
+        lines.append("")
+        lines.append(ui.muted(" · ".join(footer_bits)))
+
+    return ui.card(title, lines)
 
 
 def format_dashboard(
@@ -250,29 +257,33 @@ def format_dashboard(
     frame: int,
     scheduled_count: int = 0,
 ) -> str:
+    """Pinned board — same live card language, no nested SETUP block."""
     progress = progress or {}
     dial_state = st.get("dial_state", "idle")
     total = int(st.get("list_size", 0) or 0) or total_leads
     dialed = int(st.get("dialed", 0) or 0)
     callsign = str((progress or {}).get("callsign") or "")
-    title = f"BOARD  ·  {callsign}" if callsign else "BOARD"
-
     route = transfer_label or "—"
     pace = f"{call_gap:g}s · max {max_concurrent or 40}"
 
     if dial_state == "idle" and total == 0 and dialed == 0:
-        standby_lines = [
-            ui.muted("Standing by"),
-            ui.rule(),
-            ui.kv("Route", route, icon="◈"),
-            ui.kv("Pace", pace),
+        lines = [
+            ui.esc("○  standby"),
+            "",
+            ui.muted(route),
+            ui.muted(pace),
         ]
         if loaded_in_bot > 0:
-            standby_lines.append(ui.kv("Hopper", f"{loaded_in_bot:,} leads", icon="▣"))
+            lines.append("")
+            lines.append(f"<b>{loaded_in_bot:,}</b>  ready to launch")
         if scheduled_count > 0:
-            standby_lines.append(ui.kv("Scheduled", f"{scheduled_count} runs"))
-        standby = ui.card(title, standby_lines)
-        return f"{standby}\n{ui.muted('Load leads · Launch · refreshes every 5s')}"
+            lines.append(ui.muted(f"{scheduled_count} scheduled"))
+        title = callsign or "THE FLOOR"
+        return (
+            ui.card(title, lines)
+            + "\n"
+            + ui.muted("Paste a list · tap Launch")
+        )
 
     body = format_campaign_body(
         st,
@@ -283,17 +294,12 @@ def format_dashboard(
         batch_pause=batch_pause,
         frame=frame,
         finished=dial_state in ("finished", "stalled", "idle") and dialed == 0,
+        transfer_label=transfer_label,
+        max_concurrent=max_concurrent,
     )
-    meta = ui.card(
-        "SETUP",
-        [
-            ui.kv("Route", route, icon="◈"),
-            ui.kv("Pace", pace),
-        ],
-    )
-    footer = (
-        ui.muted("Retry if stalled · Stop to close · 5s refresh")
+    tip = (
+        ui.muted("Tap Retry · or Stop to close")
         if dial_state == "stalled"
-        else ui.muted("5s refresh · Stop to close")
+        else ui.muted("Auto-refreshes · Stop to close")
     )
-    return f"{body}\n{meta}\n{footer}"
+    return f"{body}\n{tip}"

@@ -37,28 +37,30 @@ def fresh_callsign() -> str:
 
 
 def heat_label(*, dialed: int, answered: int, press1: int) -> tuple[str, str]:
-    if answered <= 0 and dialed < 5:
-        return "◌ Quiet", "Waiting for first answers"
+    if answered <= 0 and dialed < 8:
+        return "warming up", "waiting on first answers"
     if answered <= 0:
-        return "○ Silent", "Answers not converting yet"
+        return "quiet", "dials out — no answers yet"
     rate = press1 / answered
     if rate >= 0.18:
-        return "▲ Hot", f"{rate * 100:.1f}% of answers press 1"
+        return "on fire", f"{rate * 100:.0f}% of answers hit 1"
     if rate >= 0.10:
-        return "● Warm", f"{rate * 100:.1f}% press-1 rate"
+        return "strong", f"{rate * 100:.0f}% press-1 rate"
     if rate >= 0.05:
-        return "◉ Steady", f"{rate * 100:.1f}% press-1 rate"
+        return "steady", f"{rate * 100:.0f}% press-1 rate"
     if press1 > 0:
-        return "○ Cool", f"{rate * 100:.1f}% — catching some"
-    return "◌ Ice", "Answers landing, no press-1s yet"
+        return "building", f"{rate * 100:.0f}% — catching some"
+    return "warming up", "answers in — waiting on press-1s"
 
 
 def heat_bar(*, dialed: int, answered: int, press1: int, width: int = 10) -> str:
     if answered <= 0:
-        return "·" * width
+        return "░" * width
     rate = min(1.0, (press1 / answered) / 0.22)
     filled = int(round(width * rate))
-    return "▓" * filled + "░" * (width - filled)
+    if rate > 0 and filled == 0:
+        filled = 1
+    return "█" * filled + "░" * (width - filled)
 
 
 def floor_clock() -> str:
@@ -133,6 +135,8 @@ def pulse_card(
     transfer: str = "",
     loaded: int = 0,
 ) -> str:
+    from press1_campaign import progress_bar
+
     dialed = int(st.get("dialed", 0) or 0)
     answered = int(st.get("answered", 0) or 0)
     press1 = int(st.get("press1", 0) or 0)
@@ -141,75 +145,83 @@ def pulse_card(
     total = int(st.get("list_size", 0) or 0)
     failed = int(st.get("failed", 0) or 0)
     state = str(st.get("dial_state", "idle") or "idle")
-    badge, blurb = heat_label(dialed=dialed, answered=answered, press1=press1)
-    bar = heat_bar(dialed=dialed, answered=answered, press1=press1)
+    mood, blurb = heat_label(dialed=dialed, answered=answered, press1=press1)
     ans_rate = (answered * 100 / dialed) if dialed else 0.0
     p1_of_ans = (press1 * 100 / answered) if answered else 0.0
+    pct = (dialed * 100 // total) if total > 0 else 0
 
-    state_icon = {
-        "running": "●",
-        "paused": "⏸",
-        "stalled": "⚠",
-        "finished": "✓",
-        "finishing": "…",
-    }.get(state, "○")
+    chip = {
+        "running": "●  live",
+        "paused": "⏸  paused",
+        "stalled": "⚠  stalled",
+        "finished": "✓  closed",
+        "finishing": "…  wrapping up",
+    }.get(state, "○  standby")
 
-    title = f"STATUS  ·  {callsign}" if callsign else "STATUS"
-    lines = [
-        ui.esc(f"{badge}  {bar}"),
-        ui.muted(blurb),
-        ui.rule(),
-        ui.kv("State", f"{state_icon} {state}"),
-        ui.kv("Live", live),
-        ui.kv("Dialed", f"{dialed} / {total or '—'}"),
-        ui.kv("Waiting", hopper),
-        ui.rule(),
-        ui.kv("Answer rate", f"{ans_rate:.0f}%"),
-        ui.kv("P1 / answer", f"{p1_of_ans:.1f}%"),
-        ui.kv("Press-1s", press1),
-    ]
+    title = callsign or "STATUS"
+    lines: list[str] = [ui.esc(chip), ""]
+    if total > 0:
+        lines.append(f"{progress_bar(pct)}  <b>{pct}%</b>")
+        lines.append(ui.muted(f"{dialed:,} of {total:,} dialed"))
+        lines.append("")
+    lines.extend(
+        [
+            f"<b>{live}</b>  live",
+            f"<b>{answered}</b>  answered"
+            + (f"  ·  {ans_rate:.0f}%" if dialed else ""),
+            f"<b>{press1}</b>  press-1"
+            + (f"  ·  {p1_of_ans:.1f}% of answers" if answered else ""),
+        ]
+    )
     if failed:
-        lines.append(ui.kv("Failed", failed))
+        lines.append(f"<b>{failed}</b>  failed")
+    if answered >= 3 or press1 > 0:
+        lines.append("")
+        lines.append(ui.muted(f"{mood} · {blurb}"))
+    foot: list[str] = []
+    if hopper:
+        foot.append(f"{hopper:,} waiting")
     if transfer:
-        lines.append(ui.rule())
-        lines.append(ui.kv("Route", transfer, icon="◈"))
+        foot.append(transfer)
     if loaded:
-        lines.append(ui.kv("In bot", f"{loaded} leads", icon="▣"))
+        foot.append(f"{loaded} in bot")
     remaining = max(0, (total or dialed + hopper) - dialed)
     forecast = forecast_line(
         dialed=dialed, answered=answered, press1=press1, remaining=remaining
     )
     if forecast:
-        lines.append(ui.rule())
-        lines.append(ui.muted(forecast))
-    lines.append("")
-    lines.append(ui.muted(f"Floor clock  {floor_clock()}"))
+        foot.append(forecast)
+    if foot:
+        lines.append("")
+        lines.append(ui.muted(" · ".join(foot)))
+    lines.append(ui.muted(floor_clock()))
     return ui.card(title, lines)
 
 
 def hit_alert(*, callsign: str, press1: int, answered: int, lead_hint: str = "") -> str:
     rate = (press1 * 100 / answered) if answered else 0.0
     lines = [
-        ui.kv("Hit", f"#{press1}"),
-        ui.kv("Callsign", callsign or "—"),
-        ui.kv("P1 / answer", f"{rate:.1f}%"),
+        f"<b>#{press1}</b>  press-1",
+        "",
+        ui.muted(callsign or "campaign"),
     ]
+    if answered:
+        lines.append(ui.muted(f"{rate:.0f}% of answers"))
     if lead_hint:
-        lines.append(ui.kv("Lead", lead_hint))
-    lines.extend(["", ui.muted("Transfer path engaged.")])
-    return ui.card("PRESS-1", lines)
+        lines.append(ui.code(lead_hint))
+    return ui.card("HIT", lines)
 
 
 def launch_banner(*, callsign: str, count: int, cap: int, gap: float) -> str:
     return ui.card(
-        "FLOOR OPEN",
+        callsign or "CAMPAIGN",
         [
-            ui.kv("Callsign", callsign),
-            ui.kv("Leads", f"{count:,}"),
-            ui.kv("Ceiling", f"{cap} live"),
-            ui.kv("Pace", f"{gap:g}s gap"),
+            ui.esc("●  opening"),
             "",
-            ui.muted("Watch for PRESS-1 alerts."),
+            f"<b>{count:,}</b>  leads",
+            ui.muted(f"ceiling {cap} · {gap:g}s pace"),
+            "",
+            ui.muted("Press-1s flash here live."),
         ],
     )
 
@@ -227,15 +239,20 @@ def preflight_card(checks: list[tuple[str, bool, str]]) -> str:
 
 def finished_banner(*, callsign: str, dialed: int, answered: int, press1: int) -> str:
     badge, blurb = heat_label(dialed=dialed, answered=answered, press1=press1)
+    ans_rate = (answered * 100 / dialed) if dialed else 0.0
+    p1_of_ans = (press1 * 100 / answered) if answered else 0.0
     return ui.card(
-        "FLOOR CLOSED",
+        callsign or "CLOSED",
         [
-            ui.kv("Callsign", callsign or "—"),
-            ui.kv("Dialed", dialed),
-            ui.kv("Answered", answered),
-            ui.kv("Press-1", press1),
+            ui.esc("✓  closed"),
             "",
-            ui.esc(f"{badge} — {blurb}"),
+            f"<b>{dialed:,}</b>  dialed",
+            f"<b>{answered}</b>  answered"
+            + (f"  ·  {ans_rate:.0f}%" if dialed else ""),
+            f"<b>{press1}</b>  press-1"
+            + (f"  ·  {p1_of_ans:.1f}% of answers" if answered else ""),
+            "",
+            ui.muted(f"{badge} · {blurb}"),
         ],
     )
 

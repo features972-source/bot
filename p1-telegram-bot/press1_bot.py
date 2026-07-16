@@ -363,21 +363,6 @@ async def _safe_edit(msg: Message, text: str) -> None:
     )
 
 
-_STATE_LABELS = {
-    "running": "🟢 Dialling",
-    "paused": "⏸ Paused — live calls continue",
-    "finishing": "🟡 Finishing — calls in flight",
-    "finished": "✅ Finished",
-    "stalled": "⚠️ Stopped early",
-    "idle": "⚪ Idle",
-}
-
-
-def _state_line(st: dict[str, str]) -> str:
-    label = _STATE_LABELS.get(st.get("dial_state", ""), "⚪ Unknown")
-    return f"<i>{ui.esc(label)}</i>"
-
-
 _PACING_CACHE: dict[str, object] = {"at": 0.0, "data": {}}
 
 
@@ -421,7 +406,7 @@ async def _format_live_stats(
     prog = progress or {}
     pacing = _pacing(int(prog.get("chat_id", 0) or 0) or None)
     frame = int(prog.get("_frame", 0) or 0)
-    body = campaign.format_campaign_body(
+    return campaign.format_campaign_body(
         st,
         total_leads,
         progress=prog,
@@ -430,11 +415,9 @@ async def _format_live_stats(
         batch_pause=pacing["batch_pause"],
         frame=frame,
         finished=finished,
+        transfer_label=str(pacing.get("transfer_label") or ""),
+        max_concurrent=int(pacing.get("max_concurrent") or 0),
     )
-    dial_state = st.get("dial_state", "")
-    if not finished and dial_state not in ("finished", "stalled"):
-        body += f"\n{_state_line(st)}"
-    return body
 
 
 def _warn(text: str) -> str:
@@ -442,38 +425,12 @@ def _warn(text: str) -> str:
 
 
 async def _format_status(st: dict[str, str], loaded_in_bot: int) -> str:
-    total = int(st.get("list_size", 0) or 0)
-    dialed = int(st.get("dialed", 0) or 0)
-    answered = int(st.get("answered", 0) or 0)
-    press1 = int(st.get("press1", 0) or 0)
-    waiting = int(st.get("hopper", 0) or 0)
-    live = int(st.get("live", 0) or 0)
-    failed = int(st.get("failed", 0) or 0)
-    pct = (dialed * 100 // total) if total > 0 else 0
-    lines = [
-        ui.esc(campaign.progress_line(pct, dialed, total)),
-        ui.rule(),
-        ui.kv("List", total),
-        ui.kv("Dialed", dialed),
-        ui.kv("Live", live),
-        ui.kv("Waiting", waiting),
-        ui.rule(),
-    ]
-    if dialed > 0:
-        ans_pct = answered * 100 / dialed
-        p1_pct = press1 * 100 / dialed
-        lines.append(ui.kv("Answered", f"{answered}  ({ans_pct:.0f}%)"))
-        lines.append(ui.kv("Press-1", f"{press1}  ({p1_pct:.1f}%)"))
-    else:
-        lines.append(ui.kv("Answered", answered))
-        lines.append(ui.kv("Press-1", press1))
-    if failed > 0:
-        lines.append(ui.kv("Failed", failed))
-    if loaded_in_bot != total:
-        lines.append(ui.kv("In bot", loaded_in_bot))
-    lines.append("")
-    lines.append(_state_line(st))
-    return ui.card("STATUS", lines)
+    pacing = _pacing()
+    return floor.pulse_card(
+        st,
+        transfer=str(pacing.get("transfer_label") or ""),
+        loaded=loaded_in_bot,
+    )
 
 
 async def _live_campaign_updater(
