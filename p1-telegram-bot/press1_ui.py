@@ -85,10 +85,10 @@ def error(message: object) -> str:
 
 def deny() -> str:
     return card(
-        "THE FLOOR",
+        "Press-1",
         [
-            muted("No seat on this floor."),
+            muted("You do not have access."),
             "",
-            "Ask an owner for access, then try /start again.",
+            "Ask an owner for a key, then try /start again.",
         ],
     )

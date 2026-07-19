@@ -1,7 +1,4 @@
-"""Campaign live board — one clean card, scannable on a phone.
-
-Telegram HTML only. Visual priority: callsign → progress → Live / Answered / Press-1.
-"""
+"""Campaign live board — plain numbers, easy to scan on a phone."""
 
 from __future__ import annotations
 
@@ -15,7 +12,6 @@ _PROGRESS_WIDTH = 10
 def progress_bar(pct: int, width: int = _PROGRESS_WIDTH) -> str:
     pct = max(0, min(100, pct))
     filled = int(round(width * pct / 100))
-    # Always show at least one tick once dialing has started.
     if pct > 0 and filled == 0:
         filled = 1
     return "█" * filled + "░" * (width - filled)
@@ -26,6 +22,7 @@ def gauge(pct: int, width: int = _PROGRESS_WIDTH) -> str:
 
 
 def progress_line(pct: int, dialed: int, total: int) -> str:
+    _ = dialed, total
     return f"{progress_bar(pct)}  <b>{pct}%</b>"
 
 
@@ -46,7 +43,7 @@ def animated_batch_line(
     batch_size: int,
     frame: int,
 ) -> str:
-    # Intentionally unused in the live card — batch noise made campaigns feel busy.
+    _ = dialed, total, batch_size, frame
     return ""
 
 
@@ -114,39 +111,43 @@ def predict_eta(
         return None, None
     eta = f"~{_format_duration(hopper / rate)}"
     forecast = None
-    if dialed >= 10 and press1 >= 0:
+    if dialed >= 10 and press1 > 0:
         p1_rate = press1 / dialed
         remaining_p1 = hopper * p1_rate
         low = max(press1, int(press1 + remaining_p1 * 0.65))
         high = max(low, int(press1 + remaining_p1 * 1.35) + 1)
         if high > press1:
             forecast = f"{low}–{high}"
-        elif press1 > 0:
+        else:
             forecast = str(press1)
     return eta, forecast
 
 
 def _status_chip(dial_state: str, finished: bool, frame: int = 0) -> str:
-    import press1_fx as fx
-
+    _ = frame
     if finished or dial_state == "finished":
-        return "✓  closed"
+        return "✓  done"
     if dial_state == "stalled":
-        return "⚠  stalled"
+        return "⚠  stopped"
     if dial_state == "finishing":
-        return "…  wrapping up"
+        return "…  finishing"
     if dial_state == "paused":
         return "⏸  paused"
     if dial_state == "running":
-        return f"{fx.live_pulse(frame)}  live"
-    return "○  standby"
+        return "●  live"
+    return "○  idle"
 
 
-def _metric(label: str, value: object, detail: str = "") -> str:
-    """Big number row — value first, label soft."""
-    if detail:
-        return f"<b>{ui.esc(value)}</b>  {ui.esc(detail)}\n{ui.muted(label)}"
-    return f"<b>{ui.esc(value)}</b>\n{ui.muted(label)}"
+def _run_title(progress: dict) -> str:
+    import press1_floor as floor
+
+    label = str(progress.get("callsign") or "").strip()
+    if label.startswith("Run"):
+        return label
+    return floor.run_label(
+        run_since=str(progress.get("run_since") or ""),
+        run_id=str(progress.get("run_id") or ""),
+    )
 
 
 def format_campaign_body(
@@ -163,8 +164,8 @@ def format_campaign_body(
     max_concurrent: int = 0,
 ) -> str:
     import press1_floor as floor
-    import press1_fx as fx
 
+    _ = frame, max_concurrent
     progress = progress or {}
     total = int(st.get("list_size", 0) or 0) or total_leads
     dialed = int(st.get("dialed", 0) or 0)
@@ -174,38 +175,26 @@ def format_campaign_body(
     live = int(st.get("live", 0) or 0)
     failed = int(st.get("failed", 0) or 0)
     dial_state = st.get("dial_state", "")
-    callsign = str(progress.get("callsign") or "")
     err = str(progress.get("error") or "").strip()
     pct = (dialed * 100 // total) if total > 0 else 0
 
     if dial_state == "stalled" and dialed <= 0:
         return floor.fail_card(
-            callsign=callsign,
             total=total or total_leads,
             reason=floor.tidy_reason(err),
         )
 
-    title = callsign or "CAMPAIGN"
-    chip = _status_chip(dial_state, finished, frame=frame)
-    mood, mood_blurb = floor.heat_label(dialed=dialed, answered=answered, press1=press1)
-    incline = fx.record_incline(progress, answered=answered, press1=press1)
-    spark = fx.incline_spark(incline)
-
-    bar = (
-        fx.progress_shimmer(pct, frame)
-        if dial_state == "running" and not finished
-        else progress_bar(pct)
-    )
+    title = _run_title(progress)
+    chip = _status_chip(dial_state, finished)
 
     lines: list[str] = [
         ui.esc(chip),
         "",
-        f"{bar}  <b>{pct}%</b>",
+        f"{progress_bar(pct)}  <b>{pct}%</b>",
         ui.muted(f"{dialed:,} of {total:,} dialed"),
         "",
     ]
 
-    # Hero trio — the only numbers that matter at a glance
     ans_tail = f"  ·  {answered * 100 / dialed:.0f}%" if dialed > 0 else ""
     p1_tail = (
         f"  ·  {press1 * 100 / answered:.1f}% of answers" if answered > 0 else ""
@@ -213,16 +202,9 @@ def format_campaign_body(
     lines.append(f"<b>{live}</b>  live")
     lines.append(f"<b>{answered}</b>  answered{ui.esc(ans_tail)}")
     lines.append(f"<b>{press1}</b>  press-1{ui.esc(p1_tail)}")
-    if spark and (answered >= 2 or press1 > 0):
-        lines.append(ui.muted(f"incline  {spark}"))
 
     if failed > 0:
         lines.append(f"<b>{failed}</b>  failed")
-
-    # Soft mood — skip harsh early noise; only after we have signal
-    if answered >= 3 or press1 > 0:
-        lines.append("")
-        lines.append(ui.muted(f"{mood} · {mood_blurb}"))
 
     eta, forecast = predict_eta(
         dialed=dialed,
@@ -242,7 +224,7 @@ def format_campaign_body(
         footer_bits.append(f"{eta} left")
     if hopper > 0 and not finished:
         footer_bits.append(f"{hopper:,} waiting")
-    if forecast and not finished and press1 > 0:
+    if forecast and not finished:
         footer_bits.append(f"P1 ~{forecast}")
     route = (transfer_label or "").strip()
     if route:
@@ -269,18 +251,17 @@ def format_dashboard(
     frame: int,
     scheduled_count: int = 0,
 ) -> str:
-    """Pinned board — same live card language, no nested SETUP block."""
+    """Pinned board — same language as the live campaign card."""
     progress = progress or {}
     dial_state = st.get("dial_state", "idle")
     total = int(st.get("list_size", 0) or 0) or total_leads
     dialed = int(st.get("dialed", 0) or 0)
-    callsign = str((progress or {}).get("callsign") or "")
     route = transfer_label or "—"
     pace = f"{call_gap:g}s · max {max_concurrent or 40}"
 
     if dial_state == "idle" and total == 0 and dialed == 0:
         lines = [
-            ui.esc("○  standby"),
+            ui.esc("○  idle"),
             "",
             ui.muted(route),
             ui.muted(pace),
@@ -290,12 +271,7 @@ def format_dashboard(
             lines.append(f"<b>{loaded_in_bot:,}</b>  ready to launch")
         if scheduled_count > 0:
             lines.append(ui.muted(f"{scheduled_count} scheduled"))
-        title = callsign or "THE FLOOR"
-        return (
-            ui.card(title, lines)
-            + "\n"
-            + ui.muted("Paste a list · tap Launch")
-        )
+        return ui.card("Press-1", lines) + "\n" + ui.muted("Paste a list · tap Launch")
 
     body = format_campaign_body(
         st,
@@ -310,8 +286,8 @@ def format_dashboard(
         max_concurrent=max_concurrent,
     )
     tip = (
-        ui.muted("Tap Retry · or Stop to close")
+        ui.muted("Tap Retry · or Stop")
         if dial_state == "stalled"
-        else ui.muted("Live board · Stop to close")
+        else ui.muted("Stop to close")
     )
     return f"{body}\n{tip}"

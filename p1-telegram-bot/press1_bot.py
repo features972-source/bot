@@ -109,81 +109,63 @@ def _floor_pad(
     chat_id: int | None = None,
     frame: int = 0,
 ) -> InlineKeyboardMarkup:
-    """Contextual operator pad — only the buttons that matter right now."""
+    """Contextual pad — only the buttons that matter right now."""
+    _ = frame
     m = _pad_mode_for(app, chat_id, show_retry=show_retry, mode=mode)
 
     if m == "live":
-        pulse = fx.live_pulse(frame)
-        rows = [
+        return InlineKeyboardMarkup(
             [
-                InlineKeyboardButton("⏸  Pause", callback_data="floor:pause"),
-                InlineKeyboardButton("■  Stop", callback_data="floor:stop"),
-            ],
-            [
-                InlineKeyboardButton(f"{pulse}  Status", callback_data="floor:pulse"),
-                InlineKeyboardButton("◈  Route", callback_data="floor:settings"),
-            ],
-        ]
-        return InlineKeyboardMarkup(rows)
+                [
+                    InlineKeyboardButton("⏸  Pause", callback_data="floor:pause"),
+                    InlineKeyboardButton("■  Stop", callback_data="floor:stop"),
+                ],
+            ]
+        )
 
     if m == "paused":
-        rows = [
+        return InlineKeyboardMarkup(
             [
-                InlineKeyboardButton("▶  Resume", callback_data="floor:unpause"),
-                InlineKeyboardButton("■  Stop", callback_data="floor:stop"),
-            ],
-            [
-                InlineKeyboardButton("●  Status", callback_data="floor:pulse"),
-                InlineKeyboardButton("◈  Route", callback_data="floor:settings"),
-            ],
-        ]
-        return InlineKeyboardMarkup(rows)
+                [
+                    InlineKeyboardButton("▶  Resume", callback_data="floor:unpause"),
+                    InlineKeyboardButton("■  Stop", callback_data="floor:stop"),
+                ],
+            ]
+        )
 
     if m == "fault":
-        rows = [
-            [InlineKeyboardButton("↻  Retry", callback_data="floor:retry")],
+        return InlineKeyboardMarkup(
             [
-                InlineKeyboardButton("▶  Launch", callback_data="floor:go"),
-                InlineKeyboardButton("■  Stop", callback_data="floor:stop"),
-            ],
-            [
-                InlineKeyboardButton("●  Status", callback_data="floor:pulse"),
-                InlineKeyboardButton("◈  Route", callback_data="floor:settings"),
-            ],
-        ]
-        return InlineKeyboardMarkup(rows)
+                [
+                    InlineKeyboardButton("↻  Retry", callback_data="floor:retry"),
+                    InlineKeyboardButton("■  Stop", callback_data="floor:stop"),
+                ],
+            ]
+        )
 
-    # idle / default
-    rows = [
-        [
-            InlineKeyboardButton("▶  Launch", callback_data="floor:go"),
-            InlineKeyboardButton("●  Status", callback_data="floor:pulse"),
-        ],
-        [
-            InlineKeyboardButton("☎  Test", callback_data="floor:test"),
-            InlineKeyboardButton("◈  Route", callback_data="floor:settings"),
-        ],
-        [
-            InlineKeyboardButton("♫  Audio", callback_data="floor:audio"),
-            InlineKeyboardButton("⌘  Menu", callback_data="floor:menu"),
-        ],
-    ]
-    return InlineKeyboardMarkup(rows)
-
-
-def _menu_pad() -> InlineKeyboardMarkup:
+    # idle / default — home actions only
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("🎛  Pin board", callback_data="floor:dash"),
-                InlineKeyboardButton("📅  Schedules", callback_data="floor:schedules"),
+                InlineKeyboardButton("▶  Launch", callback_data="floor:go"),
+                InlineKeyboardButton("☎  Test", callback_data="floor:test"),
             ],
             [
-                InlineKeyboardButton("🧹  Clear leads", callback_data="floor:clear"),
-                InlineKeyboardButton("◀  Back", callback_data="floor:home"),
+                InlineKeyboardButton("◈  Route", callback_data="floor:settings"),
+                InlineKeyboardButton("♫  Audio", callback_data="floor:audio"),
+            ],
+            [
+                InlineKeyboardButton("📌  Pin board", callback_data="floor:dash"),
+                InlineKeyboardButton("🧹  Clear", callback_data="floor:clear"),
             ],
         ]
     )
+
+
+def _menu_pad() -> InlineKeyboardMarkup:
+    """Unused legacy menu — home pad covers these actions now."""
+    return _floor_pad(mode="idle")
+
 
 
 @dataclass
@@ -1223,7 +1205,7 @@ async def _resume_dashboards(app: Application) -> None:
         user_id = int(d.get("user_id", 0) or 0)
         if not chat_id or not message_id:
             continue
-        ok = await _safe_edit_id(app, chat_id, message_id, "🎛  Reconnecting control room…")
+        ok = await _safe_edit_id(app, chat_id, message_id, "Reconnecting…")
         if not ok:
             continue
         _start_dashboard_task(app, chat_id, message_id, user_id)
@@ -1253,7 +1235,7 @@ async def _launch_campaign(
     pacing = _pacing(chat_id)
     dialer_cap = max(1, min(int(pacing.get("max_concurrent") or vd.DIALER_CONCURRENT_CAP or 40), 55))
     call_gap = max(0.15, float(pacing.get("call_gap") or vd.CALL_GAP_SEC or 0.2))
-    callsign = floor.fresh_callsign()
+    callsign = floor.run_label()
     # Re-bind this chat's transfer/audio before dialing (matches /testcall path).
     try:
         await asyncio.to_thread(vd.apply_run_config, vd.chat_cfg_run_id(chat_id), chat_id)
@@ -1507,7 +1489,7 @@ async def _preflight_checks(chat_id: int, lead_count: int) -> list[tuple[str, bo
 
 
 async def cmd_go(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Preflight the stack, then launch — the signature THE FLOOR start."""
+    """Preflight the stack, then launch."""
     if not await guard(update, context):
         return
     msg = update.effective_message
@@ -1548,19 +1530,19 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     progress = chat_progress(context.application, chat_id) or {
         "chat_id": chat_id,
         "owner_id": user_id,
-        "callsign": floor.fresh_callsign(),
+        "callsign": floor.run_label(),
         "dialer_cap": max(1, min(int(pacing.get("max_concurrent") or vd.DIALER_CONCURRENT_CAP or 40), 55)),
         "call_gap_sec": max(0.15, float(pacing.get("call_gap") or vd.CALL_GAP_SEC or 0.2)),
     }
-    if not progress.get("callsign"):
-        progress["callsign"] = floor.fresh_callsign()
+    if not progress.get("callsign") or not str(progress.get("callsign")).startswith("Run"):
+        progress["callsign"] = floor.run_label()
     status = await msg.reply_text("Rewriting dial script…")
     try:
         info = await asyncio.to_thread(vd.repair_and_restart_run, chat_id, progress)
         set_chat_progress(context.application, chat_id, progress)
-        callsign = str(progress.get("callsign") or "")
+        callsign = str(progress.get("callsign") or floor.run_label())
         text = floor.launch_banner(
-            callsign=callsign or "RETRY",
+            callsign=callsign,
             count=int(info["leads"]),
             cap=int(info["cap"]),
             gap=float(info["gap"]),
@@ -1661,13 +1643,7 @@ async def on_floor_pad(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.answer("Audio")
         await cmd_audio(update, context)
         return
-    if action == "menu":
-        await query.answer()
-        target = query.message
-        if target:
-            await target.reply_text(HELP, reply_markup=_menu_pad())
-        return
-    if action == "home":
+    if action == "menu" or action == "home":
         await query.answer()
         s = session_for(update, context)
         transfer = ""
@@ -1675,11 +1651,12 @@ async def on_floor_pad(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             transfer = str(_pacing(chat_id).get("transfer_label") or "")
         except Exception:
             pass
+        text = floor.welcome_card(transfer=transfer, loaded=len(s.numbers))
         if query.message:
-            await query.message.reply_text(
-                floor.welcome_card(transfer=transfer, loaded=len(s.numbers)),
-                reply_markup=_floor_pad(mode="idle"),
-            )
+            try:
+                await query.message.edit_text(text, reply_markup=_floor_pad(mode="idle"))
+            except Exception:
+                await query.message.reply_text(text, reply_markup=_floor_pad(mode="idle"))
         return
     if action == "schedules":
         await query.answer("Schedules")
@@ -2023,25 +2000,15 @@ async def post_init(app: Application) -> None:
         print(f"[press1] webhook active: {webhook_url}")
     await app.bot.set_my_commands(
         [
-            BotCommand("start", "Open THE FLOOR"),
-            BotCommand("go", "Preflight + launch"),
-            BotCommand("pulse", "Live status"),
+            BotCommand("start", "Home"),
+            BotCommand("go", "Launch"),
             BotCommand("stop", "Stop campaign"),
             BotCommand("pause", "Pause dialing"),
-            BotCommand("unpause", "Resume dialing"),
-            BotCommand("retry", "Restart failed hopper"),
-            BotCommand("testcall", "Ring your test phone"),
+            BotCommand("unpause", "Resume"),
+            BotCommand("testcall", "Ring test phone"),
             BotCommand("settings", "Transfer route"),
             BotCommand("audio", "Change IVR"),
-            BotCommand("dashboard", "Pin live board"),
-            BotCommand("leads", "Hopper count"),
             BotCommand("clear", "Clear leads"),
-            BotCommand("schedule", "Schedule a run"),
-            BotCommand("schedules", "Upcoming runs"),
-            BotCommand("testnumber", "Set test mobile"),
-            BotCommand("addkey", "Grant access"),
-            BotCommand("listkeys", "List access"),
-            BotCommand("repair", "Re-sync dial stack"),
         ]
     )
     try:
