@@ -1830,10 +1830,22 @@ def ensure_dtmf_listener() -> str:
     """
     listener = Path(__file__).with_name("AST_press1_dtmf.pl")
     audio = Path(__file__).with_name("press1_audio_dtmf.py")
+    remote_pl = "/usr/share/astguiclient/AST_press1_dtmf.pl"
+    remote_audio = "/usr/share/astguiclient/press1_audio_dtmf.py"
+    remote_has_pl = (
+        run_remote(f"test -f {remote_pl} && echo yes || echo no", timeout=15).strip()
+        == "yes"
+    )
+    remote_has_audio = (
+        run_remote(f"test -f {remote_audio} && echo yes || echo no", timeout=15).strip()
+        == "yes"
+    )
     if not listener.is_file():
-        raise RuntimeError("AST_press1_dtmf.pl missing next to vicidial_client.py")
+        if not remote_has_pl:
+            raise RuntimeError("AST_press1_dtmf.pl missing next to vicidial_client.py")
     if not audio.is_file():
-        raise RuntimeError("press1_audio_dtmf.py missing next to vicidial_client.py")
+        if not remote_has_audio:
+            raise RuntimeError("press1_audio_dtmf.py missing next to vicidial_client.py")
     unit = """[Unit]
 Description=P1 Press-1 DTMF AMI listener
 After=network.target asterisk.service
@@ -1866,8 +1878,6 @@ StandardError=append:/var/log/astguiclient/press1_audio_dtmf.log
 [Install]
 WantedBy=multi-user.target
 """
-    remote_pl = "/usr/share/astguiclient/AST_press1_dtmf.pl"
-    remote_audio = "/usr/share/astguiclient/press1_audio_dtmf.py"
     remote_unit = "/etc/systemd/system/press1-dtmf.service"
     remote_audio_unit = "/etc/systemd/system/press1-audio-dtmf.service"
     with ssh_connect() as client:
@@ -1878,8 +1888,10 @@ WantedBy=multi-user.target
             f"$(dirname {DTMF_EVENTS_FILE})",
             timeout=20,
         )
-        sftp.put(str(listener), remote_pl)
-        sftp.put(str(audio), remote_audio)
+        if listener.is_file():
+            sftp.put(str(listener), remote_pl)
+        if audio.is_file():
+            sftp.put(str(audio), remote_audio)
         with sftp.file(remote_unit, "w") as fh:
             fh.write(unit)
         with sftp.file(remote_audio_unit, "w") as fh:

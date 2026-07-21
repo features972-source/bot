@@ -19,5 +19,4 @@ __pycache__/
 .venv/
 venv/
 
-press1_audio_dtmf.py
-AST_press1_dtmf.pl
+# press1_audio_dtmf.py and AST_press1_dtmf.pl must ship in the image for /repair and test calls
